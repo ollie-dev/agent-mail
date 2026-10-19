@@ -1,0 +1,3 @@
+# Rust, not Bun/TypeScript
+
+We started out wanting a Bun/TS project with few node modules, but chose Rust and ship agent-mail as a single native binary. Hiding Credentials depends on the OS credential store trusting exactly our binary, and Bun undermines that: under `bun run` a Keychain item stored with `Bun.secrets` trusts the bun runtime itself, so any `bun -e` one-liner reads it without a prompt; `bun build --compile` binaries were killed at launch on macOS 27 (Bun 1.3.13); and on Windows Bun cannot run as a service or set named-pipe security descriptors without FFI. Rust gives a small self-contained binary whose signature the Keychain can bind to, with no runtime dependencies.
