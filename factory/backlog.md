@@ -2,6 +2,21 @@
 
 `/factory next` runs the first unchecked item and ticks it off. Add one feature per line.
 
-- [ ] Project skeleton: pick a language and test runner, add an `agent-mail --version` CLI command, and record the stack and test command in CLAUDE.md
-- [ ] Credential store: `agent-mail account add` saves IMAP/SMTP credentials encrypted at rest and never prints them back
-- [ ] Agent access policy: a config file listing which mailboxes each agent may read and whether it may send, denying everything else
+- [ ] Ticket 01: Project skeleton (.scratch/agent-mail-v1/issues/01-project-skeleton.md)
+- [ ] Ticket 02: Tracer bullet: an Agent lists its granted mailboxes (.scratch/agent-mail-v1/issues/02-tracer-list-mailboxes.md)
+- [ ] Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md)
+- [ ] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md)
+- [ ] Ticket 05: Export a Mandate's choices and re-create from file (.scratch/agent-mail-v1/issues/05-mandate-export-from.md)
+- [ ] Ticket 06: Audit log (.scratch/agent-mail-v1/issues/06-audit-log.md)
+- [ ] Ticket 07: Search messages (.scratch/agent-mail-v1/issues/07-search.md)
+- [ ] Ticket 08: Read a message (.scratch/agent-mail-v1/issues/08-read.md)
+- [ ] Ticket 09: Set and clear read and starred flags (.scratch/agent-mail-v1/issues/09-flag.md)
+- [ ] Ticket 10: Move a message between granted mailboxes (.scratch/agent-mail-v1/issues/10-move.md)
+- [ ] Ticket 11: Create drafts, including replies (.scratch/agent-mail-v1/issues/11-draft.md)
+- [ ] Ticket 12: Gmail search syntax and opt-in live Gmail test (.scratch/agent-mail-v1/issues/12-gmail-search-live-test.md)
+- [ ] Ticket 13: Several Mandates per Agent and `whoami` (.scratch/agent-mail-v1/issues/13-multiple-tokens-whoami.md)
+- [ ] Ticket 14: Work inside the Claude Code sandbox via its proxy (.scratch/agent-mail-v1/issues/14-sandbox-proxy.md)
+- [ ] Ticket 15: MCP server with all Agent commands (.scratch/agent-mail-v1/issues/15-mcp-server.md)
+- [ ] Ticket 16: Hardened-runtime self-check and release pipeline (.scratch/agent-mail-v1/issues/16-self-check-release.md)
+- [ ] Ticket 17: Claude Code plugin and README (.scratch/agent-mail-v1/issues/17-plugin-readme.md)
+- [ ] Ticket 18: Windows milestone (.scratch/agent-mail-v1/issues/18-windows.md)

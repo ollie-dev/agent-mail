@@ -1,0 +1,3 @@
+# No background service: each call enforces the Policy itself
+
+agent-mail runs only as a CLI command or as an MCP server started by the agent's host app; there is no always-running service under a separate OS account. Each invocation reads the Credential and Policy from the OS credential store and enforces the Policy in-process. We rejected a separate-account broker because a resident service on every PC was unwanted, accepting the consequence: protection against a hijacked Agent rests on the OS credential store binding secrets to the agent-mail binary. That holds on macOS (Keychain ACL); on Windows, Credential Manager and DPAPI let any process of the same user decrypt, so Windows v1 protects only against honest Agents.

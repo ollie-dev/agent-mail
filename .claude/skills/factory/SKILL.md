@@ -116,7 +116,7 @@ From `ROOT`:
 
 1. `git merge --no-ff factory/<id> -m "factory: merge <id>"`. On conflict: `git merge --abort`, stage `needs-human`, reason `merge conflict with main`, stop.
 2. `git worktree remove .worktrees/<id>` and `git branch -d factory/<id>`.
-3. Stage `merged`, then commit the job's records: `git add factory && git commit -m "factory: <id> records"`.
+3. Stage `merged`. If the job's feature names a ticket file (`.scratch/<feature>/issues/NN-<slug>.md`), set its `**Status:**` line to `done` in `ROOT`. Then commit the job's records: `git add factory .scratch && git commit -m "factory: <id> records"`.
 4. Report to the user: the job id, rounds taken, and the merge commit. Push only if the user asks.
 
 ## Rework

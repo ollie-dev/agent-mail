@@ -1,0 +1,3 @@
+# Mandates are immutable; creating one requires every Credential
+
+There is no command to edit a Policy or Credential. To change anything, the human creates a new Mandate, which requires typing every covered Account's Credential and passes a live login to each. Because the Credential is hidden from Agents (ADR-0002), knowing it is the admin check: an Agent can run the same binary but cannot mint a broader Mandate. For this to hold, a Mandate's Credentials, Policy and Agent Token hash are stored as one sealed item, encrypted under a key derived from its Agent Token, so a forged Policy cannot be paired with a real Credential. Agents can still delete a Mandate; that only removes access and is accepted.
