@@ -28,4 +28,4 @@ VERDICT: CHANGES
 - [nit] path:line: optional improvement.
 ```
 
-Use CHANGES only when at least one finding is `[blocking]`; nits ride along with a PASS. Done when you have read every changed line and run the tests. Reply with the verdict line.
+Use CHANGES only when at least one finding is `[blocking]`; nits ride along with a PASS. Done when you have read every changed line and run the tests. Write the file first, then reply with its first line.
