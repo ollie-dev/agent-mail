@@ -17,6 +17,8 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+# Compile out all log calls: async-imap traces raw commands, including LOGIN.
+log = { version = "0.4", features = ["max_level_off", "release_max_level_off"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"

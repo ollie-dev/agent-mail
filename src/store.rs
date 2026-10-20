@@ -37,9 +37,8 @@ pub use memory::InMemoryStore;
 #[cfg(any(test, feature = "test-support"))]
 mod memory {
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
-
     use std::fmt;
+    use std::sync::Mutex;
 
     use super::{MandateStore, StoreError};
 
