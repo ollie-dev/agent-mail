@@ -5,7 +5,7 @@
 - Language: Rust, one binary crate (see `docs/adr/0001-rust-not-bun.md`)
 - Test: `cargo test`
 - Lint: `cargo clippy -- -D warnings` and `cargo fmt --check`
-- Source and test layout: set by ticket 01 (`.scratch/agent-mail-v1/issues/01-project-skeleton.md`), which records it here
+- Source and test layout: one Cargo package `agent-mail` at the repo root (`Cargo.toml`, committed `Cargo.lock`); `src/main.rs` is the thin binary entry point that parses arguments and hands off; `src/lib.rs` is the library target holding the CLI definition, the core and the adapters, so tests can drive them in-process; `tests/` holds integration tests, one file per area (`tests/cli.rs`, `tests/project.rs`)
 
 ## Conventions
 

@@ -1,0 +1,9 @@
+[package]
+name = "agent-mail"
+version = "0.1.0"
+edition = "2024"
+description = "Gives AI agents mandate-scoped access to a mailbox"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
