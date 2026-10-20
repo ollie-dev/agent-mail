@@ -5,5 +5,28 @@ edition = "2024"
 description = "Lets AI agents work with email while keeping mail credentials out of their hands"
 publish = false
 
+[features]
+default = []
+# Compiles test-only code: the in-memory store and the extra-trust-roots hook
+# for the fake IMAP server. Never enabled in a release build.
+test-support = []
+
 [dependencies]
+async-channel = "2"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[dev-dependencies]
+agent-mail = { path = ".", features = ["test-support"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde_json = "1"
