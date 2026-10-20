@@ -2,7 +2,7 @@
 name = "agent-mail"
 version = "0.1.0"
 edition = "2024"
-description = "Gives AI agents mandate-scoped access to a mailbox"
+description = "Lets AI agents work with email while keeping mail credentials out of their hands"
 publish = false
 
 [dependencies]
