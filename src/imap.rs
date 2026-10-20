@@ -41,6 +41,72 @@ impl std::fmt::Debug for TlsTrust {
     }
 }
 
+/// How the connector reaches servers: the TLS trust and, in test builds only,
+/// host rewrites that send a preset host such as `imap.gmail.com` to a fake
+/// server. TLS still verifies the Account's own host name.
+#[derive(Clone, Default, Debug)]
+pub struct Network {
+    trust: TlsTrust,
+    #[cfg(any(test, feature = "test-support"))]
+    routes: Vec<Route>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug)]
+struct Route {
+    from: (String, u16),
+    to: (String, u16),
+}
+
+/// Marker that a release build must not contain (checked by a test).
+#[cfg(any(test, feature = "test-support"))]
+pub const ROUTE_MARKER: &str = "agent-mail-connect-override";
+
+/// Keeps the marker bytes in every binary the override is compiled into.
+#[cfg(any(test, feature = "test-support"))]
+#[used]
+static ROUTE_MARKER_BYTES: [u8; ROUTE_MARKER.len()] = *b"agent-mail-connect-override";
+
+impl Network {
+    /// Direct connections, verified by the operating system.
+    pub fn platform() -> Self {
+        Self::default()
+    }
+
+    /// Direct connections trusting only `roots`. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trusting_only(roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> Self {
+        Self {
+            trust: TlsTrust::OnlyRoots(roots),
+            routes: Vec::new(),
+        }
+    }
+
+    /// Connects to `to_host:to_port` whenever an Account names
+    /// `host:port`. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_route(mut self, host: &str, port: u16, to_host: &str, to_port: u16) -> Self {
+        self.routes.push(Route {
+            from: (host.to_string(), port),
+            to: (to_host.to_string(), to_port),
+        });
+        self
+    }
+
+    /// Where to open the TCP connection for `host:port`.
+    fn target(&self, host: &str, port: u16) -> (String, u16) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(route) = self
+            .routes
+            .iter()
+            .find(|r| r.from.0.eq_ignore_ascii_case(host) && r.from.1 == port)
+        {
+            return route.to.clone();
+        }
+        (host.to_string(), port)
+    }
+}
+
 /// Why talking to the IMAP server failed. Never carries a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImapError {
@@ -56,14 +122,15 @@ pub enum ImapError {
     Protocol,
 }
 
-/// Lists every mailbox on the Account, raw (modified UTF-7) names in server order.
-pub fn list_mailboxes(account: &Account, trust: &TlsTrust) -> Result<Vec<String>, ImapError> {
+/// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
+/// in server order. Doubles as the live login check of the guided setup.
+pub fn list_mailboxes(account: &Account, network: &Network) -> Result<Vec<String>, ImapError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| ImapError::Connection)?;
     runtime.block_on(async {
-        tokio::time::timeout(TIMEOUT, list_async(account, trust))
+        tokio::time::timeout(TIMEOUT, list_async(account, network))
             .await
             .map_err(|_| ImapError::Connection)?
     })
@@ -93,11 +160,12 @@ fn tls_connector(trust: &TlsTrust) -> Result<TlsConnector, ImapError> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-async fn list_async(account: &Account, trust: &TlsTrust) -> Result<Vec<String>, ImapError> {
-    let connector = tls_connector(trust)?;
+async fn list_async(account: &Account, network: &Network) -> Result<Vec<String>, ImapError> {
+    let connector = tls_connector(&network.trust)?;
     let server_name =
         ServerName::try_from(account.host.clone()).map_err(|_| ImapError::Connection)?;
-    let tcp = TcpStream::connect((account.host.as_str(), account.port))
+    let (host, port) = network.target(&account.host, account.port);
+    let tcp = TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|_| ImapError::Connection)?;
 

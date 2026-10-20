@@ -3,27 +3,42 @@
 //! Given the presented Agent Token and a command, it opens the Mandate,
 //! enforces the Policy (deny by default) and performs the mail operation.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
-use crate::imap::{self, ImapError, TlsTrust};
+use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Mandate, Operation};
 use crate::seal::{self, AgentToken};
 use crate::store::MandateStore;
+use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
 
-/// What the core runs against: the Mandate store and the TLS trust.
+/// Environment variable holding the presented Agent Token.
+pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
+
+/// What the core runs against: the Mandate store, the network and the
+/// Terminal (used only by `mandate create`).
 pub struct Context<'a> {
-    store: &'a dyn MandateStore,
-    trust: TlsTrust,
+    pub(crate) store: &'a dyn MandateStore,
+    pub(crate) network: Network,
+    pub(crate) terminal: &'a dyn Terminal,
 }
 
 impl<'a> Context<'a> {
-    /// A context using `store` and the operating system's certificate verifier.
+    /// A context using `store`, the operating system's certificate verifier
+    /// and no terminal.
     pub fn new(store: &'a dyn MandateStore) -> Self {
         Self {
             store,
-            trust: TlsTrust::Platform,
+            network: Network::platform(),
+            terminal: &NoTerminal,
         }
+    }
+
+    /// The same context, talking to the human through `terminal`.
+    pub fn with_terminal(self, terminal: &'a dyn Terminal) -> Self {
+        Self { terminal, ..self }
     }
 
     /// A test context trusting only `roots`, such as the fake server's CA.
@@ -33,8 +48,18 @@ impl<'a> Context<'a> {
         roots: Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Self {
         Self {
-            store,
-            trust: TlsTrust::OnlyRoots(roots),
+            network: Network::trusting_only(roots),
+            ..Self::new(store)
+        }
+    }
+
+    /// The same context, connecting to `to_host:to_port` whenever an Account
+    /// names `host:port`. Test builds only; TLS still verifies `host`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_route(self, host: &str, port: u16, to_host: &str, to_port: u16) -> Self {
+        Self {
+            network: self.network.with_route(host, port, to_host, to_port),
+            ..self
         }
     }
 }
@@ -44,6 +69,8 @@ impl<'a> Context<'a> {
 pub enum Command {
     /// List the mailboxes the Policy grants.
     List,
+    /// Guided creation of a Mandate by the human (`mandate create`).
+    MandateCreate,
 }
 
 /// Result of `list`.
@@ -67,6 +94,9 @@ pub struct MailboxEntry {
 pub enum Outcome {
     /// Result of `list`.
     Mailboxes(MailboxList),
+    /// A Mandate was sealed and stored. Its Agent Token went only to the
+    /// Terminal, so nothing is printed.
+    MandateCreated,
 }
 
 /// A structured error. Never carries a token or a Credential.
@@ -108,8 +138,19 @@ pub enum CoreError {
         /// Login name of the Account.
         account: String,
     },
-    /// The Mandate store could not be read.
+    /// The Mandate store could not be read or written.
     StoreUnavailable,
+    /// The Mandate covers several Accounts and the command names none.
+    AccountRequired {
+        /// Login names of the covered Accounts.
+        accounts: Vec<String>,
+    },
+    /// `mandate create` was run without a terminal a human can use.
+    InteractiveTerminalRequired,
+    /// `mandate create` was run inside an agent sandbox or session.
+    SandboxDetected,
+    /// The human aborted `mandate create`; nothing was stored.
+    Aborted,
 }
 
 /// The JSON body of an error, in field order `code`, details, `message`.
@@ -123,6 +164,9 @@ pub struct ErrorBody {
     /// Login name of the Account involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Login names of the Accounts to choose from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<String>>,
     /// Human-readable explanation.
     pub message: String,
 }
@@ -140,11 +184,27 @@ impl CoreError {
             Self::LoginFailed { .. } => "login_failed",
             Self::Protocol { .. } => "server_error",
             Self::StoreUnavailable => "store_unavailable",
+            Self::AccountRequired { .. } => "account_required",
+            Self::InteractiveTerminalRequired => "interactive_terminal_required",
+            Self::SandboxDetected => "sandbox_detected",
+            Self::Aborted => "aborted",
         }
     }
 
     /// The error as a serialisable body.
     pub fn body(&self) -> ErrorBody {
+        if let Self::AccountRequired { accounts } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: None,
+                accounts: Some(accounts.clone()),
+                message: format!(
+                    "this agent token covers several accounts ({}) and choosing one is not supported yet; ask the human for a token whose Mandate covers a single account",
+                    accounts.join(", ")
+                ),
+            };
+        }
         let (operation, account, message) = match self {
             Self::MissingToken => (
                 None,
@@ -194,7 +254,26 @@ impl CoreError {
             Self::StoreUnavailable => (
                 None,
                 None,
-                "the credential store could not be read; retry, or ask the human to check the credential store"
+                "the credential store could not be read or written; retry, or ask the human to check the credential store"
+                    .to_string(),
+            ),
+            Self::AccountRequired { .. } => unreachable!("handled above"),
+            Self::InteractiveTerminalRequired => (
+                None,
+                None,
+                "mandate create must be run by a human in a terminal, so nothing was stored; ask the human to run `agent-mail mandate create` in their own terminal"
+                    .to_string(),
+            ),
+            Self::SandboxDetected => (
+                None,
+                None,
+                "mandate create cannot run inside an agent sandbox or session and must be run by the human in their own terminal, so nothing was stored; ask the human to run `agent-mail mandate create` in their own terminal"
+                    .to_string(),
+            ),
+            Self::Aborted => (
+                None,
+                None,
+                "mandate create was aborted and nothing was stored; run `agent-mail mandate create` again to start over"
                     .to_string(),
             ),
         };
@@ -202,20 +281,29 @@ impl CoreError {
             code: self.code(),
             operation,
             account,
+            accounts: None,
             message,
         }
     }
 }
 
-/// Runs `command` for the Agent presenting `token`.
+/// Runs `command` with the process environment `env`. Agent commands read
+/// the presented token from [`TOKEN_VAR`]; `mandate create` reads no token
+/// and checks `env` only for agent sandbox indicators.
 pub fn execute(
-    token: Option<&str>,
+    env: &HashMap<String, String>,
     command: &Command,
     context: &Context<'_>,
 ) -> Result<Outcome, CoreError> {
-    let mandate = open_mandate(token, context)?;
     match command {
-        Command::List => list(&mandate, context).map(Outcome::Mailboxes),
+        Command::List => {
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let mandate = open_mandate(token, context)?;
+            list(&mandate, context).map(Outcome::Mailboxes)
+        }
+        Command::MandateCreate => {
+            crate::create::run(env, context).map(|()| Outcome::MandateCreated)
+        }
     }
 }
 
@@ -233,7 +321,16 @@ fn open_mandate(token: Option<&str>, context: &Context<'_>) -> Result<Mandate, C
 }
 
 fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreError> {
-    let account = &mandate.account;
+    // One Account per command until `--account` arrives (ticket 13); never
+    // merge Accounts silently.
+    let account = match mandate.accounts.as_slice() {
+        [account] => account,
+        accounts => {
+            return Err(CoreError::AccountRequired {
+                accounts: accounts.iter().map(|a| a.login.clone()).collect(),
+            });
+        }
+    };
     let login = account.login.clone();
     // Deny by default, before any connection is made.
     if mandate
@@ -247,7 +344,7 @@ fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreErr
             account: login,
         });
     }
-    let raw = imap::list_mailboxes(account, &context.trust).map_err(|e| {
+    let raw = imap::list_mailboxes(account, &context.network).map_err(|e| {
         let account = login.clone();
         match e {
             ImapError::TlsRequired => CoreError::TlsRequired { account },
@@ -300,6 +397,12 @@ mod tests {
                 account: account.clone(),
             },
             CoreError::StoreUnavailable,
+            CoreError::AccountRequired {
+                accounts: vec![account.clone(), "other@example.test".to_string()],
+            },
+            CoreError::InteractiveTerminalRequired,
+            CoreError::SandboxDetected,
+            CoreError::Aborted,
         ];
         for error in errors {
             let message = error.body().message;
@@ -307,7 +410,7 @@ mod tests {
                 .split_once("; ")
                 .unwrap_or_else(|| panic!("{}: no next step in {message:?}", error.code()));
             assert!(
-                ["set ", "check ", "ask ", "retry"]
+                ["set ", "check ", "ask ", "retry", "run "]
                     .iter()
                     .any(|verb| next_step.starts_with(verb)),
                 "{}: next step is not an action: {message:?}",
