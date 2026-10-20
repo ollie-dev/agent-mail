@@ -137,3 +137,61 @@ fn package_description_does_not_mention_mandates() {
         "package description mentions mandates: {description:?}"
     );
 }
+
+#[test]
+fn ac11_test_support_feature_is_not_a_default() {
+    let manifest = read(&repo_root().join("Cargo.toml"));
+    let entries = toml_entries(&manifest);
+
+    assert!(
+        entries
+            .iter()
+            .any(|(t, l)| t == "[features]" && l.starts_with("test-support")),
+        "Cargo.toml has no test-support feature"
+    );
+    let default = entries
+        .iter()
+        .find(|(t, l)| t == "[features]" && l.split('=').next().unwrap().trim() == "default");
+    if let Some((_, line)) = default {
+        assert!(
+            !line.contains("test-support"),
+            "default features include test-support: {line}"
+        );
+    }
+}
+
+const STORE_MARKER: &str = "agent-mail-in-memory-store";
+
+#[test]
+fn ac11_release_binary_has_no_in_memory_store() {
+    let root = repo_root();
+    // The marker must exist in the source, or this check proves nothing.
+    let store_source = read(&root.join("src/store.rs"));
+    assert!(store_source.contains(STORE_MARKER));
+
+    // A separate target directory, so this does not wait on the test build's lock.
+    let target = root.join("target").join("release-check");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = std::process::Command::new(cargo)
+        .current_dir(&root)
+        .args(["build", "--release", "--locked", "--bin", "agent-mail"])
+        .arg("--target-dir")
+        .arg(&target)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .status()
+        .expect("failed to run cargo build --release");
+    assert!(status.success(), "cargo build --release failed");
+
+    let binary = target
+        .join("release")
+        .join(format!("agent-mail{}", std::env::consts::EXE_SUFFIX));
+    let bytes =
+        fs::read(&binary).unwrap_or_else(|e| panic!("cannot read {}: {e}", binary.display()));
+    assert!(
+        !bytes
+            .windows(STORE_MARKER.len())
+            .any(|w| w == STORE_MARKER.as_bytes()),
+        "release binary contains the in-memory store"
+    );
+}
