@@ -1,1 +1,29 @@
-{ "jobs": [] }
+{
+  "jobs": [
+    {
+      "id": "001-project-skeleton",
+      "title": "Project skeleton",
+      "feature": "Ticket 01: Project skeleton (.scratch/agent-mail-v1/issues/01-project-skeleton.md)",
+      "branch": "factory/001-project-skeleton",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "pending",
+          "ui": "pending",
+          "code": "pending"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-20T08:52:23Z",
+      "builder": "a6c41fdaf7adc9edb"
+    }
+  ]
+}

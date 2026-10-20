@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `agent-mail --version` prints the binary name and the crate version and exits 0
 - [ ] `cargo test` runs green and contains at least one test that exercises the `--version` behaviour
