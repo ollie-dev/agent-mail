@@ -1,2 +1,5 @@
 .worktrees/
 /target
+.env
+.env.*
+*.pem
