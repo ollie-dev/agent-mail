@@ -45,6 +45,11 @@ mod memory {
     /// Marker that a release build must not contain (checked by a test).
     pub const MARKER: &str = "agent-mail-in-memory-store";
 
+    /// Keeps the marker bytes in every binary this module is compiled into,
+    /// whether or not the store is used, so the release check is meaningful.
+    #[used]
+    static MARKER_BYTES: [u8; MARKER.len()] = *b"agent-mail-in-memory-store";
+
     /// A test-only store holding raw records in memory.
     #[derive(Default)]
     pub struct InMemoryStore {

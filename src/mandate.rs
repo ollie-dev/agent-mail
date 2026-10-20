@@ -6,6 +6,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A sealed, unchangeable authority over one Account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +42,8 @@ pub enum TlsMode {
     Starttls,
 }
 
-/// The secret that unlocks an Account. Its `Debug` output is redacted.
+/// The secret that unlocks an Account. Its `Debug` output is redacted and its
+/// memory is wiped when dropped.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Credential(String);
@@ -57,6 +59,20 @@ impl Credential {
         &self.0
     }
 }
+
+impl Zeroize for Credential {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Drop for Credential {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Credential {}
 
 impl fmt::Debug for Credential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -175,5 +191,20 @@ impl Policy {
     pub fn allows_mailbox(&self, operation: Operation, account: &str, mailbox: &str) -> bool {
         self.grants_for(operation, account)
             .any(|g| g.mailboxes.iter().any(|m| m.matches(mailbox)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wiped_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn credential_is_wiped_on_drop_and_zeroizes() {
+        wiped_on_drop::<Credential>();
+        let mut credential = Credential::new("fake-app-password-123");
+        credential.zeroize();
+        assert_eq!(credential.expose(), "");
     }
 }
