@@ -3,7 +3,7 @@
 `/factory next` runs the first unchecked item and ticks it off. Add one feature per line.
 
 - [x] Ticket 01: Project skeleton (.scratch/agent-mail-v1/issues/01-project-skeleton.md) → 001-project-skeleton
-- [ ] CLI polish: running `agent-mail` with no arguments prints a usage hint; the `--help` description avoids the word "mandate" until mandate commands exist
+- [x] CLI polish: running `agent-mail` with no arguments prints a usage hint; the `--help` description avoids the word "mandate" until mandate commands exist → 002-cli-polish
 - [ ] Ticket 02: Tracer bullet: an Agent lists its granted mailboxes (.scratch/agent-mail-v1/issues/02-tracer-list-mailboxes.md)
 - [ ] Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md)
 - [ ] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md)
