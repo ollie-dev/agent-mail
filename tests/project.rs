@@ -162,36 +162,55 @@ fn ac11_test_support_feature_is_not_a_default() {
 
 const STORE_MARKER: &str = "agent-mail-in-memory-store";
 
-#[test]
-fn ac11_release_binary_has_no_in_memory_store() {
+/// Builds the release binary into a separate target directory (so it does not
+/// wait on the test build's lock) and returns whether it contains the marker.
+fn release_binary_has_marker(features: &[&str]) -> bool {
     let root = repo_root();
-    // The marker must exist in the source, or this check proves nothing.
-    let store_source = read(&root.join("src/store.rs"));
-    assert!(store_source.contains(STORE_MARKER));
-
-    // A separate target directory, so this does not wait on the test build's lock.
     let target = root.join("target").join("release-check");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = std::process::Command::new(cargo)
+    let mut command = std::process::Command::new(cargo);
+    command
         .current_dir(&root)
         .args(["build", "--release", "--locked", "--bin", "agent-mail"])
         .arg("--target-dir")
         .arg(&target)
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    if !features.is_empty() {
+        command.arg("--features").arg(features.join(","));
+    }
+    let status = command
         .status()
         .expect("failed to run cargo build --release");
-    assert!(status.success(), "cargo build --release failed");
+    assert!(
+        status.success(),
+        "cargo build --release {features:?} failed"
+    );
 
     let binary = target
         .join("release")
         .join(format!("agent-mail{}", std::env::consts::EXE_SUFFIX));
     let bytes =
         fs::read(&binary).unwrap_or_else(|e| panic!("cannot read {}: {e}", binary.display()));
+    bytes
+        .windows(STORE_MARKER.len())
+        .any(|w| w == STORE_MARKER.as_bytes())
+}
+
+#[test]
+fn ac11_release_binary_has_no_in_memory_store() {
+    // The marker must exist in the source, or this check proves nothing.
+    let store_source = read(&repo_root().join("src/store.rs"));
+    assert!(store_source.contains(STORE_MARKER));
+
+    // Positive control: with the store compiled in, the marker is found.
     assert!(
-        !bytes
-            .windows(STORE_MARKER.len())
-            .any(|w| w == STORE_MARKER.as_bytes()),
+        release_binary_has_marker(&["test-support"]),
+        "marker missing from a test-support build; the check below would prove nothing"
+    );
+    // The real check: a default release build has no in-memory store.
+    assert!(
+        !release_binary_has_marker(&[]),
         "release binary contains the in-memory store"
     );
 }
