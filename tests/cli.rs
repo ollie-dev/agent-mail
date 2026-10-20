@@ -50,15 +50,25 @@ fn bare_call_is_a_usage_error_with_empty_stdout() {
 }
 
 #[test]
-fn help_does_not_mention_mandates() {
+fn help_lists_the_mandate_subcommand() {
+    // Mandates exist now (`mandate create`), so --help may name them.
     let output = run_agent_mail(&["--help"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert!(
-        !stdout.to_lowercase().contains("mandate"),
-        "--help mentions mandates: {stdout:?}"
+        stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("mandate")),
+        "--help does not list `mandate`: {stdout:?}"
+    );
+    let output = run_agent_mail(&["mandate", "--help"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        stdout.lines().any(|l| l.trim_start().starts_with("create")),
+        "mandate --help does not list `create`: {stdout:?}"
     );
 }
 

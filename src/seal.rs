@@ -133,6 +133,15 @@ impl hkdf::KeyType for OutputLen {
     }
 }
 
+/// A fresh short Mandate ID: 8 random lowercase hex digits.
+pub fn short_id() -> String {
+    let mut bytes = [0u8; 4];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("system random number generator failed");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A sealed Mandate as the store holds it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SealedRecord {

@@ -14,20 +14,86 @@ pub trait MandateStore {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
     /// Files `value` under `key`.
     fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
+    /// Removes the record filed under `key`. Returns whether one existed.
+    fn delete(&self, key: &[u8]) -> Result<bool, StoreError>;
 }
 
-/// The store a non-test build uses until the Keychain store arrives
-/// (ticket 03). It holds no Mandates, so every token is unknown.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuntimeStore;
+/// The store a release build uses: the Keychain on macOS.
+#[cfg(target_os = "macos")]
+pub type RuntimeStore = KeychainStore;
 
-impl MandateStore for RuntimeStore {
+/// The store a release build uses: none yet on this OS, so every token is
+/// unknown and storing fails with `store_unavailable`.
+#[cfg(not(target_os = "macos"))]
+pub type RuntimeStore = EmptyStore;
+
+/// A store that holds nothing and refuses writes. Used where no OS credential
+/// store is supported yet.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyStore;
+
+impl MandateStore for EmptyStore {
     fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         Ok(None)
     }
 
     fn put(&self, _key: &[u8], _value: &[u8]) -> Result<(), StoreError> {
         Err(StoreError)
+    }
+
+    fn delete(&self, _key: &[u8]) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use keychain::KeychainStore;
+
+#[cfg(target_os = "macos")]
+mod keychain {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use security_framework::passwords;
+
+    use super::{MandateStore, StoreError};
+
+    /// Keychain service name of every Mandate item.
+    pub const SERVICE: &str = "agent-mail";
+    /// `errSecItemNotFound`.
+    const ITEM_NOT_FOUND: i32 = -25300;
+
+    /// The macOS Keychain: one generic-password item per Mandate, service
+    /// `agent-mail`, item account the base64url-encoded store key. The item is
+    /// created by this process through the Security framework, so its access
+    /// list trusts only the agent-mail binary.
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct KeychainStore;
+
+    fn item_account(key: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(key)
+    }
+
+    impl MandateStore for KeychainStore {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+            match passwords::get_generic_password(SERVICE, &item_account(key)) {
+                Ok(value) => Ok(Some(value)),
+                Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
+                Err(_) => Err(StoreError),
+            }
+        }
+
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+            passwords::set_generic_password(SERVICE, &item_account(key), value)
+                .map_err(|_| StoreError)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
+            match passwords::delete_generic_password(SERVICE, &item_account(key)) {
+                Ok(()) => Ok(true),
+                Err(e) if e.code() == ITEM_NOT_FOUND => Ok(false),
+                Err(_) => Err(StoreError),
+            }
+        }
     }
 }
 
@@ -95,6 +161,15 @@ mod memory {
                 .map_err(|_| StoreError)?
                 .insert(key.to_vec(), value.to_vec());
             Ok(())
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
+            Ok(self
+                .entries
+                .lock()
+                .map_err(|_| StoreError)?
+                .remove(key)
+                .is_some())
         }
     }
 }

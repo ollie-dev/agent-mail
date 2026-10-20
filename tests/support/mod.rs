@@ -19,6 +19,10 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 /// Fake Account login.
 pub const LOGIN: &str = "agent@example.test";
+/// Second fake Account login.
+pub const OTHER_LOGIN: &str = "other@example.test";
+/// Logins the fake server knows.
+pub const KNOWN_LOGINS: [&str; 2] = [LOGIN, OTHER_LOGIN];
 /// Fake Credential.
 pub const CREDENTIAL: &str = "fake-app-password-123";
 /// Mailboxes the fake server lists, raw, in this order.
@@ -89,7 +93,7 @@ fn tls_config() -> (CertificateDer<'static>, Arc<ServerConfig>) {
     let issuer = Issuer::new(ca_params, ca_key);
 
     let leaf_key = KeyPair::generate().unwrap();
-    let leaf = CertificateParams::new(vec!["localhost".to_string()])
+    let leaf = CertificateParams::new(vec!["localhost".to_string(), "imap.gmail.com".to_string()])
         .unwrap()
         .signed_by(&leaf_key, &issuer)
         .unwrap();
@@ -168,6 +172,7 @@ fn session(
         let mut parts = line.splitn(3, ' ');
         let tag = parts.next().unwrap_or("").to_string();
         let verb = parts.next().unwrap_or("").to_ascii_uppercase();
+        let args = parts.next().unwrap_or("");
         commands.lock().unwrap().push(verb.clone());
         match verb.as_str() {
             "CAPABILITY" => {
@@ -185,8 +190,11 @@ fn session(
                 send(stream, &format!("{tag} OK begin TLS now\r\n"))?;
                 return Some(Upgrade);
             }
-            "LOGIN" | "AUTHENTICATE" => {
+            "LOGIN" if login_accepted(args) => {
                 send(stream, &format!("{tag} OK logged in\r\n"))?;
+            }
+            "LOGIN" | "AUTHENTICATE" => {
+                send(stream, &format!("{tag} NO login refused\r\n"))?;
             }
             "LIST" => {
                 let mut reply = String::new();
@@ -207,25 +215,83 @@ fn session(
     }
 }
 
-/// A Mandate for the fake Account on `port` with the given Grants.
-pub fn mandate(port: u16, tls: TlsMode, grants: Vec<Grant>) -> Mandate {
+/// Whether `LOGIN` arguments name a known login with the fake Credential.
+fn login_accepted(args: &str) -> bool {
+    let fields = imap_strings(args);
+    matches!(fields.as_slice(), [login, credential]
+        if KNOWN_LOGINS.contains(&login.as_str()) && credential == CREDENTIAL)
+}
+
+/// Splits IMAP atoms and quoted strings (with `\` escapes).
+fn imap_strings(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = args.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c == ' ' {
+            chars.next();
+        } else if c == '"' {
+            chars.next();
+            let mut field = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => field.extend(chars.next()),
+                    '"' => break,
+                    c => field.push(c),
+                }
+            }
+            out.push(field);
+        } else {
+            let mut field = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == ' ' {
+                    break;
+                }
+                field.push(c);
+                chars.next();
+            }
+            out.push(field);
+        }
+    }
+    out
+}
+
+/// The fake Account `login` on `localhost:port`.
+pub fn account(login: &str, port: u16, tls: TlsMode) -> Account {
+    Account {
+        login: login.to_string(),
+        host: "localhost".to_string(),
+        port,
+        tls,
+        credential: Credential::new(CREDENTIAL),
+    }
+}
+
+/// A Mandate covering `accounts` with the given Grants.
+pub fn mandate_for(accounts: Vec<Account>, grants: Vec<Grant>) -> Mandate {
     Mandate {
-        account: Account {
-            login: LOGIN.to_string(),
-            host: "localhost".to_string(),
-            port,
-            tls,
-            credential: Credential::new(CREDENTIAL),
-        },
+        name: "test-mandate".to_string(),
+        id: "0123abcd".to_string(),
+        created: 1_700_000_000,
+        accounts,
         policy: Policy { grants },
     }
 }
 
+/// A Mandate for the fake Account on `port` with the given Grants.
+pub fn mandate(port: u16, tls: TlsMode, grants: Vec<Grant>) -> Mandate {
+    mandate_for(vec![account(LOGIN, port, tls)], grants)
+}
+
 /// A Grant of `operation` on `mailboxes` of the fake Account.
 pub fn grant(operation: Operation, mailboxes: &[&str]) -> Grant {
+    grant_on(operation, LOGIN, mailboxes)
+}
+
+/// A Grant of `operation` on `mailboxes` of the Account `login`.
+pub fn grant_on(operation: Operation, login: &str, mailboxes: &[&str]) -> Grant {
     Grant {
         operation,
-        account: LOGIN.to_string(),
+        account: login.to_string(),
         mailboxes: mailboxes.iter().map(|m| (*m).into()).collect(),
     }
 }
@@ -283,4 +349,77 @@ pub fn error_of(output: &RunOutput) -> serde_json::Value {
     let value: serde_json::Value = serde_json::from_str(&output.stderr)
         .unwrap_or_else(|e| panic!("stderr is not JSON ({e}): {:?}", output.stderr));
     value["error"].clone()
+}
+
+/// Runs `agent-mail <args>` in-process with `env`, talking through
+/// `terminal`, trusting only `roots` and connecting `routes`
+/// (`host`, `port`, fake server port on localhost).
+pub fn run_with_terminal(
+    args: &[&str],
+    env: &HashMap<String, String>,
+    store: &dyn MandateStore,
+    terminal: &dyn agent_mail::terminal::Terminal,
+    roots: Vec<CertificateDer<'static>>,
+    routes: &[(&str, u16, u16)],
+) -> RunOutput {
+    let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+    let mut context = Context::trusting_only(store, roots).with_terminal(terminal);
+    for (host, port, to_port) in routes {
+        context = context.with_route(host, *port, "localhost", *to_port);
+    }
+    agent_mail::run(argv, env, &context)
+}
+
+/// Every Agent Token-shaped string (`amt_` plus 43 base64url characters)
+/// in `text`.
+pub fn tokens_in(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(seal::TOKEN_PREFIX) {
+        let body: String = rest[at + seal::TOKEN_PREFIX.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if body.len() == 43 {
+            found.push(format!("{}{body}", seal::TOKEN_PREFIX));
+        }
+        rest = &rest[at + seal::TOKEN_PREFIX.len()..];
+    }
+    found
+}
+
+/// Whether `needle` occurs in `haystack`.
+pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A store that counts every access, wrapping an [`InMemoryStore`].
+#[derive(Default)]
+pub struct CountingStore {
+    pub inner: InMemoryStore,
+    accesses: AtomicUsize,
+}
+
+impl CountingStore {
+    /// Number of `get`, `put` and `delete` calls so far.
+    pub fn accesses(&self) -> usize {
+        self.accesses.load(Ordering::SeqCst)
+    }
+}
+
+impl MandateStore for CountingStore {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, agent_mail::store::StoreError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), agent_mail::store::StoreError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<bool, agent_mail::store::StoreError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        self.inner.delete(key)
+    }
 }

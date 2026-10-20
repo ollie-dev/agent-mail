@@ -1,4 +1,4 @@
-//! The Mandate model: the Account it covers, its Credential and its Policy.
+//! The Mandate model: the Accounts it covers, their Credentials and its Policy.
 //!
 //! A Mandate is immutable once sealed (ADR-0003). These types only describe
 //! its contents; sealing lives in [`crate::seal`].
@@ -8,13 +8,26 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// A sealed, unchangeable authority over one Account.
+/// A sealed, unchangeable authority over one or more Accounts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mandate {
-    /// The Account this Mandate covers.
-    pub account: Account,
-    /// What the Agent may do on that Account.
+    /// Name the human gave the Mandate.
+    pub name: String,
+    /// Short ID, for listings and the audit log.
+    pub id: String,
+    /// Creation time, Unix seconds (UTC).
+    pub created: u64,
+    /// The Accounts this Mandate covers, each with a distinct login.
+    pub accounts: Vec<Account>,
+    /// What the Agent may do on those Accounts.
     pub policy: Policy,
+}
+
+impl Mandate {
+    /// The covered Account with login `login`, if any.
+    pub fn account(&self, login: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.login == login)
+    }
 }
 
 /// A mail account agent-mail connects to.
@@ -40,6 +53,16 @@ pub enum TlsMode {
     Implicit,
     /// Plain connect, then a mandatory `STARTTLS` upgrade before login.
     Starttls,
+}
+
+impl TlsMode {
+    /// The mode's name, as shown to the human.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Implicit => "implicit",
+            Self::Starttls => "starttls",
+        }
+    }
 }
 
 /// The secret that unlocks an Account. Its `Debug` output is redacted and its
@@ -117,6 +140,16 @@ pub enum Operation {
 }
 
 impl Operation {
+    /// Every operation, in the order the guided setup offers them.
+    pub const ALL: [Operation; 6] = [
+        Self::List,
+        Self::Search,
+        Self::Read,
+        Self::Flag,
+        Self::Move,
+        Self::Draft,
+    ];
+
     /// The operation's wire name, as used in Grants and errors.
     pub fn as_str(self) -> &'static str {
         match self {
