@@ -151,7 +151,8 @@ impl CoreError {
                 None,
                 "no agent token presented; set AGENT_MAIL_TOKEN".to_string(),
             ),
-            Self::InvalidToken => (None, None, "the agent token is not valid".to_string()),
+            Self::InvalidToken => (None, None, "the agent token is not valid; check AGENT_MAIL_TOKEN or ask the human for a new token"
+                    .to_string()),
             Self::Denied { operation, account } => (
                 Some(operation.as_str()),
                 Some(account.clone()),
@@ -163,32 +164,38 @@ impl CoreError {
             Self::TlsRequired { account } => (
                 None,
                 Some(account.clone()),
-                "the server did not offer TLS; refusing to send the credential".to_string(),
+                "the server did not offer TLS, so the credential was not sent; ask the human to fix the account's server or TLS settings"
+                    .to_string(),
             ),
             Self::TlsCertificate { account } => (
                 None,
                 Some(account.clone()),
-                "the server's TLS certificate is not trusted".to_string(),
+                "the server's TLS certificate is not trusted; ask the human to check the account's host name and the server certificate"
+                    .to_string(),
             ),
             Self::Connection { account } => (
                 None,
                 Some(account.clone()),
-                "could not reach the mail server".to_string(),
+                "could not reach the mail server; check the network and retry, or ask the human to check the account's host and port"
+                    .to_string(),
             ),
             Self::LoginFailed { account } => (
                 None,
                 Some(account.clone()),
-                "the mail server refused the login".to_string(),
+                "the mail server refused the login; ask the human to check the account's credential"
+                    .to_string(),
             ),
             Self::Protocol { account } => (
                 None,
                 Some(account.clone()),
-                "the mail server answered unexpectedly".to_string(),
+                "the mail server answered unexpectedly; retry later, or ask the human to check the account's server settings"
+                    .to_string(),
             ),
             Self::StoreUnavailable => (
                 None,
                 None,
-                "the credential store could not be read".to_string(),
+                "the credential store could not be read; retry, or ask the human to check the credential store"
+                    .to_string(),
             ),
         };
         ErrorBody {
@@ -261,4 +268,51 @@ fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreErr
         account: login,
         mailboxes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_error_message_names_a_next_step() {
+        let account = "agent@example.test".to_string();
+        let errors = [
+            CoreError::MissingToken,
+            CoreError::InvalidToken,
+            CoreError::Denied {
+                operation: Operation::List,
+                account: account.clone(),
+            },
+            CoreError::TlsRequired {
+                account: account.clone(),
+            },
+            CoreError::TlsCertificate {
+                account: account.clone(),
+            },
+            CoreError::Connection {
+                account: account.clone(),
+            },
+            CoreError::LoginFailed {
+                account: account.clone(),
+            },
+            CoreError::Protocol {
+                account: account.clone(),
+            },
+            CoreError::StoreUnavailable,
+        ];
+        for error in errors {
+            let message = error.body().message;
+            let (_, next_step) = message
+                .split_once("; ")
+                .unwrap_or_else(|| panic!("{}: no next step in {message:?}", error.code()));
+            assert!(
+                ["set ", "check ", "ask ", "retry"]
+                    .iter()
+                    .any(|verb| next_step.starts_with(verb)),
+                "{}: next step is not an action: {message:?}",
+                error.code()
+            );
+        }
+    }
 }

@@ -37,6 +37,9 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum CliCommand {
     /// List the mailboxes this agent may access
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
+    /// default; errors go to stderr as JSON with a stable `code`.
     List,
 }
 
@@ -94,9 +97,13 @@ where
 fn render_outcome(outcome: &Outcome, text: bool) -> String {
     match outcome {
         Outcome::Mailboxes(list) if text => {
-            let mut out = format!("{}\n", list.account);
+            let mut out = String::new();
+            out.push_str(&escape_controls(&list.account));
+            out.push('\n');
             for mailbox in &list.mailboxes {
-                out.push_str(&format!("  {}\n", mailbox.name));
+                out.push_str("  ");
+                out.push_str(&escape_controls(&mailbox.name));
+                out.push('\n');
             }
             out
         }
@@ -108,6 +115,20 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
     }
 }
 
+/// Escapes control characters (newlines, ANSI escapes) in server-supplied
+/// text, so a hostile server cannot forge lines or styling under `--text`.
+fn escape_controls(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 fn render_error(error: &CoreError, text: bool) -> String {
     let body = error.body();
     if text {
@@ -117,4 +138,26 @@ fn render_error(error: &CoreError, text: bool) -> String {
         .expect("errors always serialise");
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{MailboxEntry, MailboxList};
+
+    #[test]
+    fn text_output_escapes_control_characters_from_the_server() {
+        let outcome = Outcome::Mailboxes(MailboxList {
+            account: "agent@example.test".to_string(),
+            mailboxes: vec![MailboxEntry {
+                name: "Evil\nother@example.test\r\u{1b}[31mRed Entwürfe".to_string(),
+            }],
+        });
+        let text = render_outcome(&outcome, true);
+        assert_eq!(
+            text,
+            "agent@example.test\n  Evil\\u{a}other@example.test\\u{d}\\u{1b}[31mRed Entwürfe\n"
+        );
+        assert_eq!(text.lines().count(), 2);
+    }
 }
