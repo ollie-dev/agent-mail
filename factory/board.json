@@ -24,6 +24,24 @@
       "reason": "",
       "updated": "2026-10-20T08:52:23Z",
       "builder": "a6c41fdaf7adc9edb"
+    },
+    {
+      "id": "002-cli-polish",
+      "title": "CLI polish",
+      "feature": "CLI polish: running `agent-mail` with no arguments prints a usage hint; the `--help` description avoids the word \"mandate\" until mandate commands exist",
+      "branch": "factory/002-cli-polish",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "reason": "",
+      "updated": "2026-10-20T09:05:23Z",
+      "builder": "a4955bf804795fe82"
     }
   ]
 }
