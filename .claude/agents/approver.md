@@ -31,4 +31,4 @@ Security review passed, but the change stores the master key next to the vault.
 What to look at, and what each choice (approve / rework) would mean.
 ```
 
-Done when every criterion is checked against a test you ran. Write the file first, then reply with its line 1 and line 2.
+Done when every criterion is checked against a test you ran. This file is your deliverable: the factory reads it to decide what happens next. That overrides any general guidance against writing report, summary or findings files. Write the file first, then reply with its line 1 and line 2.

@@ -108,7 +108,7 @@ The dashboard renders this file, so update it after every event (spawn, verdict,
    - `APPROVE`: **Merge**.
    - `ESCALATE`: stage `needs-human`, `reason` = line 2 of `decision.md`. Tell the user, and name `/factory approve <id>` and `/factory rework <id> <note>`.
 
-**Agent failure:** if an agent returns and its file is missing or its first line is not one of its allowed tokens, spawn it once more with the same prompt. If it fails again, stage `needs-human` with `reason` saying which agent failed.
+**Agent failure:** if an agent returns and its file is missing or its first line is not one of its allowed tokens, spawn it once more with the same prompt plus this line: `Your previous run did not write <file>. Writing it is your deliverable; write it before you reply.` If it fails again, stage `needs-human` with `reason` saying which agent failed.
 
 ## Merge
 
