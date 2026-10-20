@@ -42,6 +42,38 @@
       "reason": "",
       "updated": "2026-10-20T09:05:23Z",
       "builder": "a4955bf804795fe82"
+    },
+    {
+      "id": "003-tracer-list-mailboxes",
+      "title": "Tracer: list mailboxes",
+      "feature": "Ticket 02: Tracer bullet: an Agent lists its granted mailboxes (.scratch/agent-mail-v1/issues/02-tracer-list-mailboxes.md)",
+      "branch": "factory/003-tracer-list-mailboxes",
+      "stage": "merged",
+      "round": 3,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "CHANGES",
+          "ui": "PASS",
+          "code": "PASS"
+        },
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-20T10:30:02Z",
+      "builder": "a7b4cd2d1f90a0b36",
+      "approvedBy": "human"
     }
   ]
 }

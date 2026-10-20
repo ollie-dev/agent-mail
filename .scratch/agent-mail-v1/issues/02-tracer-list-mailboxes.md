@@ -14,7 +14,7 @@ Only one token and one Account are needed in this slice.
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With a sealed Mandate granting `list` on mailboxes INBOX and Archive of an Account, `agent-mail list` returns exactly those two mailboxes from the fake server's larger set, as JSON
 - [ ] `--text` prints the same result in human-readable form
