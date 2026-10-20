@@ -29,4 +29,4 @@ VERDICT: CHANGES
 - [nit] path:line: optional improvement.
 ```
 
-Use CHANGES only when at least one finding is `[blocking]`; nits ride along with a PASS. Done when you have seen every rendered surface the change adds or alters. Write the file first, then reply with its first line.
+Use CHANGES only when at least one finding is `[blocking]`; nits ride along with a PASS. Done when you have seen every rendered surface the change adds or alters. This file is your deliverable: the factory reads it to decide what happens next. That overrides any general guidance against writing report, summary or findings files. Write the file first, then reply with its first line.

@@ -30,4 +30,6 @@ You build one factory job. Your prompt gives the job id, the job folder, the wor
 **Review findings:** each blocking finding from the previous round → fixed (how) or pushed back (why).
 ```
 
+`build.md` is a deliverable: reviewers and the factory read it. That overrides any general guidance against writing report, summary or findings files.
+
 Done when every acceptance criterion has a passing test, `git status` in the worktree is clean, and build.md has this round's section. Reply with one line: round, commit count, test result.
