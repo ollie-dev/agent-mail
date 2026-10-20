@@ -127,3 +127,13 @@ fn project_is_a_single_rust_binary_crate() {
         );
     }
 }
+
+#[test]
+fn package_description_does_not_mention_mandates() {
+    let description = env!("CARGO_PKG_DESCRIPTION");
+    assert!(!description.is_empty(), "package description is empty");
+    assert!(
+        !description.to_lowercase().contains("mandate"),
+        "package description mentions mandates: {description:?}"
+    );
+}

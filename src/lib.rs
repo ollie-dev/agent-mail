@@ -7,7 +7,7 @@ use clap::Parser;
 
 /// Command-line interface of the `agent-mail` binary.
 #[derive(Debug, Parser)]
-#[command(name = "agent-mail", version, about)]
+#[command(name = "agent-mail", version, about, arg_required_else_help = true)]
 pub struct Cli {}
 
 /// Runs the binary with already parsed arguments.
