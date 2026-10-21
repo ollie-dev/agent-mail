@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Reading a plain-text message returns its headers and body
 - [ ] Reading an HTML-only message returns readable text without markup
