@@ -480,7 +480,10 @@ fn failure_reason(error: &ImapError) -> &'static str {
             "the server's TLS certificate is not trusted; check the host name"
         }
         ImapError::Connection => "could not reach the server; check the host, port and network",
-        ImapError::Protocol | ImapError::MailboxNotFound => {
+        ImapError::Protocol
+        | ImapError::MailboxNotFound
+        | ImapError::StaleReference
+        | ImapError::MessageNotFound => {
             "the server answered unexpectedly; check the server settings"
         }
     }

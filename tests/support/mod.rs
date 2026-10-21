@@ -56,6 +56,9 @@ pub struct FakeMessage {
     /// IMAP `date-time`, e.g. `01-Oct-2026 09:00:00 +0000`.
     pub internal_date: &'static str,
     pub flags: Vec<String>,
+    /// The full raw MIME source (CRLF line endings). When set, `raw()`
+    /// returns it instead of a message built from the fields above.
+    pub source: Option<String>,
 }
 
 impl FakeMessage {
@@ -69,6 +72,9 @@ impl FakeMessage {
 
     /// The whole message, headers and body.
     fn raw(&self) -> String {
+        if let Some(source) = &self.source {
+            return source.clone();
+        }
         format!(
             "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n",
             self.header_from(),
@@ -115,6 +121,7 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             body: "numbers attached",
             internal_date: "01-Oct-2026 09:00:00 +0000",
             flags: flags(&["\\Seen"]),
+            source: None,
         },
         FakeMessage {
             uid: 2,
@@ -125,6 +132,7 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             body: "pizza today",
             internal_date: "05-Oct-2026 09:00:00 +0000",
             flags: Vec::new(),
+            source: None,
         },
         FakeMessage {
             uid: 3,
@@ -135,6 +143,7 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             body: "pizza on friday",
             internal_date: "10-Oct-2026 09:00:00 +0000",
             flags: flags(&["\\Flagged"]),
+            source: None,
         },
         FakeMessage {
             uid: 4,
@@ -145,6 +154,7 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             body: "please pay",
             internal_date: "15-Oct-2026 11:00:00 +0200",
             flags: flags(&["\\Seen", "\\Flagged"]),
+            source: None,
         },
     ];
     let archive = (1..=25)
@@ -157,6 +167,7 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             body: "news of the week",
             internal_date: "02-Sep-2026 08:00:00 +0000",
             flags: Vec::new(),
+            source: None,
         })
         .collect();
     let empty = |name, uidvalidity| FakeMailbox {
@@ -178,6 +189,162 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
         empty("Sent", 1_700_000_004),
         empty("Spam", 1_700_000_005),
         empty("[Gmail]/Entw&APw-rfe", 1_700_000_003),
+        FakeMailbox {
+            name: "Read",
+            uidvalidity: READ_UIDVALIDITY,
+            messages: read_messages(),
+        },
+    ]
+}
+
+/// UIDVALIDITY of the fixture `Read`.
+pub const READ_UIDVALIDITY: u32 = 1_700_000_006;
+
+/// The HTML of the `Read` fixture's UID 2.
+pub const READ_HTML: &str = "<html><head><style>p{color:red}</style></head><body><p>Hello <b>Bob</b>,</p><p>See&nbsp;the <a href=\"https://example.com/x\">report</a> &amp; reply.</p><script>alert(1)</script></body></html>";
+
+/// Content of the `notes.txt` attachment of the `Read` fixture's UID 3.
+pub const NOTES_CONTENT: &str = "ATTACHMENT-CONTENT-7f3a";
+
+/// The 1024 bytes of the `report.pdf` attachment: `0x00..=0xFF`, four times.
+pub fn report_pdf_bytes() -> Vec<u8> {
+    (0..4).flat_map(|_| 0..=255u8).collect()
+}
+
+/// The body of the `Read` fixture's UID 4: 19,999 `x`, `ü`, 5,000 `y`.
+pub fn long_body() -> String {
+    format!("{}ü{}", "x".repeat(19_999), "y".repeat(5_000))
+}
+
+/// Quoted-printable encoding of ASCII `text` with CRLF soft line breaks.
+fn quoted_printable(text: &str) -> String {
+    let mut out = String::new();
+    let mut line = 0;
+    for b in text.bytes() {
+        let piece = if b == b'=' || !(0x20..0x7f).contains(&b) {
+            format!("={b:02X}")
+        } else {
+            char::from(b).to_string()
+        };
+        if line + piece.len() > 75 {
+            out.push_str("=\r\n");
+            line = 0;
+        }
+        line += piece.len();
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// Base64 in lines of 76 characters, CRLF-terminated.
+fn base64_lines(bytes: &[u8]) -> String {
+    use base64::Engine;
+    let text = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(76) {
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// The `Read` mailbox's five messages, as full MIME sources. None `\Seen`.
+fn read_messages() -> Vec<FakeMessage> {
+    let message = |uid, from: &'static str, subject: &str, source: String| FakeMessage {
+        uid,
+        from_name: None,
+        from,
+        to: LOGIN,
+        subject: subject.to_string(),
+        body: "",
+        internal_date: "06-Oct-2026 10:15:00 +0200",
+        flags: Vec::new(),
+        source: Some(source),
+    };
+    let one = "From: Alice Example <alice@example.com>\r\n\
+               To: agent@example.test\r\n\
+               Cc: Carol <carol@example.com>\r\n\
+               Subject: Project update\r\n\
+               Date: Tue, 06 Oct 2026 10:15:00 +0200\r\n\
+               Message-ID: <update-1@example.com>\r\n\
+               MIME-Version: 1.0\r\n\
+               Content-Type: text/plain; charset=utf-8\r\n\
+               Content-Transfer-Encoding: 7bit\r\n\
+               \r\n\
+               Hi,\r\n\r\nthe project is on track.\r\n\r\nAlice\r\n"
+        .to_string();
+    let two = format!(
+        "From: news@example.com\r\n\
+         To: agent@example.test\r\n\
+         Subject: HTML only\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Transfer-Encoding: quoted-printable\r\n\
+         \r\n\
+         {}\r\n",
+        quoted_printable(READ_HTML)
+    );
+    let three = format!(
+        "From: bob@example.com\r\n\
+         To: agent@example.test\r\n\
+         Subject: Files\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"b3\"\r\n\
+         \r\n\
+         --b3\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         See the attached files.\r\n\
+         --b3\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {}\
+         --b3\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Disposition: attachment; filename=\"notes.txt\"\r\n\
+         Content-Transfer-Encoding: 7bit\r\n\
+         \r\n\
+         {NOTES_CONTENT}\r\n\
+         --b3--\r\n",
+        base64_lines(&report_pdf_bytes())
+    );
+    let four = format!(
+        "From: alice@example.com\r\n\
+         To: agent@example.test\r\n\
+         Subject: Long\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Transfer-Encoding: 8bit\r\n\
+         \r\n\
+         {}\r\n",
+        long_body()
+    );
+    let five = "From: alice@example.com\r\n\
+                To: agent@example.test\r\n\
+                Subject: Both\r\n\
+                MIME-Version: 1.0\r\n\
+                Content-Type: multipart/alternative; boundary=\"b5\"\r\n\
+                \r\n\
+                --b5\r\n\
+                Content-Type: text/plain; charset=utf-8\r\n\
+                \r\n\
+                Plain version\r\n\
+                --b5\r\n\
+                Content-Type: text/html; charset=utf-8\r\n\
+                \r\n\
+                <p>HTML version</p>\r\n\
+                --b5--\r\n"
+        .to_string();
+    let mut first = message(1, "alice@example.com", "Project update", one);
+    first.from_name = Some("Alice Example");
+    vec![
+        first,
+        message(2, "news@example.com", "HTML only", two),
+        message(3, "bob@example.com", "Files", three),
+        message(4, "alice@example.com", "Long", four),
+        message(5, "alice@example.com", "Both", five),
     ]
 }
 
