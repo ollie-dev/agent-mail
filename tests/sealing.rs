@@ -100,3 +100,18 @@ fn debug_output_redacts_token_and_credential() {
     assert!(!debug.contains(token.expose()));
     assert!(!debug.contains(CREDENTIAL));
 }
+
+#[test]
+fn store_put_is_add_only() {
+    let store = InMemoryStore::new();
+    let token = store_mandate(&store, &sample());
+    let key = token.store_key();
+    let before = store.get(&key).unwrap();
+
+    assert!(store.put(&key, b"replacement").is_err());
+    assert_eq!(store.get(&key).unwrap(), before);
+    assert_eq!(store.entries().len(), 1);
+
+    assert_eq!(store.delete(&key), Ok(true));
+    assert!(store.put(&key, b"replacement").is_ok());
+}

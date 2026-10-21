@@ -160,11 +160,17 @@ fn ac11_test_support_feature_is_not_a_default() {
     }
 }
 
-const STORE_MARKER: &str = "agent-mail-in-memory-store";
+/// Markers of test-only code and the source file each lives in: the
+/// in-memory store, the scripted terminal and the connect override.
+const TEST_ONLY_MARKERS: [(&str, &str); 3] = [
+    ("agent-mail-in-memory-store", "src/store.rs"),
+    ("agent-mail-scripted-terminal", "src/terminal.rs"),
+    ("agent-mail-connect-override", "src/imap.rs"),
+];
 
 /// Builds the release binary into a separate target directory (so it does not
-/// wait on the test build's lock) and returns whether it contains the marker.
-fn release_binary_has_marker(features: &[&str]) -> bool {
+/// wait on the test build's lock) and returns which markers it contains.
+fn release_binary_markers(features: &[&str]) -> Vec<&'static str> {
     let root = repo_root();
     let target = root.join("target").join("release-check");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -192,25 +198,34 @@ fn release_binary_has_marker(features: &[&str]) -> bool {
         .join(format!("agent-mail{}", std::env::consts::EXE_SUFFIX));
     let bytes =
         fs::read(&binary).unwrap_or_else(|e| panic!("cannot read {}: {e}", binary.display()));
-    bytes
-        .windows(STORE_MARKER.len())
-        .any(|w| w == STORE_MARKER.as_bytes())
+    TEST_ONLY_MARKERS
+        .iter()
+        .map(|(marker, _)| *marker)
+        .filter(|marker| bytes.windows(marker.len()).any(|w| w == marker.as_bytes()))
+        .collect()
 }
 
 #[test]
-fn ac11_release_binary_has_no_in_memory_store() {
-    // The marker must exist in the source, or this check proves nothing.
-    let store_source = read(&repo_root().join("src/store.rs"));
-    assert!(store_source.contains(STORE_MARKER));
+fn ac11_release_binary_has_no_test_only_code() {
+    // Each marker must exist in its source, or this check proves nothing.
+    for (marker, file) in TEST_ONLY_MARKERS {
+        assert!(
+            read(&repo_root().join(file)).contains(marker),
+            "{file} lost the marker {marker}"
+        );
+    }
 
-    // Positive control: with the store compiled in, the marker is found.
-    assert!(
-        release_binary_has_marker(&["test-support"]),
-        "marker missing from a test-support build; the check below would prove nothing"
+    // Positive control: with test-support compiled in, every marker is found.
+    let all: Vec<&str> = TEST_ONLY_MARKERS.iter().map(|(m, _)| *m).collect();
+    assert_eq!(
+        release_binary_markers(&["test-support"]),
+        all,
+        "markers missing from a test-support build; the check below would prove nothing"
     );
-    // The real check: a default release build has no in-memory store.
-    assert!(
-        !release_binary_has_marker(&[]),
-        "release binary contains the in-memory store"
+    // The real check: a default release build has no test-only code.
+    assert_eq!(
+        release_binary_markers(&[]),
+        Vec::<&str>::new(),
+        "release binary contains test-only code"
     );
 }
