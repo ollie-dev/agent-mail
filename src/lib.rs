@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use clap::{Parser, Subcommand};
 
 pub use crate::core::{Context, TOKEN_VAR};
-use crate::core::{CoreError, Outcome};
+use crate::core::{CoreError, MandateListing, Outcome};
 use crate::terminal::escape_controls;
 
 /// Command-line interface of the `agent-mail` binary.
@@ -41,7 +41,7 @@ pub enum CliCommand {
     /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
     /// default; errors go to stderr as JSON with a stable `code`.
     List,
-    /// Create and manage Mandates (run by the human, not by agents)
+    /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         #[command(subcommand)]
         command: MandateCommand,
@@ -58,6 +58,20 @@ pub enum MandateCommand {
     /// the new Agent Token once. Refuses to run without a terminal or inside
     /// an agent sandbox. No option can supply a Credential.
     Create,
+    /// List every stored Mandate: ID, name, Accounts, Grants, creation date
+    ///
+    /// Needs no agent token. Never shows a Credential or an Agent Token.
+    List,
+    /// Delete a Mandate by its ID, revoking its Agent Token at once
+    ///
+    /// Needs no agent token or Credential and asks no confirmation. Deletes
+    /// every stored record with this ID. Fails with `revocation_incomplete`
+    /// if the store holds records it cannot read, since one may be this
+    /// Mandate.
+    Delete {
+        /// The Mandate's ID, as shown by `agent-mail mandate list`
+        id: String,
+    },
 }
 
 /// What a run printed and how it exited.
@@ -98,6 +112,12 @@ where
         CliCommand::Mandate {
             command: MandateCommand::Create,
         } => crate::core::Command::MandateCreate,
+        CliCommand::Mandate {
+            command: MandateCommand::List,
+        } => crate::core::Command::MandateList,
+        CliCommand::Mandate {
+            command: MandateCommand::Delete { id },
+        } => crate::core::Command::MandateDelete { id },
     };
     match crate::core::execute(env, &command, context) {
         Ok(outcome) => RunOutput {
@@ -126,19 +146,81 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
             }
             out
         }
-        Outcome::Mailboxes(list) => {
-            let mut out = serde_json::to_string(list).expect("results always serialise");
-            out.push('\n');
-            out
-        }
+        Outcome::Mailboxes(list) => json_line(list),
         Outcome::MandateCreated => String::new(),
+        Outcome::Mandates(listing) if text => render_listing(listing),
+        Outcome::Mandates(listing) => json_line(listing),
+        Outcome::Deleted(deleted) if text => match &deleted.name {
+            Some(name) => format!(
+                "Deleted Mandate \"{}\" (ID {}).\n",
+                escape_controls(name),
+                escape_controls(&deleted.id)
+            ),
+            None => format!(
+                "Deleted Mandate (ID {}). The stored records with this ID had different names, so none is shown.\n",
+                escape_controls(&deleted.id)
+            ),
+        },
+        Outcome::Deleted(deleted) => json_line(&serde_json::json!({ "deleted": deleted })),
     }
+}
+
+fn json_line(value: &impl serde::Serialize) -> String {
+    let mut out = serde_json::to_string(value).expect("results always serialise");
+    out.push('\n');
+    out
+}
+
+fn render_listing(listing: &MandateListing) -> String {
+    let mut out = String::new();
+    if listing.mandates.is_empty() {
+        out.push_str("No Mandates stored.\n");
+    }
+    for m in &listing.mandates {
+        out.push_str(&format!(
+            "{}  {}  created {}\n",
+            escape_controls(&m.id),
+            escape_controls(&m.name),
+            escape_controls(&m.created)
+        ));
+        for a in &m.accounts {
+            out.push_str(&format!(
+                "  account {} ({}:{}, {})\n",
+                escape_controls(&a.login),
+                escape_controls(&a.host),
+                a.port,
+                a.tls.as_str()
+            ));
+        }
+        for g in &m.grants {
+            let mailboxes: Vec<String> = g
+                .mailboxes
+                .iter()
+                .map(|p| escape_controls(&String::from(p.clone())))
+                .collect();
+            out.push_str(&format!(
+                "  grant {} on {}: {}\n",
+                g.operation.as_str(),
+                escape_controls(&g.account),
+                mailboxes.join(", ")
+            ));
+        }
+    }
+    match listing.unreadable {
+        0 => {}
+        1 => out.push_str("1 stored record could not be read and is not listed.\n"),
+        n => out.push_str(&format!(
+            "{n} stored records could not be read and are not listed.\n"
+        )),
+    }
+    out
 }
 
 fn render_error(error: &CoreError, text: bool) -> String {
     let body = error.body();
     if text {
-        return format!("error: {}: {}\n", body.code, body.message);
+        // The message may echo untrusted input, such as a Mandate ID.
+        return format!("error: {}: {}\n", body.code, escape_controls(&body.message));
     }
     let mut out = serde_json::to_string(&serde_json::json!({ "error": body }))
         .expect("errors always serialise");

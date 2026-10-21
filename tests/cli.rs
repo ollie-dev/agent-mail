@@ -66,10 +66,12 @@ fn help_lists_the_mandate_subcommand() {
     let output = run_agent_mail(&["mandate", "--help"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0));
-    assert!(
-        stdout.lines().any(|l| l.trim_start().starts_with("create")),
-        "mandate --help does not list `create`: {stdout:?}"
-    );
+    for sub in ["create", "list", "delete"] {
+        assert!(
+            stdout.lines().any(|l| l.trim_start().starts_with(sub)),
+            "mandate --help does not list `{sub}`: {stdout:?}"
+        );
+    }
 }
 
 #[test]
