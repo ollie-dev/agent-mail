@@ -669,6 +669,18 @@ fn ac11_token_is_shown_once_and_no_command_reveals_it_again() {
 
     let token = session.token();
     assert_eq!(session.transcript().matches(&token).count(), 1);
+    let shown: Vec<_> = session
+        .terminal
+        .transcript()
+        .into_iter()
+        .filter(|e| e.text.contains(&token))
+        .collect();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        shown[0].kind,
+        Kind::Reveal,
+        "token not revealed via the tty"
+    );
     assert!(!session.output.stdout.contains(&token));
     assert!(!session.output.stderr.contains(&token));
     for (key, value) in store.entries() {
@@ -730,4 +742,59 @@ fn checklist_shows_decoded_names_and_draft_grants_have_no_mailboxes() {
         ]
     );
     assert!(session.transcript().contains("the Drafts mailbox"));
+}
+
+#[test]
+fn ac11_token_that_cannot_be_shown_on_the_tty_leaves_nothing_stored() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let terminal = ScriptedTerminal::failing_reveal(ac1_script(server.port, &[CREDENTIAL], true));
+    let output = run_with_terminal(
+        &["mandate", "create"],
+        &HashMap::new(),
+        &store,
+        &terminal,
+        vec![server.ca.clone()],
+        &[],
+    );
+    assert_ne!(output.code, 0);
+    assert_eq!(error_of(&output)["code"], "aborted");
+    assert!(store.entries().is_empty(), "unseen token's Mandate kept");
+    let transcript = terminal.transcript_text();
+    assert!(transcript.contains(NOTHING_STORED));
+    assert!(tokens_in(&transcript).is_empty());
+    assert!(tokens_in(&output.stdout).is_empty() && tokens_in(&output.stderr).is_empty());
+}
+
+#[test]
+fn ac11_real_terminal_writes_the_token_to_dev_tty_only() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terminal.rs"),
+    )
+    .unwrap();
+    let real = source
+        .split("impl Terminal for InquireTerminal {")
+        .nth(1)
+        .expect("InquireTerminal impl")
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    let writer = source
+        .split("fn write_tty(")
+        .nth(1)
+        .expect("write_tty")
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(source.contains("const TTY_PATH: &str = \"/dev/tty\";"));
+    assert!(writer.contains(".open(TTY_PATH)"));
+    let reveal = real
+        .split("fn reveal(")
+        .nth(1)
+        .expect("InquireTerminal::reveal");
+    assert!(reveal.contains("write_tty("));
+    for forbidden in ["stdout", "stderr", "print!", "println!", "eprint"] {
+        assert!(!reveal.contains(forbidden), "reveal uses {forbidden}");
+        assert!(!writer.contains(forbidden), "write_tty uses {forbidden}");
+    }
 }

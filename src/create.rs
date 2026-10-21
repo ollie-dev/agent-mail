@@ -20,6 +20,7 @@ use crate::mandate::{
 use crate::seal::{self, AgentToken};
 use crate::terminal::{Cancelled, Terminal, escape_controls};
 use crate::utf7;
+use zeroize::Zeroizing;
 
 /// Environment variables whose presence means an agent sandbox or agent
 /// session. Best effort: the real barrier is that every Credential must be
@@ -81,7 +82,7 @@ pub(crate) fn run(env: &HashMap<String, String>, context: &Context<'_>) -> Resul
         ));
         return Err(CoreError::StoreUnavailable);
     }
-    terminal.message(&format!(
+    let reveal = Zeroizing::new(format!(
         "Mandate \"{}\" (ID {}) is sealed and stored.\n\n\
          Agent Token, shown only this once (it cannot be shown again):\n\n    {}\n\n\
          Give it to the Agent in the AGENT_MAIL_TOKEN environment variable.",
@@ -89,6 +90,14 @@ pub(crate) fn run(env: &HashMap<String, String>, context: &Context<'_>) -> Resul
         mandate.id,
         token.expose()
     ));
+    if terminal.reveal(&reveal).is_err() {
+        // A Mandate whose token nobody saw is unusable: take it back out.
+        let _ = context.store.delete(&record.key);
+        terminal.message(&format!(
+            "The Agent Token could not be shown on the terminal. {NOTHING_STORED}"
+        ));
+        return Err(CoreError::Aborted);
+    }
     Ok(())
 }
 

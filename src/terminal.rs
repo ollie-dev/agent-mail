@@ -27,6 +27,9 @@ pub trait Terminal {
     fn confirm(&self, prompt: &str, default: bool) -> Result<bool, Cancelled>;
     /// Shows a message.
     fn message(&self, text: &str);
+    /// Shows a secret (the one-time Agent Token) on the controlling terminal
+    /// only, never on stdout or stderr. Fails if it could not be shown.
+    fn reveal(&self, text: &str) -> Result<(), Cancelled>;
 }
 
 /// Escapes control characters (newlines, ANSI escapes) in server-supplied
@@ -73,6 +76,22 @@ impl Terminal for NoTerminal {
     }
 
     fn message(&self, _text: &str) {}
+
+    fn reveal(&self, _text: &str) -> Result<(), Cancelled> {
+        Err(Cancelled)
+    }
+}
+
+/// The controlling terminal, opened directly so nothing goes through the
+/// process's stdout or stderr.
+const TTY_PATH: &str = "/dev/tty";
+
+fn write_tty(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tty = std::fs::OpenOptions::new().write(true).open(TTY_PATH)?;
+    tty.write_all(text.as_bytes())?;
+    tty.write_all(b"\n")?;
+    tty.flush()
 }
 
 /// The real terminal, drawn with `inquire`.
@@ -81,12 +100,17 @@ pub struct InquireTerminal;
 
 impl Terminal for InquireTerminal {
     /// Stdin and stdout must both be TTYs. Stderr must be one too, because
-    /// `inquire` draws its prompts there.
+    /// `inquire` draws its prompts there. The controlling terminal must open
+    /// for writing, because messages and the Agent Token go there.
     fn is_interactive(&self) -> bool {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal()
             && std::io::stderr().is_terminal()
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .open(TTY_PATH)
+                .is_ok()
     }
 
     fn text(&self, prompt: &str, default: Option<&str>) -> Result<String, Cancelled> {
@@ -133,13 +157,15 @@ impl Terminal for InquireTerminal {
             .map_err(|_| Cancelled)
     }
 
-    /// Messages go to stdout, which the interactive check has proven to be
-    /// a terminal, so they are not captured as an Agent's output.
+    /// Messages go to `/dev/tty`, never to stdout or stderr.
     fn message(&self, text: &str) {
-        use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{text}");
-        let _ = out.flush();
+        let _ = write_tty(text);
+    }
+
+    /// Writes to `/dev/tty` only, so a wrapper that captures fd 1 or fd 2
+    /// (even through a pty) never sees the secret.
+    fn reveal(&self, text: &str) -> Result<(), Cancelled> {
+        write_tty(text).map_err(|_| Cancelled)
     }
 }
 
@@ -215,6 +241,8 @@ mod scripted {
         Confirm,
         /// A message.
         Message,
+        /// A secret shown on the controlling terminal only.
+        Reveal,
     }
 
     /// One thing the terminal showed, and the answer if it was a prompt.
@@ -234,6 +262,7 @@ mod scripted {
     #[derive(Debug)]
     pub struct ScriptedTerminal {
         interactive: bool,
+        reveal_fails: bool,
         answers: RefCell<VecDeque<Answer>>,
         transcript: RefCell<Vec<Entry>>,
     }
@@ -243,6 +272,7 @@ mod scripted {
         pub fn new(answers: Vec<Answer>) -> Self {
             Self {
                 interactive: true,
+                reveal_fails: false,
                 answers: RefCell::new(answers.into()),
                 transcript: RefCell::new(Vec::new()),
             }
@@ -253,6 +283,15 @@ mod scripted {
             Self {
                 interactive: false,
                 ..Self::new(Vec::new())
+            }
+        }
+
+        /// An interactive terminal giving `answers` whose controlling
+        /// terminal cannot be written when a secret is revealed.
+        pub fn failing_reveal(answers: Vec<Answer>) -> Self {
+            Self {
+                reveal_fails: true,
+                ..Self::new(answers)
             }
         }
 
@@ -393,6 +432,14 @@ mod scripted {
 
         fn message(&self, text: &str) {
             self.record(Kind::Message, text, &[], None);
+        }
+
+        fn reveal(&self, text: &str) -> Result<(), Cancelled> {
+            if self.reveal_fails {
+                return Err(Cancelled);
+            }
+            self.record(Kind::Reveal, text, &[], None);
+            Ok(())
         }
     }
 }
