@@ -106,6 +106,37 @@
       "updated": "2026-10-21T04:48:46Z",
       "builder": "a25dd80deaf176783",
       "approvedBy": "human"
+    },
+    {
+      "id": "005-mandate-list-delete",
+      "title": "Mandate list and delete",
+      "feature": "Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md)",
+      "branch": "factory/005-mandate-list-delete",
+      "stage": "merged",
+      "round": 3,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "CHANGES",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        },
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-21T18:35:20Z",
+      "builder": "a89c040f844981c7c"
     }
   ]
 }
