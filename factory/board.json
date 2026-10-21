@@ -74,6 +74,38 @@
       "updated": "2026-10-20T10:30:02Z",
       "builder": "a7b4cd2d1f90a0b36",
       "approvedBy": "human"
+    },
+    {
+      "id": "004-mandate-create",
+      "title": "Mandate create",
+      "feature": "Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md)",
+      "branch": "factory/004-mandate-create",
+      "stage": "merged",
+      "round": 3,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        },
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-21T04:48:46Z",
+      "builder": "a25dd80deaf176783",
+      "approvedBy": "human"
     }
   ]
 }
