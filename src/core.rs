@@ -111,8 +111,11 @@ pub struct MandateSummary {
 pub struct DeletedMandate {
     /// Short ID of the deleted Mandate.
     pub id: String,
-    /// Its name.
-    pub name: String,
+    /// Its name, as every deleted record's unauthenticated listing gave it.
+    /// `None` when the records with this ID named different names, since a
+    /// forged record may have supplied any of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Result of `list`.
@@ -202,6 +205,16 @@ pub enum CoreError {
         /// The ID asked for.
         id: String,
     },
+    /// `mandate delete` removed what it could, but the store holds records
+    /// it cannot read, and one of them may be the Mandate, still in force.
+    RevocationIncomplete {
+        /// The ID asked for.
+        id: String,
+        /// Readable records with this ID that were deleted.
+        deleted: usize,
+        /// Stored records that could not be read.
+        unreadable: usize,
+    },
 }
 
 /// The JSON body of an error, in field order `code`, details, `message`.
@@ -221,6 +234,12 @@ pub struct ErrorBody {
     /// The Mandate ID involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Records deleted, if any count is reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<usize>,
+    /// Stored records that could not be read, if reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<usize>,
     /// Human-readable explanation.
     pub message: String,
 }
@@ -243,6 +262,7 @@ impl CoreError {
             Self::SandboxDetected => "sandbox_detected",
             Self::Aborted => "aborted",
             Self::NotFound { .. } => "not_found",
+            Self::RevocationIncomplete { .. } => "revocation_incomplete",
         }
     }
 
@@ -255,6 +275,8 @@ impl CoreError {
                 account: None,
                 accounts: Some(accounts.clone()),
                 id: None,
+                deleted: None,
+                unreadable: None,
                 message: format!(
                     "this agent token covers several accounts ({}) and choosing one is not supported yet; ask the human for a token whose Mandate covers a single account",
                     accounts.join(", ")
@@ -268,8 +290,40 @@ impl CoreError {
                 account: None,
                 accounts: None,
                 id: Some(id.clone()),
+                deleted: None,
+                unreadable: None,
                 message: format!(
                     "no Mandate has ID {id}; run `agent-mail mandate list` to see the IDs"
+                ),
+            };
+        }
+        if let Self::RevocationIncomplete {
+            id,
+            deleted,
+            unreadable,
+        } = self
+        {
+            let records = match unreadable {
+                1 => "1 stored record could not be read".to_string(),
+                n => format!("{n} stored records could not be read"),
+            };
+            let done = if *deleted == 0 {
+                format!("no readable Mandate has ID {id}, but {records} and may hold it")
+            } else {
+                format!(
+                    "deleted the readable records with ID {id}, but {records} and may still hold this Mandate"
+                )
+            };
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: None,
+                accounts: None,
+                id: Some(id.clone()),
+                deleted: Some(*deleted),
+                unreadable: Some(*unreadable),
+                message: format!(
+                    "{done}, so its agent token may still work; check Keychain Access for `agent-mail` items that `agent-mail mandate list` does not show and delete them"
                 ),
             };
         }
@@ -325,7 +379,9 @@ impl CoreError {
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
             ),
-            Self::AccountRequired { .. } | Self::NotFound { .. } => {
+            Self::AccountRequired { .. }
+            | Self::NotFound { .. }
+            | Self::RevocationIncomplete { .. } => {
                 unreachable!("handled above")
             }
             Self::InteractiveTerminalRequired => (
@@ -353,6 +409,8 @@ impl CoreError {
             account,
             accounts: None,
             id: None,
+            deleted: None,
+            unreadable: None,
             message,
         }
     }
@@ -418,39 +476,52 @@ fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
 /// The metadata is unauthenticated and any local process can add an item, so
 /// a decoy may copy a real Mandate's ID. Removing only one match could leave
 /// the real record, and its token, in place while reporting success; so all
-/// matches go, and success means none is left.
+/// matches go. A record that cannot be read cannot be matched, so if the
+/// store holds any, success cannot be promised and the result is
+/// [`CoreError::RevocationIncomplete`] (after deleting every readable match).
+/// The name is reported only if every match agreed on it.
 fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, CoreError> {
     let entries = context
         .store
         .entries()
         .map_err(|_| CoreError::StoreUnavailable)?;
-    let matches: Vec<_> = entries
-        .iter()
-        .filter_map(|(key, value)| {
-            seal::listing(value)
-                .ok()
-                .filter(|l| l.id == id)
-                .map(|l| (key, l.name))
-        })
-        .collect();
-    let mut deleted = None;
+    let mut matches = Vec::new();
+    let mut unreadable = 0;
+    for (key, value) in &entries {
+        match seal::listing(value) {
+            Ok(listing) if listing.id == id => matches.push((key, listing.name)),
+            Ok(_) => {}
+            Err(_) => unreadable += 1,
+        }
+    }
+    let mut deleted = 0;
+    let mut names = Vec::new();
     for (key, name) in matches {
         match context.store.delete(key) {
             Ok(true) => {
-                deleted.get_or_insert(name);
+                deleted += 1;
+                names.push(name);
             }
             // Removed by someone else since it was read.
             Ok(false) => {}
             Err(_) => return Err(CoreError::StoreUnavailable),
         }
     }
-    match deleted {
-        Some(name) => Ok(DeletedMandate {
+    if unreadable > 0 {
+        return Err(CoreError::RevocationIncomplete {
             id: id.to_string(),
-            name,
-        }),
-        None => Err(CoreError::NotFound { id: id.to_string() }),
+            deleted,
+            unreadable,
+        });
     }
+    let Some(first) = names.first() else {
+        return Err(CoreError::NotFound { id: id.to_string() });
+    };
+    let name = names.iter().all(|n| n == first).then(|| first.clone());
+    Ok(DeletedMandate {
+        id: id.to_string(),
+        name,
+    })
 }
 
 /// Formats Unix seconds as RFC 3339 UTC, e.g. `2026-10-20T08:00:00Z`.
@@ -581,6 +652,16 @@ mod tests {
             CoreError::Aborted,
             CoreError::NotFound {
                 id: "ffffffff".to_string(),
+            },
+            CoreError::RevocationIncomplete {
+                id: "aaaa1111".to_string(),
+                deleted: 1,
+                unreadable: 2,
+            },
+            CoreError::RevocationIncomplete {
+                id: "aaaa1111".to_string(),
+                deleted: 0,
+                unreadable: 1,
             },
         ];
         for error in errors {

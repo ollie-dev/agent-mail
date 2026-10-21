@@ -64,7 +64,10 @@ pub enum MandateCommand {
     List,
     /// Delete a Mandate by its ID, revoking its Agent Token at once
     ///
-    /// Needs no agent token or Credential and asks no confirmation.
+    /// Needs no agent token or Credential and asks no confirmation. Deletes
+    /// every stored record with this ID. Fails with `revocation_incomplete`
+    /// if the store holds records it cannot read, since one may be this
+    /// Mandate.
     Delete {
         /// The Mandate's ID, as shown by `agent-mail mandate list`
         id: String,
@@ -147,11 +150,17 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),
-        Outcome::Deleted(deleted) if text => format!(
-            "Deleted Mandate \"{}\" (ID {}).\n",
-            escape_controls(&deleted.name),
-            escape_controls(&deleted.id)
-        ),
+        Outcome::Deleted(deleted) if text => match &deleted.name {
+            Some(name) => format!(
+                "Deleted Mandate \"{}\" (ID {}).\n",
+                escape_controls(name),
+                escape_controls(&deleted.id)
+            ),
+            None => format!(
+                "Deleted Mandate (ID {}). The stored records with this ID had different names, so none is shown.\n",
+                escape_controls(&deleted.id)
+            ),
+        },
         Outcome::Deleted(deleted) => json_line(&serde_json::json!({ "deleted": deleted })),
     }
 }
