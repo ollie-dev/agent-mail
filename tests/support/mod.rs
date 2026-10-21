@@ -471,3 +471,45 @@ pub fn token_hash(token: &str) -> String {
     let secret = URL_SAFE_NO_PAD.decode(body).expect("token body");
     URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &secret))
 }
+
+/// A fresh audit log path in a new temporary directory, never the user's
+/// data directory. Nothing exists there yet.
+pub fn temp_audit_log() -> std::path::PathBuf {
+    agent_mail::audit::AuditLog::temporary()
+        .path()
+        .expect("temporary logs have a path")
+        .to_path_buf()
+}
+
+/// Like [`run_trusting`], appending audit entries to `log`.
+pub fn run_logged(
+    args: &[&str],
+    token: Option<&str>,
+    store: &dyn MandateStore,
+    ca: &CertificateDer<'static>,
+    log: &std::path::Path,
+) -> RunOutput {
+    let mut env = HashMap::new();
+    if let Some(token) = token {
+        env.insert(agent_mail::TOKEN_VAR.to_string(), token.to_string());
+    }
+    let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+    let context = Context::trusting_only(store, vec![ca.clone()])
+        .with_audit_log(agent_mail::audit::AuditLog::at(log));
+    agent_mail::run(argv, &env, &context)
+}
+
+/// The audit log's lines, without their `\n`; empty if there is no log.
+/// Panics if the file does not end in `\n`.
+pub fn audit_lines(log: &std::path::Path) -> Vec<String> {
+    let text = match std::fs::read_to_string(log) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => panic!("cannot read the audit log: {e}"),
+    };
+    assert!(
+        text.is_empty() || text.ends_with('\n'),
+        "audit log does not end in a newline"
+    );
+    text.lines().map(str::to_string).collect()
+}

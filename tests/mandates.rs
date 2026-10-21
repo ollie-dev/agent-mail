@@ -492,7 +492,10 @@ fn run_on(args: &[&str], token: Option<&str>, store: &dyn MandateStore) -> RunOu
         env.insert(agent_mail::TOKEN_VAR.to_string(), token.to_string());
     }
     let argv = std::iter::once("agent-mail").chain(args.iter().copied());
-    agent_mail::run(argv, &env, &agent_mail::Context::new(store))
+    // Never the platform audit log: `list` runs here too.
+    let context =
+        agent_mail::Context::new(store).with_audit_log(agent_mail::audit::AuditLog::temporary());
+    agent_mail::run(argv, &env, &context)
 }
 
 /// A readable decoy carrying A's ID, with `name`, under `key`.
