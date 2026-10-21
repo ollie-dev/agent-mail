@@ -102,6 +102,10 @@ fn ac1_script(port: u16, credentials: &[&str], confirm: bool) -> Vec<Answer> {
         no(),
         Answer::Confirm(confirm),
     ]);
+    if confirm {
+        // Decline the export offer shown after the Agent Token.
+        script.push(no());
+    }
     script
 }
 
@@ -115,6 +119,7 @@ fn ac5_script(a: u16, b: u16) -> Vec<Answer> {
         Answer::tick(&["list", "search"]),
         no(),
         yes(),
+        no(),
     ]);
     script
 }
@@ -207,6 +212,7 @@ fn ac3_gmail_preset_asks_only_address_and_app_password() {
         Answer::tick(&["list"]),
         no(),
         yes(),
+        no(),
     ];
     let session = create_with(
         &["mandate", "create"],
@@ -353,6 +359,7 @@ fn ac5_same_login_twice_is_refused_and_reasked() {
         Answer::tick(&["list"]),
         no(),
         yes(),
+        no(),
     ]);
     let session = create(script, &store, &[&a, &b]);
     assert_completed(&session);
@@ -721,6 +728,7 @@ fn checklist_shows_decoded_names_and_draft_grants_have_no_mailboxes() {
         Answer::tick(&["list", "draft"]),
         no(),
         yes(),
+        no(),
     ]);
     let session = create(script, &store, &[&server]);
     assert_completed(&session);
