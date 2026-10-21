@@ -40,11 +40,161 @@ pub enum Mode {
     PlaintextOnly,
 }
 
+/// One fixture message. All values are fake.
+#[derive(Debug, Clone)]
+pub struct FakeMessage {
+    pub uid: u32,
+    /// Display name of the From address.
+    pub from_name: Option<&'static str>,
+    /// `mailbox@host` of the From address.
+    pub from: &'static str,
+    /// `mailbox@host` of the To address.
+    pub to: &'static str,
+    /// The raw Subject header (may be RFC 2047).
+    pub subject: String,
+    pub body: &'static str,
+    /// IMAP `date-time`, e.g. `01-Oct-2026 09:00:00 +0000`.
+    pub internal_date: &'static str,
+    pub flags: Vec<String>,
+}
+
+impl FakeMessage {
+    /// The From header as it appears in the message.
+    fn header_from(&self) -> String {
+        match self.from_name {
+            Some(name) => format!("{name} <{}>", self.from),
+            None => self.from.to_string(),
+        }
+    }
+
+    /// The whole message, headers and body.
+    fn raw(&self) -> String {
+        format!(
+            "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n",
+            self.header_from(),
+            self.to,
+            self.subject,
+            self.body
+        )
+    }
+
+    /// The internal date's calendar day, in its own time zone.
+    fn day(&self) -> (u32, u32, u32) {
+        imap_date(&self.internal_date[..11]).expect("fixture date")
+    }
+}
+
+/// One fixture mailbox.
+#[derive(Debug, Clone)]
+pub struct FakeMailbox {
+    /// Raw (modified UTF-7) name.
+    pub name: &'static str,
+    pub uidvalidity: u32,
+    pub messages: Vec<FakeMessage>,
+}
+
+/// UIDVALIDITY of the fixture `INBOX`.
+pub const INBOX_UIDVALIDITY: u32 = 1_700_000_001;
+/// UIDVALIDITY of the fixture `Archive`.
+pub const ARCHIVE_UIDVALIDITY: u32 = 1_700_000_002;
+
+fn flags(list: &[&str]) -> Vec<String> {
+    list.iter().map(|f| (*f).to_string()).collect()
+}
+
+/// The fixture mailboxes: `INBOX` (4 messages), `Archive` (25), and empty
+/// `Sent`, `Spam` and `[Gmail]/Entwürfe`. `Missing` does not exist.
+pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
+    let inbox = vec![
+        FakeMessage {
+            uid: 1,
+            from_name: Some("Alice Example"),
+            from: "alice@example.com",
+            to: LOGIN,
+            subject: "Quarterly report".to_string(),
+            body: "numbers attached",
+            internal_date: "01-Oct-2026 09:00:00 +0000",
+            flags: flags(&["\\Seen"]),
+        },
+        FakeMessage {
+            uid: 2,
+            from_name: None,
+            from: "bob@example.com",
+            to: LOGIN,
+            subject: "Lunch?".to_string(),
+            body: "pizza today",
+            internal_date: "05-Oct-2026 09:00:00 +0000",
+            flags: Vec::new(),
+        },
+        FakeMessage {
+            uid: 3,
+            from_name: None,
+            from: "alice@example.com",
+            to: "team@example.com",
+            subject: "Re: Quarterly report".to_string(),
+            body: "pizza on friday",
+            internal_date: "10-Oct-2026 09:00:00 +0000",
+            flags: flags(&["\\Flagged"]),
+        },
+        FakeMessage {
+            uid: 4,
+            from_name: Some("Carol"),
+            from: "carol@example.com",
+            to: LOGIN,
+            subject: "=?UTF-8?Q?Rechnung_f=C3=BCr_Oktober?=".to_string(),
+            body: "please pay",
+            internal_date: "15-Oct-2026 11:00:00 +0200",
+            flags: flags(&["\\Seen", "\\Flagged"]),
+        },
+    ];
+    let archive = (1..=25)
+        .map(|uid| FakeMessage {
+            uid,
+            from_name: None,
+            from: "news@example.com",
+            to: LOGIN,
+            subject: format!("Newsletter {uid}"),
+            body: "news of the week",
+            internal_date: "02-Sep-2026 08:00:00 +0000",
+            flags: Vec::new(),
+        })
+        .collect();
+    let empty = |name, uidvalidity| FakeMailbox {
+        name,
+        uidvalidity,
+        messages: Vec::new(),
+    };
+    vec![
+        FakeMailbox {
+            name: "INBOX",
+            uidvalidity: INBOX_UIDVALIDITY,
+            messages: inbox,
+        },
+        FakeMailbox {
+            name: "Archive",
+            uidvalidity: ARCHIVE_UIDVALIDITY,
+            messages: archive,
+        },
+        empty("Sent", 1_700_000_004),
+        empty("Spam", 1_700_000_005),
+        empty("[Gmail]/Entw&APw-rfe", 1_700_000_003),
+    ]
+}
+
+/// What the fake server holds and has seen, shared by its connections.
+#[derive(Debug, Default)]
+struct State {
+    commands: Vec<String>,
+    mailboxes: Vec<FakeMailbox>,
+    searches: Vec<String>,
+    fetch_uid_counts: Vec<usize>,
+}
+
 /// An in-process fake IMAP server on a real TCP port.
 pub struct FakeImap {
     pub port: u16,
     pub ca: CertificateDer<'static>,
-    commands: Arc<Mutex<Vec<String>>>,
+    state: Arc<Mutex<State>>,
     connections: Arc<AtomicUsize>,
 }
 
@@ -54,9 +204,12 @@ impl FakeImap {
         let (ca, tls) = tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let port = listener.local_addr().unwrap().port();
-        let commands = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(Mutex::new(State {
+            mailboxes: fixture_mailboxes(),
+            ..State::default()
+        }));
         let connections = Arc::new(AtomicUsize::new(0));
-        let (c, n) = (commands.clone(), connections.clone());
+        let (c, n) = (state.clone(), connections.clone());
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -68,15 +221,40 @@ impl FakeImap {
         Self {
             port,
             ca,
-            commands,
+            state,
             connections,
         }
     }
 
-    /// Command verbs received, upper-cased, in order. Arguments are dropped
-    /// so the Credential never lands in test output.
+    /// Command verbs received, upper-cased, in order (`UID SEARCH` and
+    /// `UID FETCH` with their sub-verb). Arguments are dropped so the
+    /// Credential never lands in test output.
     pub fn commands(&self) -> Vec<String> {
-        self.commands.lock().unwrap().clone()
+        self.state.lock().unwrap().commands.clone()
+    }
+
+    /// The arguments of every `UID SEARCH`, in order.
+    pub fn searches(&self) -> Vec<String> {
+        self.state.lock().unwrap().searches.clone()
+    }
+
+    /// For each `UID FETCH`, how many UIDs its set covered.
+    pub fn fetch_uid_counts(&self) -> Vec<usize> {
+        self.state.lock().unwrap().fetch_uid_counts.clone()
+    }
+
+    /// The current flags of every message, as `(mailbox, uid, flags)`.
+    pub fn all_flags(&self) -> Vec<(String, u32, Vec<String>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .mailboxes
+            .iter()
+            .flat_map(|m| {
+                m.messages
+                    .iter()
+                    .map(|msg| (m.name.to_string(), msg.uid, msg.flags.clone()))
+            })
+            .collect()
     }
 
     /// Number of TCP connections accepted.
@@ -110,12 +288,7 @@ fn tls_config() -> (CertificateDer<'static>, Arc<ServerConfig>) {
     (ca_cert.der().clone(), Arc::new(config))
 }
 
-fn serve(
-    mut stream: TcpStream,
-    mode: Mode,
-    tls: Arc<ServerConfig>,
-    commands: Arc<Mutex<Vec<String>>>,
-) {
+fn serve(mut stream: TcpStream, mode: Mode, tls: Arc<ServerConfig>, commands: Arc<Mutex<State>>) {
     match mode {
         Mode::Implicit => {
             let conn = ServerConnection::new(tls).unwrap();
@@ -161,19 +334,27 @@ fn session(
     stream: &mut (impl Read + Write),
     mode: Mode,
     secure: bool,
-    commands: &Mutex<Vec<String>>,
+    state: &Mutex<State>,
     greet: bool,
 ) -> Option<Upgrade> {
     if greet {
         send(stream, "* OK fake IMAP ready\r\n")?;
     }
+    // The opened mailbox's index, and whether it was opened read-only.
+    let mut opened: Option<(usize, bool)> = None;
     loop {
         let line = read_line(stream)?;
         let mut parts = line.splitn(3, ' ');
         let tag = parts.next().unwrap_or("").to_string();
-        let verb = parts.next().unwrap_or("").to_ascii_uppercase();
-        let args = parts.next().unwrap_or("");
-        commands.lock().unwrap().push(verb.clone());
+        let mut verb = parts.next().unwrap_or("").to_ascii_uppercase();
+        let mut args = parts.next().unwrap_or("").to_string();
+        if verb == "UID" {
+            let (sub, rest) = args.split_once(' ').unwrap_or((&args, ""));
+            verb = format!("UID {}", sub.to_ascii_uppercase());
+            args = rest.to_string();
+        }
+        let args = args.as_str();
+        state.lock().unwrap().commands.push(verb.clone());
         match verb.as_str() {
             "CAPABILITY" => {
                 let caps = if !secure && mode == Mode::Starttls {
@@ -204,6 +385,83 @@ fn session(
                 reply.push_str(&format!("{tag} OK LIST done\r\n"));
                 send(stream, &reply)?;
             }
+            "EXAMINE" | "SELECT" => {
+                let name = imap_strings(args).into_iter().next().unwrap_or_default();
+                let state = state.lock().unwrap();
+                match state.mailboxes.iter().position(|m| m.name == name) {
+                    Some(index) => {
+                        let mailbox = &state.mailboxes[index];
+                        let read_only = verb == "EXAMINE";
+                        opened = Some((index, read_only));
+                        let access = if read_only { "READ-ONLY" } else { "READ-WRITE" };
+                        let next = mailbox.messages.last().map_or(1, |m| m.uid + 1);
+                        send(
+                            stream,
+                            &format!(
+                                "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n\
+                                 * {} EXISTS\r\n* 0 RECENT\r\n\
+                                 * OK [UIDVALIDITY {}] UIDs valid\r\n\
+                                 * OK [UIDNEXT {next}] predicted next UID\r\n\
+                                 {tag} OK [{access}] {verb} done\r\n",
+                                mailbox.messages.len(),
+                                mailbox.uidvalidity
+                            ),
+                        )?;
+                    }
+                    None => {
+                        opened = None;
+                        send(stream, &format!("{tag} NO no such mailbox\r\n"))?;
+                    }
+                }
+            }
+            "UID SEARCH" => {
+                let mut state = state.lock().unwrap();
+                state.searches.push(args.to_string());
+                let reply = match opened {
+                    None => format!("{tag} BAD no mailbox open\r\n"),
+                    Some((index, _)) => match search_uids(&state.mailboxes[index], args) {
+                        Some(uids) => {
+                            let uids: Vec<String> = uids.iter().map(u32::to_string).collect();
+                            let sep = if uids.is_empty() { "" } else { " " };
+                            format!(
+                                "* SEARCH{sep}{}\r\n{tag} OK UID SEARCH done\r\n",
+                                uids.join(" ")
+                            )
+                        }
+                        None => format!("{tag} BAD bad search criteria\r\n"),
+                    },
+                };
+                drop(state);
+                send(stream, &reply)?;
+            }
+            "UID FETCH" => {
+                let mut state = state.lock().unwrap();
+                let reply = match opened {
+                    None => format!("{tag} BAD no mailbox open\r\n"),
+                    Some((index, _)) => {
+                        let (set, items) = args.split_once(' ').unwrap_or((args, ""));
+                        let mailbox = &mut state.mailboxes[index];
+                        let mut reply = String::new();
+                        let mut count = 0;
+                        for (seq, message) in mailbox.messages.iter_mut().enumerate() {
+                            if in_uid_set(set, message.uid) {
+                                count += 1;
+                                reply.push_str(&fetch_response(seq + 1, message, items));
+                            }
+                        }
+                        state.fetch_uid_counts.push(count);
+                        reply.push_str(&format!("{tag} OK UID FETCH done\r\n"));
+                        reply
+                    }
+                };
+                drop(state);
+                send(stream, &reply)?;
+            }
+            "STORE" | "UID STORE" | "EXPUNGE" | "UID EXPUNGE" | "COPY" | "UID COPY" | "MOVE"
+            | "UID MOVE" => {
+                // Recorded above; this fake never changes state for them.
+                send(stream, &format!("{tag} NO not supported by the fake\r\n"))?;
+            }
             "LOGOUT" => {
                 send(stream, &format!("* BYE bye\r\n{tag} OK LOGOUT done\r\n"))?;
                 return None;
@@ -213,6 +471,197 @@ fn session(
             }
         }
     }
+}
+
+/// Parses an IMAP `date` (`05-Oct-2026` or `5-Oct-2026`) as
+/// `(year, month, day)`.
+fn imap_date(text: &str) -> Option<(u32, u32, u32)> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let mut parts = text.trim().split('-');
+    let day = parts.next()?.parse().ok()?;
+    let month = parts.next()?.to_ascii_lowercase();
+    let month = MONTHS.iter().position(|m| *m == month)? as u32 + 1;
+    let year = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+/// Evaluates `UID SEARCH` criteria (RFC 3501 subset: `CHARSET`, `ALL`,
+/// `FROM`, `TO`, `SUBJECT`, `TEXT`, `SINCE`, `BEFORE`, `UNSEEN`, `FLAGGED`,
+/// combined with AND) against `mailbox`. `None` for anything else.
+fn search_uids(mailbox: &FakeMailbox, args: &str) -> Option<Vec<u32>> {
+    let tokens = imap_strings(args);
+    let mut tokens = tokens.iter();
+    type Test = Box<dyn Fn(&FakeMessage) -> bool>;
+    let mut tests: Vec<Test> = Vec::new();
+    let contains =
+        |haystack: &str, needle: &str| haystack.to_lowercase().contains(&needle.to_lowercase());
+    while let Some(key) = tokens.next() {
+        match key.to_ascii_uppercase().as_str() {
+            "CHARSET" => {
+                let charset = tokens.next()?;
+                if !charset.eq_ignore_ascii_case("UTF-8")
+                    && !charset.eq_ignore_ascii_case("US-ASCII")
+                {
+                    return None;
+                }
+            }
+            "ALL" => {}
+            "FROM" => {
+                let s = tokens.next()?.clone();
+                tests.push(Box::new(move |m| contains(&m.header_from(), &s)));
+            }
+            "TO" => {
+                let s = tokens.next()?.clone();
+                tests.push(Box::new(move |m| contains(m.to, &s)));
+            }
+            "SUBJECT" => {
+                let s = tokens.next()?.clone();
+                tests.push(Box::new(move |m| contains(&m.subject, &s)));
+            }
+            "TEXT" => {
+                let s = tokens.next()?.clone();
+                tests.push(Box::new(move |m| contains(&m.raw(), &s)));
+            }
+            "SINCE" => {
+                let day = imap_date(tokens.next()?)?;
+                tests.push(Box::new(move |m| m.day() >= day));
+            }
+            "BEFORE" => {
+                let day = imap_date(tokens.next()?)?;
+                tests.push(Box::new(move |m| m.day() < day));
+            }
+            "UNSEEN" => tests.push(Box::new(|m| !m.flags.iter().any(|f| f == "\\Seen"))),
+            "FLAGGED" => tests.push(Box::new(|m| m.flags.iter().any(|f| f == "\\Flagged"))),
+            _ => return None,
+        }
+    }
+    Some(
+        mailbox
+            .messages
+            .iter()
+            .filter(|m| tests.iter().all(|t| t(m)))
+            .map(|m| m.uid)
+            .collect(),
+    )
+}
+
+/// Whether `uid` is in the IMAP sequence set `set` (`n`, `a:b`, `*`).
+fn in_uid_set(set: &str, uid: u32) -> bool {
+    set.split(',').any(|part| {
+        let bound = |s: &str| {
+            if s == "*" {
+                Some(u32::MAX)
+            } else {
+                s.parse().ok()
+            }
+        };
+        match part.split_once(':') {
+            Some((a, b)) => match (bound(a), bound(b)) {
+                (Some(a), Some(b)) => (a.min(b)..=a.max(b)).contains(&uid),
+                _ => false,
+            },
+            None => bound(part) == Some(uid),
+        }
+    })
+}
+
+/// An IMAP quoted string.
+fn quote(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// An IMAP literal.
+fn literal(text: &str) -> String {
+    format!("{{{}}}\r\n{text}", text.len())
+}
+
+/// An envelope address list with one address.
+fn address(name: Option<&str>, addr: &str) -> String {
+    let (mailbox, host) = addr.split_once('@').unwrap_or((addr, ""));
+    let name = name.map_or_else(|| "NIL".to_string(), quote);
+    format!("(({name} NIL {} {}))", quote(mailbox), quote(host))
+}
+
+/// Splits fetch items at top-level spaces, keeping `BODY[...]` sections
+/// and parenthesised lists whole.
+fn fetch_items(items: &str) -> Vec<String> {
+    let items = items.trim();
+    let items = items
+        .strip_prefix('(')
+        .and_then(|i| i.strip_suffix(')'))
+        .unwrap_or(items);
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for c in items.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth -= 1,
+            ' ' if depth == 0 => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// One `FETCH` response for `message`. A non-peek body fetch sets `\Seen`,
+/// as RFC 3501 says a server must; the fake does so even after `EXAMINE`,
+/// so a client that forgets `.PEEK` shows up in tests.
+fn fetch_response(seq: usize, message: &mut FakeMessage, items: &str) -> String {
+    let mut parts = vec![format!("UID {}", message.uid)];
+    let mut seen = false;
+    for item in fetch_items(items) {
+        let upper = item.to_ascii_uppercase();
+        if upper == "UID" {
+            continue;
+        } else if upper == "FLAGS" {
+            // Filled in below, after any implicit \Seen.
+        } else if upper == "INTERNALDATE" {
+            parts.push(format!("INTERNALDATE {}", quote(message.internal_date)));
+        } else if upper == "ENVELOPE" {
+            parts.push(format!(
+                "ENVELOPE (NIL {} {from} {from} {from} {} NIL NIL NIL NIL)",
+                quote(&message.subject),
+                address(None, message.to),
+                from = address(message.from_name, message.from),
+            ));
+        } else if let Some(section) = upper.strip_prefix("BODY.PEEK") {
+            parts.push(format!("BODY{section} {}", literal(&message.raw())));
+        } else if upper.starts_with("BODY[") || upper == "RFC822" {
+            seen = true;
+            parts.push(format!("{item} {}", literal(&message.raw())));
+        } else if upper == "RFC822.TEXT" {
+            seen = true;
+            parts.push(format!("RFC822.TEXT {}", literal(message.body)));
+        } else if upper == "RFC822.HEADER" {
+            parts.push(format!("RFC822.HEADER {}", literal(&message.raw())));
+        }
+    }
+    if seen && !message.flags.iter().any(|f| f == "\\Seen") {
+        message.flags.push("\\Seen".to_string());
+    }
+    if fetch_items(items)
+        .iter()
+        .any(|i| i.eq_ignore_ascii_case("FLAGS"))
+        || seen
+    {
+        parts.insert(1, format!("FLAGS ({})", message.flags.join(" ")));
+    }
+    format!("* {seq} FETCH ({})\r\n", parts.join(" "))
 }
 
 /// Whether `LOGIN` arguments name a known login with the fake Credential.
