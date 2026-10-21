@@ -6,7 +6,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With two Mandates stored, `mandate list` shows both with ID, name, Accounts, Grants and creation date, as JSON and with `--text`
 - [ ] No Credential, Agent Token or token hash appears in the listing output

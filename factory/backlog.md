@@ -6,7 +6,7 @@
 - [x] CLI polish: running `agent-mail` with no arguments prints a usage hint; the `--help` description avoids the word "mandate" until mandate commands exist → 002-cli-polish
 - [x] Ticket 02: Tracer bullet: an Agent lists its granted mailboxes (.scratch/agent-mail-v1/issues/02-tracer-list-mailboxes.md) → 003-tracer-list-mailboxes
 - [x] Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md) → 004-mandate-create
-- [ ] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md)
+- [x] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md) → 005-mandate-list-delete
 - [ ] Ticket 05: Export a Mandate's choices and re-create from file (.scratch/agent-mail-v1/issues/05-mandate-export-from.md)
 - [ ] Ticket 06: Audit log (.scratch/agent-mail-v1/issues/06-audit-log.md)
 - [ ] Ticket 07: Search messages (.scratch/agent-mail-v1/issues/07-search.md)

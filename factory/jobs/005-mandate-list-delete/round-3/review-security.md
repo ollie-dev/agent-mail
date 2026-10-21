@@ -1,0 +1,11 @@
+VERDICT: PASS
+
+## Findings
+- [nit] src/core.rs:484-524 (`mandate_delete`): any local process that can add an `agent-mail` Keychain item with an unreadable value can make every `mandate delete` exit 1 with `revocation_incomplete`, which wears down the confirmation's meaning. Readable matches are still deleted first, so revocation itself is never blocked. The message tells the human what to do. This is the conservative trade-off the human asked for, so no change is needed. A later ticket could have `mandate list` name the unreadable items' store keys, or their Keychain creation dates, so the human can find them without guesswork.
+- [nit] src/core.rs:520: name agreement cannot catch a decoy that copies the real name as well as the ID. That case is harmless, because the name shown is then the real one. Noted only to make clear that the name stays unauthenticated by design (ADR-0003: delete has no token).
+
+## Round-2 items (human note "fix the mandate revocation incl. the name")
+- False success while an unreadable real record survives: **resolved.** `mandate_delete` counts every entry whose listing fails to parse. An empty value, which is how `entries()` returns an access-denied item, counts here. If any such entry exists, delete returns `RevocationIncomplete { id, deleted, unreadable }` after removing the readable matches, prints nothing on stdout and exits 1. A store error during enumeration or delete still gives `store_unavailable`. `tests/mandates.rs::delete_does_not_claim_success_while_an_unreadable_record_may_survive` covers this, both with and without a deleted match.
+- Reported name may come from a forged listing: **resolved.** `name` is `Option`, and it is set only when every deleted record's listing agrees. Otherwise JSON omits it and text says no name is shown. In text, the ID still goes through `escape_controls`.
+
+Checked again: the new error body adds only counts and the ID the caller supplied. It holds no store keys, Credentials, tokens or hashes. In text mode, error messages are escaped, as in round 2. There are no new dependencies, and Cargo.toml and Cargo.lock are unchanged. The new test fixtures contain no real credentials. I ran `cargo test`: every suite is green, with the 1 ignored keychain test.
