@@ -205,6 +205,24 @@
       "reason": "",
       "updated": "2026-10-21T20:54:50Z",
       "builder": "a5fe9e88b47865275"
+    },
+    {
+      "id": "009-read-message",
+      "title": "Read a message",
+      "feature": "Ticket 08: Read a message (.scratch/agent-mail-v1/issues/08-read.md)",
+      "branch": "factory/009-read-message",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "reason": "",
+      "updated": "2026-10-21T21:09:10Z",
+      "builder": "accd42e461b2b0438"
     }
   ]
 }
