@@ -5,7 +5,7 @@
 - [x] Ticket 01: Project skeleton (.scratch/agent-mail-v1/issues/01-project-skeleton.md) → 001-project-skeleton
 - [x] CLI polish: running `agent-mail` with no arguments prints a usage hint; the `--help` description avoids the word "mandate" until mandate commands exist → 002-cli-polish
 - [x] Ticket 02: Tracer bullet: an Agent lists its granted mailboxes (.scratch/agent-mail-v1/issues/02-tracer-list-mailboxes.md) → 003-tracer-list-mailboxes
-- [ ] Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md)
+- [x] Ticket 03: `mandate create`: guided setup stored in the Keychain (.scratch/agent-mail-v1/issues/03-mandate-create.md) → 004-mandate-create
 - [ ] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md)
 - [ ] Ticket 05: Export a Mandate's choices and re-create from file (.scratch/agent-mail-v1/issues/05-mandate-export-from.md)
 - [ ] Ticket 06: Audit log (.scratch/agent-mail-v1/issues/06-audit-log.md)

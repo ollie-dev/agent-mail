@@ -8,7 +8,7 @@ Flow: name → add one or more Accounts (Gmail preset with server and port fille
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A scripted session that adds a generic IMAP Account, ticks two mailboxes and the operations list and search, and confirms, results in a stored Mandate whose Policy has exactly those Grants, and prints one Agent Token
 - [ ] The printed token opens the stored Mandate, and `agent-mail list` with that token returns exactly the two ticked mailboxes
