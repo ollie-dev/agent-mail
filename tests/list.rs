@@ -8,8 +8,8 @@ use agent_mail::seal::AgentToken;
 use agent_mail::store::InMemoryStore;
 use serde_json::{Value, json};
 use support::{
-    FakeImap, LOGIN, Mode, assert_no_secrets, error_of, grant, mandate, run, run_trusting,
-    store_mandate,
+    FakeImap, LOGIN, Mode, OTHER_LOGIN, account, assert_no_secrets, error_of, grant, grant_on,
+    mandate, mandate_for, run, run_trusting, store_mandate,
 };
 
 /// Stores one Mandate with `grants` for a fresh server in `mode`.
@@ -244,6 +244,7 @@ fn ac7_tampered_or_wrongly_keyed_record_fails_through_list() {
     let (key, mut value) = tampered.entries().remove(0);
     let last = value.len() - 1;
     value[last] ^= 0x01;
+    agent_mail::store::MandateStore::delete(&tampered, &key).unwrap();
     agent_mail::store::MandateStore::put(&tampered, &key, &value).unwrap();
     let (out, _) = list_both_modes(Some(token.expose()), &tampered, &server);
     assert_token_error(&out, "invalid_token");
@@ -303,4 +304,37 @@ fn ac10_untrusted_certificate_is_refused_without_leaking_secrets() {
     assert_eq!(out.code, 1);
     assert_eq!(error_of(&out)["code"], "tls_certificate");
     assert!(!server.commands().iter().any(|c| c == "LOGIN"));
+}
+
+#[test]
+fn multi_account_mandate_requires_an_account_and_never_merges() {
+    let a = FakeImap::start(Mode::Implicit);
+    let b = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let token = store_mandate(
+        &store,
+        &mandate_for(
+            vec![
+                account(LOGIN, a.port, TlsMode::Implicit),
+                account(OTHER_LOGIN, b.port, TlsMode::Implicit),
+            ],
+            vec![
+                grant_on(Operation::List, LOGIN, &["INBOX"]),
+                grant_on(Operation::List, OTHER_LOGIN, &["Archive"]),
+            ],
+        ),
+    );
+    let (out, text) = list_both_modes(Some(token.expose()), &store, &a);
+
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    let error = error_of(&out);
+    assert_eq!(error["code"], "account_required");
+    assert_eq!(error["accounts"], json!([LOGIN, OTHER_LOGIN]));
+    assert!(
+        text.stderr.contains("account_required"),
+        "{:?}",
+        text.stderr
+    );
+    assert_eq!(a.connections() + b.connections(), 0);
 }

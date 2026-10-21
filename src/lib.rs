@@ -4,10 +4,12 @@
 //! drive them in-process.
 
 pub mod core;
+pub mod create;
 pub mod imap;
 pub mod mandate;
 pub mod seal;
 pub mod store;
+pub mod terminal;
 pub mod utf7;
 
 use std::collections::HashMap;
@@ -15,11 +17,9 @@ use std::ffi::OsString;
 
 use clap::{Parser, Subcommand};
 
-pub use crate::core::Context;
+pub use crate::core::{Context, TOKEN_VAR};
 use crate::core::{CoreError, Outcome};
-
-/// Environment variable holding the presented Agent Token.
-pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
+use crate::terminal::escape_controls;
 
 /// Command-line interface of the `agent-mail` binary.
 #[derive(Debug, Parser)]
@@ -41,6 +41,23 @@ pub enum CliCommand {
     /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
     /// default; errors go to stderr as JSON with a stable `code`.
     List,
+    /// Create and manage Mandates (run by the human, not by agents)
+    Mandate {
+        #[command(subcommand)]
+        command: MandateCommand,
+    },
+}
+
+/// Subcommands of `mandate`.
+#[derive(Debug, Subcommand)]
+pub enum MandateCommand {
+    /// Create a Mandate through a guided setup in your own terminal
+    ///
+    /// Asks for each Account's settings and Credential with hidden input,
+    /// checks a live login, lets you tick mailboxes and operations, and shows
+    /// the new Agent Token once. Refuses to run without a terminal or inside
+    /// an agent sandbox. No option can supply a Credential.
+    Create,
 }
 
 /// What a run printed and how it exited.
@@ -78,9 +95,11 @@ where
     };
     let command = match cli.command {
         CliCommand::List => crate::core::Command::List,
+        CliCommand::Mandate {
+            command: MandateCommand::Create,
+        } => crate::core::Command::MandateCreate,
     };
-    let token = env.get(TOKEN_VAR).map(String::as_str);
-    match crate::core::execute(token, &command, context) {
+    match crate::core::execute(env, &command, context) {
         Ok(outcome) => RunOutput {
             stdout: render_outcome(&outcome, cli.text),
             stderr: String::new(),
@@ -112,21 +131,8 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
             out.push('\n');
             out
         }
+        Outcome::MandateCreated => String::new(),
     }
-}
-
-/// Escapes control characters (newlines, ANSI escapes) in server-supplied
-/// text, so a hostile server cannot forge lines or styling under `--text`.
-fn escape_controls(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_unicode().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 fn render_error(error: &CoreError, text: bool) -> String {
