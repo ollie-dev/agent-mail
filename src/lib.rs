@@ -5,6 +5,7 @@
 
 pub mod core;
 pub mod create;
+pub mod export;
 pub mod imap;
 pub mod mandate;
 pub mod seal;
@@ -14,6 +15,7 @@ pub mod utf7;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -55,9 +57,16 @@ pub enum MandateCommand {
     ///
     /// Asks for each Account's settings and Credential with hidden input,
     /// checks a live login, lets you tick mailboxes and operations, and shows
-    /// the new Agent Token once. Refuses to run without a terminal or inside
-    /// an agent sandbox. No option can supply a Credential.
-    Create,
+    /// the new Agent Token once, then offers to save the Mandate's Accounts
+    /// and Grants as a TOML file (never its Credentials or Agent Token).
+    /// With --from, a saved file pre-fills the choices; every Credential is
+    /// still typed and live-checked. Refuses to run without a terminal or
+    /// inside an agent sandbox. No option can supply a Credential.
+    Create {
+        /// Pre-fill the setup from a Mandate file saved by an earlier `mandate create`
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
     /// List every stored Mandate: ID, name, Accounts, Grants, creation date
     ///
     /// Needs no agent token. Never shows a Credential or an Agent Token.
@@ -110,8 +119,8 @@ where
     let command = match cli.command {
         CliCommand::List => crate::core::Command::List,
         CliCommand::Mandate {
-            command: MandateCommand::Create,
-        } => crate::core::Command::MandateCreate,
+            command: MandateCommand::Create { from },
+        } => crate::core::Command::MandateCreate { from },
         CliCommand::Mandate {
             command: MandateCommand::List,
         } => crate::core::Command::MandateList,
