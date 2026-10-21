@@ -9,6 +9,7 @@ pub mod create;
 pub mod export;
 pub mod imap;
 pub mod mandate;
+pub mod read;
 pub mod seal;
 pub mod search;
 pub mod store;
@@ -23,6 +24,8 @@ use clap::{Args, Parser, Subcommand};
 
 pub use crate::core::{Context, TOKEN_VAR};
 use crate::core::{CoreError, MandateListing, Outcome};
+use crate::read::ReadResult;
+use crate::search::MessageRef;
 use crate::search::{Date, Limit, Query, SearchResult, SearchText};
 use crate::terminal::escape_controls;
 
@@ -61,6 +64,18 @@ pub enum CliCommand {
     /// mailbox percent-encoded. Here --text is the TEXT criterion; for
     /// human-readable output run `agent-mail --text search ...`.
     Search(SearchArgs),
+    /// Read one message by the reference `search` printed, without marking it seen
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `read` grant on
+    /// the reference's account and mailbox. Prints one JSON object on
+    /// stdout: ref, account, mailbox, date, from, to, cc, subject,
+    /// message_id, body (the plain-text part, or the HTML part converted to
+    /// text), truncated, and attachments (name, type and size only, never
+    /// their content). A body longer than 20,000 characters is cut, with
+    /// `truncated` true and a marker at the end, unless --full is given.
+    /// If the mailbox was renumbered since the search, the read fails with
+    /// `stale_reference`: search again for a fresh reference.
+    Read(ReadArgs),
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -78,6 +93,23 @@ pub struct TextOutput {
     /// Print human-readable text instead of JSON
     #[arg(long)]
     pub text: bool,
+}
+
+/// Options of `read`.
+#[derive(Debug, Args)]
+pub struct ReadArgs {
+    /// The message reference, exactly as `agent-mail search` prints it in `ref`: <account>/<mailbox>/<uidvalidity>/<uid>
+    #[arg(value_name = "REF", value_parser = reference)]
+    pub reference: MessageRef,
+    /// Return the whole body; by default bodies are cut at 20,000 characters
+    #[arg(long)]
+    pub full: bool,
+    #[command(flatten)]
+    pub output: TextOutput,
+}
+
+fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
+    crate::read::parse_reference(value)
 }
 
 /// Options of `search`.
@@ -217,6 +249,13 @@ where
             crate::core::Command::List
         }
         CliCommand::Search(args) => crate::core::Command::Search(args.into()),
+        CliCommand::Read(args) => {
+            text |= args.output.text;
+            crate::core::Command::Read {
+                reference: args.reference,
+                full: args.full,
+            }
+        }
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -259,6 +298,8 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
         Outcome::Mailboxes(list) => json_line(list),
         Outcome::Messages(result) if text => render_messages(result),
         Outcome::Messages(result) => json_line(result),
+        Outcome::Message(message) if text => render_message(message),
+        Outcome::Message(message) => json_line(message),
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),
@@ -304,6 +345,40 @@ fn render_messages(result: &SearchResult) -> String {
     }
     if result.more {
         out.push_str("more messages match; narrow the search or raise --limit\n");
+    }
+    out
+}
+
+fn render_message(message: &ReadResult) -> String {
+    let join = |list: &[String]| {
+        list.iter()
+            .map(|a| escape_controls(a))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!("From: {}\n", escape_controls(&message.from));
+    out.push_str(&format!("To: {}\n", join(&message.to)));
+    if !message.cc.is_empty() {
+        out.push_str(&format!("Cc: {}\n", join(&message.cc)));
+    }
+    out.push_str(&format!("Date: {}\n", escape_controls(&message.date)));
+    out.push_str(&format!("Subject: {}\n", escape_controls(&message.subject)));
+    out.push_str(&format!("Ref: {}\n\n", escape_controls(&message.reference)));
+    // The body keeps its line breaks; every other control or format
+    // character is escaped.
+    let body: Vec<String> = message.body.split('\n').map(escape_controls).collect();
+    out.push_str(&body.join("\n"));
+    out.push('\n');
+    if !message.attachments.is_empty() {
+        out.push_str("\nAttachments:\n");
+        for a in &message.attachments {
+            out.push_str(&format!(
+                "  {} ({}, {} bytes)\n",
+                escape_controls(&a.name),
+                escape_controls(&a.content_type),
+                a.size
+            ));
+        }
     }
     out
 }
@@ -410,6 +485,59 @@ mod tests {
              more messages match; narrow the search or raise --limit\n"
         );
         assert_eq!(text.lines().count(), 3);
+    }
+
+    #[test]
+    fn read_text_output_escapes_controls_but_keeps_body_line_breaks() {
+        let outcome = Outcome::Message(ReadResult {
+            reference: "agent@example.test/Read/1700000006/1".to_string(),
+            account: "agent@example.test".to_string(),
+            mailbox: "Read".to_string(),
+            date: "2026-10-06T08:15:00Z".to_string(),
+            from: "Eve\r <eve@example.com>".to_string(),
+            to: vec!["a@example.com".to_string(), "b\n@example.com".to_string()],
+            cc: Vec::new(),
+            subject: "Hi \u{1b}[2J".to_string(),
+            message_id: "<x@example.com>".to_string(),
+            body: "line 1\n\u{1b}[2Jline\t2\r\u{202e}".to_string(),
+            truncated: false,
+            attachments: vec![crate::read::Attachment {
+                name: "evil\u{1b}[2J.pdf\n".to_string(),
+                content_type: "application/pdf".to_string(),
+                size: 3,
+            }],
+        });
+        let text = render_outcome(&outcome, true);
+        assert_eq!(
+            text,
+            "From: Eve\\u{d} <eve@example.com>\n\
+             To: a@example.com, b\\u{a}@example.com\n\
+             Date: 2026-10-06T08:15:00Z\n\
+             Subject: Hi \\u{1b}[2J\n\
+             Ref: agent@example.test/Read/1700000006/1\n\
+             \n\
+             line 1\n\
+             \\u{1b}[2Jline\\u{9}2\\u{d}\\u{202e}\n\
+             \n\
+             Attachments:\n  evil\\u{1b}[2J.pdf\\u{a} (application/pdf, 3 bytes)\n"
+        );
+        assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn read_refuses_malformed_references() {
+        for args in [
+            &["read", "not-a-ref"][..],
+            &["read", "agent@example.test/Read/1700000006/0"],
+            &["read", "agent@example.test/Re%0Aad/1700000006/1"],
+            &["read", "agent@example.test/Read%0D/1700000006/1"],
+            &["read", "agent%00/Read/1700000006/1"],
+            &["read"],
+        ] {
+            let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+            let err = Cli::try_parse_from(argv).expect_err(&format!("{args:?} parsed"));
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
     }
 
     #[test]
