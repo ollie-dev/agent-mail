@@ -681,7 +681,7 @@ mod tests {
                 id: "ffffffff".to_string(),
             },
             CoreError::InvalidMandateFile {
-                problem: "unknown key `password` in `accounts[1]`".to_string(),
+                problem: "line 8: unknown key in an [[accounts]] entry".to_string(),
             },
             CoreError::RevocationIncomplete {
                 id: "aaaa1111".to_string(),

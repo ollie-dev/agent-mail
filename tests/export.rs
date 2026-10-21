@@ -626,6 +626,10 @@ fn assert_refused(path: &Path, needles: &[&str], server: &FakeImap) {
         assert!(message.contains(needle), "{needle:?} not in {message:?}");
     }
     assert!(!output.stderr.contains(FILE_SECRET), "{message:?}");
+    // No key name from the file is repeated: the line says where.
+    for key in ["password", "`tls`", "`port`", "`operation`", "`name`"] {
+        assert!(!message.contains(key), "{key:?} repeated in {message:?}");
+    }
     assert!(terminal.transcript().is_empty(), "prompted: {path:?}");
     assert_eq!(store.accesses(), 0);
     assert_eq!(server.connections(), 0);
@@ -641,7 +645,7 @@ fn ac6_malformed_files_are_refused_before_any_prompt() {
         (
             "a",
             good.replace("[[accounts]]", "[[accounts]\nbroken"),
-            vec!["line 3".into()],
+            vec!["line 3".into(), "not valid TOML".into()],
         ),
         (
             "b",
@@ -649,22 +653,22 @@ fn ac6_malformed_files_are_refused_before_any_prompt() {
                 "tls = \"implicit\"",
                 &format!("tls = \"implicit\"\npassword = \"{FILE_SECRET}\""),
             ),
-            vec!["password".into()],
+            vec!["line 8".into(), "unknown key".into()],
         ),
         (
             "c",
             good.replace("tls = \"implicit\"", "tls = \"none\""),
-            vec!["tls".into()],
+            vec!["line 7".into(), "TLS mode".into()],
         ),
         (
             "d",
             good.replace(&port_line, "port = 0"),
-            vec!["port".into()],
+            vec!["line 6".into(), "port must be".into()],
         ),
         (
             "e",
             good.replace("operation = \"search\"", "operation = \"send\""),
-            vec!["operation".into()],
+            vec!["line 15".into(), "operation must be".into()],
         ),
         (
             "f",
@@ -672,7 +676,7 @@ fn ac6_malformed_files_are_refused_before_any_prompt() {
                 "{good}{}",
                 grant_toml("read", "stranger@example.test", &["INBOX"])
             ),
-            vec!["stranger@example.test".into()],
+            vec!["line 21".into(), "stranger@example.test".into()],
         ),
         (
             "g",
@@ -686,7 +690,7 @@ fn ac6_malformed_files_are_refused_before_any_prompt() {
                 account_toml(LOGIN, server.port),
                 account_toml(LOGIN, server.port)
             ),
-            vec!["two Accounts".into(), LOGIN.into()],
+            vec!["line 10".into(), "two Accounts".into(), LOGIN.into()],
         ),
     ];
     for (case, text, needles) in cases {
@@ -856,4 +860,80 @@ fn help_documents_from_and_still_no_credential_option() {
             }
         }
     }
+}
+
+#[test]
+fn from_must_name_a_regular_file_and_is_never_opened_otherwise() {
+    let server = FakeImap::start(Mode::Implicit);
+    let dir = TempDir::new();
+    assert_refused(&dir.0, &["is not a regular file"], &server);
+    // Opening a FIFO for reading would block until a writer appears; the
+    // check before opening refuses it at once.
+    let fifo = dir.join("pipe.toml");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert_refused(&fifo, &["is not a regular file"], &server);
+}
+
+#[test]
+fn credential_prompt_names_the_server_host_and_port() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let mut answers = ac1_answers(server.port);
+    answers.push(no());
+    let session = create(None, answers, &store, &[&server]);
+    session.assert_completed();
+    let hidden = session
+        .entries()
+        .into_iter()
+        .find(|e| e.kind == Kind::Hidden)
+        .unwrap();
+    assert_eq!(
+        hidden.text,
+        format!(
+            "Credential (password) for {LOGIN} on localhost:{}:",
+            server.port
+        )
+    );
+    assert!(!session.transcript().contains("looks like a Gmail address"));
+}
+
+#[test]
+fn gmail_login_on_another_host_is_warned_before_the_credential() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let dir = TempDir::new();
+    let gmail = "someone@Gmail.com";
+    let text = format!("name = \"g\"\n\n{}", account_toml(gmail, server.port));
+    let file = dir.write("g.toml", &text);
+    let answers = vec![
+        accept(),
+        accept(),
+        accept(),
+        accept(),
+        accept(),
+        accept(),
+        Answer::hidden(WRONG),
+        Answer::choose(ABORT),
+    ];
+    let session = create(Some(&file), answers, &store, &[&server]);
+    assert_eq!(error_of(&session.output)["code"], "aborted");
+    let entries = session.entries();
+    let warning = entries
+        .iter()
+        .position(|e| e.kind == Kind::Message && e.text.contains("looks like a Gmail address"))
+        .expect("warning shown");
+    let hidden = entries.iter().position(|e| e.kind == Kind::Hidden).unwrap();
+    assert!(
+        warning < hidden,
+        "warning comes before the credential prompt"
+    );
+    let text = &entries[warning].text;
+    assert!(text.contains(gmail));
+    assert!(text.contains(&format!("localhost:{}", server.port)));
+    assert!(text.contains("imap.gmail.com"));
+    assert!(store.entries().is_empty());
 }
