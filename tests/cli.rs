@@ -93,7 +93,8 @@ fn run_list(token: Option<&str>, extra_env: &[(&str, &str)]) -> std::process::Ou
     command
         .arg("list")
         .env_remove("AGENT_MAIL_TOKEN")
-        .env_remove("AGENT_MAIL_STORE");
+        .env_remove("AGENT_MAIL_STORE")
+        .env_remove(agent_mail::audit::TEST_LOG_VAR);
     if let Some(token) = token {
         command.env("AGENT_MAIL_TOKEN", token);
     }
@@ -152,6 +153,28 @@ fn ac6_binary_reports_malformed_and_unknown_tokens_identically() {
         assert!(!String::from_utf8_lossy(&output.stderr).contains(unknown.expose()));
     }
     assert_eq!(malformed.stderr, unknown_out.stderr);
+}
+
+#[test]
+fn binary_appends_an_audit_entry_to_the_redirected_test_log() {
+    let log = agent_mail::audit::AuditLog::temporary()
+        .path()
+        .unwrap()
+        .to_path_buf();
+    let log_text = log.to_str().unwrap();
+    let output = run_list(
+        Some("not-a-token"),
+        &[(agent_mail::audit::TEST_LOG_VAR, log_text)],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let text = std::fs::read_to_string(&log).expect("the binary wrote the log");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text:?}");
+    let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(entry["operation"], "list");
+    assert_eq!(entry["outcome"], "denied");
+    assert_eq!(entry["reason"], "invalid_token");
+    assert!(!text.contains("not-a-token"));
 }
 
 #[test]

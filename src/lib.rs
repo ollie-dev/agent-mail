@@ -3,6 +3,7 @@
 //! Holds the CLI adapter, the core and its ports, so integration tests can
 //! drive them in-process.
 
+pub mod audit;
 pub mod core;
 pub mod create;
 pub mod export;

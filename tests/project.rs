@@ -58,6 +58,21 @@ fn claude_md_stack_section_records_layout() {
     for part in ["src/main.rs", "src/lib.rs", "tests/"] {
         assert!(layout.contains(part), "layout line does not name {part}");
     }
+
+    // Every module and every integration test file is named.
+    for (dir, prefix) in [("src", ""), ("tests", "tests/")] {
+        for entry in fs::read_dir(repo_root().join(dir)).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if let Some(stem) = name.strip_suffix(".rs") {
+                let named = format!("`{prefix}{stem}.rs`");
+                let path = format!("{dir}/{name}");
+                assert!(
+                    layout.contains(&named) || layout.contains(&format!("`{path}`")),
+                    "layout line does not name {path}"
+                );
+            }
+        }
+    }
 }
 
 /// Returns the `[table]` headers and `key = value` lines of a TOML file,
@@ -161,11 +176,13 @@ fn ac11_test_support_feature_is_not_a_default() {
 }
 
 /// Markers of test-only code and the source file each lives in: the
-/// in-memory store, the scripted terminal and the connect override.
-const TEST_ONLY_MARKERS: [(&str, &str); 3] = [
+/// in-memory store, the scripted terminal, the connect override and the
+/// audit log redirect.
+const TEST_ONLY_MARKERS: [(&str, &str); 4] = [
     ("agent-mail-in-memory-store", "src/store.rs"),
     ("agent-mail-scripted-terminal", "src/terminal.rs"),
     ("agent-mail-connect-override", "src/imap.rs"),
+    ("agent-mail-audit-redirect", "src/audit.rs"),
 ];
 
 /// Builds the release binary into a separate target directory (so it does not
