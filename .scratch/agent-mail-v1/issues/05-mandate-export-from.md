@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Accepting the export offer writes a TOML file containing the name, Accounts (server, port, TLS mode, login) and Grants
 - [ ] The exported file never contains a Credential or Agent Token
