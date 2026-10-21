@@ -506,3 +506,50 @@ fn test_contexts_never_write_to_the_platform_log() {
         "one log per context"
     );
 }
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+#[test]
+fn list_tightens_an_existing_loose_log_directory_and_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::default();
+    let token = store_mandate(&store, &allowed_mandate(server.port));
+    let log = temp_audit_log();
+    let dir = log.parent().unwrap();
+    fs::create_dir_all(dir).unwrap();
+    fs::write(&log, "").unwrap();
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let out = run_logged(&["list"], Some(token.expose()), &store, &server.ca, &log);
+    assert_eq!(out.code, 0, "{out:?}");
+    assert_eq!(mode_of(dir), 0o700);
+    assert_eq!(mode_of(&log), 0o600);
+    assert_eq!(audit_lines(&log).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn list_refuses_a_symlinked_log_and_fails_closed() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::default();
+    let token = store_mandate(&store, &allowed_mandate(server.port));
+    let log = temp_audit_log();
+    let dir = log.parent().unwrap();
+    fs::create_dir_all(dir).unwrap();
+    let target = dir.join("elsewhere");
+    fs::write(&target, "victim\n").unwrap();
+    std::os::unix::fs::symlink(&target, &log).unwrap();
+
+    let out = run_logged(&["list"], Some(token.expose()), &store, &server.ca, &log);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    assert_eq!(error_of(&out)["code"], "audit_unavailable");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "victim\n");
+}
