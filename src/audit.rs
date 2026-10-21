@@ -77,6 +77,11 @@ pub const REDIRECT_MARKER: &str = "agent-mail-audit-redirect";
 #[used]
 static REDIRECT_MARKER_BYTES: [u8; REDIRECT_MARKER.len()] = *b"agent-mail-audit-redirect";
 
+/// Environment variable naming the audit log of a test-support build of
+/// the binary. A release build has no such variable.
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_LOG_VAR: &str = "AGENT_MAIL_TEST_AUDIT_LOG";
+
 /// Where entries go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditLog {
@@ -117,6 +122,17 @@ impl AuditLog {
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
         Self::at(dir.join(FILE_NAME))
+    }
+
+    /// The log a test-support build of the binary writes to: the file named
+    /// by [`TEST_LOG_VAR`], or else a fresh temporary file. Never the user's
+    /// data directory, so binary tests leave it alone. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_binary() -> Self {
+        match std::env::var_os(TEST_LOG_VAR) {
+            Some(path) if !path.is_empty() => Self::at(path),
+            _ => Self::temporary(),
+        }
     }
 
     /// The file entries are appended to, if known.
