@@ -142,9 +142,11 @@ impl AuditLog {
     }
 
     /// Appends `entry` as one line. Creates the directory (mode `0700`) and
-    /// the file (mode `0600`) on first write. Existing content is never
-    /// rewritten: the file is opened in append mode and the line goes out in
-    /// one write.
+    /// the file (mode `0600`) on first write, and on Unix tightens an
+    /// existing directory and file to those modes. Neither the log's own
+    /// directory nor the file may be a symbolic link (`O_NOFOLLOW`), and the
+    /// file must be a regular file. Existing content is never rewritten: the
+    /// file is opened in append mode and the line goes out in one write.
     pub fn append(&self, entry: &Entry) -> Result<(), AuditUnavailable> {
         let path = self.path.as_deref().ok_or(AuditUnavailable)?;
         let dir = path.parent().ok_or(AuditUnavailable)?;
@@ -156,18 +158,60 @@ impl AuditLog {
             builder.mode(0o700);
         }
         builder.create(dir).map_err(|_| AuditUnavailable)?;
+        #[cfg(unix)]
+        restrict_dir(dir)?;
         let mut options = OpenOptions::new();
         options.append(true).create(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            // O_NONBLOCK keeps a planted FIFO from hanging the call; it has
+            // no effect on a regular file.
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let mut file = options.open(path).map_err(|_| AuditUnavailable)?;
+        let metadata = file.metadata().map_err(|_| AuditUnavailable)?;
+        if !metadata.is_file() {
+            return Err(AuditUnavailable);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o7777 != 0o600 {
+                // fchmod on the open descriptor, not the path.
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|_| AuditUnavailable)?;
+            }
+        }
         file.write_all(entry.to_line().as_bytes())
             .and_then(|()| file.flush())
             .map_err(|_| AuditUnavailable)
     }
+}
+
+/// Opens the log's directory without following a symbolic link and sets
+/// its mode to `0700` through the open descriptor.
+#[cfg(unix)]
+fn restrict_dir(dir: &Path) -> Result<(), AuditUnavailable> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(dir)
+        .map_err(|_| AuditUnavailable)?;
+    let mode = handle
+        .metadata()
+        .map_err(|_| AuditUnavailable)?
+        .permissions()
+        .mode();
+    if mode & 0o7777 != 0o700 {
+        handle
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| AuditUnavailable)?;
+    }
+    Ok(())
 }
 
 /// Which per-user data directory convention applies.
@@ -292,6 +336,109 @@ mod tests {
         let path = platform_path().expect("the user database names a home directory");
         assert!(path.is_absolute());
         assert!(path.ends_with("agent-mail/audit.log"));
+    }
+
+    fn sample() -> Entry {
+        Entry {
+            time: "2026-10-21T09:30:15Z".to_string(),
+            mandate: None,
+            operation: "list",
+            account: None,
+            mailbox: None,
+            messages: None,
+            outcome: Decision::Denied,
+            reason: Some("missing_token"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_loose_directory_and_file_are_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let log = AuditLog::temporary();
+        let path = log.path().unwrap().to_path_buf();
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(&path, "earlier\n").unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        log.append(&sample()).unwrap();
+        assert_eq!(mode_of(dir), 0o700);
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("earlier\n{}", sample().to_line())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_log_file_is_refused_and_its_target_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let log = AuditLog::temporary();
+        let path = log.path().unwrap().to_path_buf();
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, "victim\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        assert_eq!(log.append(&sample()), Err(AuditUnavailable));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "victim\n");
+        assert_eq!(mode_of(&target), 0o644);
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_log_directory_is_refused_and_its_target_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let log = AuditLog::temporary();
+        let path = log.path().unwrap().to_path_buf();
+        let dir = path.parent().unwrap();
+        let real = dir.with_extension("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&real, dir).unwrap();
+
+        assert_eq!(log.append(&sample()), Err(AuditUnavailable));
+        assert_eq!(mode_of(&real), 0o755);
+        assert!(!real.join("audit.log").exists());
+        std::fs::remove_file(dir).unwrap();
+        std::fs::remove_dir_all(&real).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_fifo_is_refused_without_hanging() {
+        let log = AuditLog::temporary();
+        let path = log.path().unwrap().to_path_buf();
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert_eq!(log.append(&sample()), Err(AuditUnavailable));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
