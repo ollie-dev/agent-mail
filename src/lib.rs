@@ -10,6 +10,7 @@ pub mod export;
 pub mod imap;
 pub mod mandate;
 pub mod seal;
+pub mod search;
 pub mod store;
 pub mod terminal;
 pub mod utf7;
@@ -18,18 +19,19 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 pub use crate::core::{Context, TOKEN_VAR};
 use crate::core::{CoreError, MandateListing, Outcome};
+use crate::search::{Date, Limit, Query, SearchResult, SearchText};
 use crate::terminal::escape_controls;
 
 /// Command-line interface of the `agent-mail` binary.
 #[derive(Debug, Parser)]
 #[command(name = "agent-mail", version, about, arg_required_else_help = true)]
 pub struct Cli {
-    /// Print human-readable text instead of JSON
-    #[arg(long, global = true)]
+    /// Print human-readable text instead of JSON (for `search`, put it before the subcommand)
+    #[arg(long)]
     pub text: bool,
 
     #[command(subcommand)]
@@ -43,12 +45,103 @@ pub enum CliCommand {
     ///
     /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
     /// default; errors go to stderr as JSON with a stable `code`.
-    List,
+    List {
+        #[command(flatten)]
+        output: TextOutput,
+    },
+    /// Search one mailbox this agent may search, newest first
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Criteria combine with
+    /// AND; string criteria are case-insensitive substring matches. With no
+    /// criterion every message matches. Prints one JSON object on stdout:
+    /// account, mailbox, total (how many matched), more (whether more
+    /// matched than are shown) and messages, each with ref, date, from,
+    /// subject and flags. A ref is <account>/<mailbox>/<uidvalidity>/<uid>,
+    /// with `%`, `/` and bytes outside printable ASCII in the account and
+    /// mailbox percent-encoded. Here --text is the TEXT criterion; for
+    /// human-readable output run `agent-mail --text search ...`.
+    Search(SearchArgs),
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
+        /// Print human-readable text instead of JSON
+        #[arg(long, global = true)]
+        text: bool,
+
         #[command(subcommand)]
         command: MandateCommand,
     },
+}
+
+/// The `--text` output flag, for subcommands that take it after their name.
+#[derive(Debug, Args)]
+pub struct TextOutput {
+    /// Print human-readable text instead of JSON
+    #[arg(long)]
+    pub text: bool,
+}
+
+/// Options of `search`.
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Mailbox to search, by its name as `agent-mail list` prints it
+    #[arg(long, value_name = "NAME", default_value = "INBOX", value_parser = search_text)]
+    pub mailbox: SearchText,
+    /// Messages whose From header contains S
+    #[arg(long, value_name = "S", value_parser = search_text)]
+    pub from: Option<SearchText>,
+    /// Messages whose To header contains S
+    #[arg(long, value_name = "S", value_parser = search_text)]
+    pub to: Option<SearchText>,
+    /// Messages whose Subject contains S
+    #[arg(long, value_name = "S", value_parser = search_text)]
+    pub subject: Option<SearchText>,
+    /// Messages whose headers or body contain S
+    #[arg(long, value_name = "S", value_parser = search_text)]
+    pub text: Option<SearchText>,
+    /// Messages received on or after this date (YYYY-MM-DD)
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = date)]
+    pub since: Option<Date>,
+    /// Messages received before this date (YYYY-MM-DD)
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = date)]
+    pub before: Option<Date>,
+    /// Only messages not yet seen
+    #[arg(long)]
+    pub unseen: bool,
+    /// Only flagged messages
+    #[arg(long)]
+    pub flagged: bool,
+    /// Return at most N messages, 1 to 1000
+    #[arg(long, value_name = "N", default_value = "20", value_parser = limit)]
+    pub limit: Limit,
+}
+
+fn search_text(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+    SearchText::new(value)
+}
+
+fn date(value: &str) -> Result<Date, crate::search::InvalidValue> {
+    Date::parse(value)
+}
+
+fn limit(value: &str) -> Result<Limit, crate::search::InvalidValue> {
+    Limit::parse(value)
+}
+
+impl From<SearchArgs> for Query {
+    fn from(args: SearchArgs) -> Self {
+        Self {
+            mailbox: args.mailbox,
+            from: args.from,
+            to: args.to,
+            subject: args.subject,
+            text: args.text,
+            since: args.since,
+            before: args.before,
+            unseen: args.unseen,
+            flagged: args.flagged,
+            limit: args.limit,
+        }
+    }
 }
 
 /// Subcommands of `mandate`.
@@ -117,27 +210,34 @@ where
             };
         }
     };
+    let mut text = cli.text;
     let command = match cli.command {
-        CliCommand::List => crate::core::Command::List,
+        CliCommand::List { output } => {
+            text |= output.text;
+            crate::core::Command::List
+        }
+        CliCommand::Search(args) => crate::core::Command::Search(args.into()),
         CliCommand::Mandate {
-            command: MandateCommand::Create { from },
-        } => crate::core::Command::MandateCreate { from },
-        CliCommand::Mandate {
-            command: MandateCommand::List,
-        } => crate::core::Command::MandateList,
-        CliCommand::Mandate {
-            command: MandateCommand::Delete { id },
-        } => crate::core::Command::MandateDelete { id },
+            text: mandate_text,
+            command,
+        } => {
+            text |= mandate_text;
+            match command {
+                MandateCommand::Create { from } => crate::core::Command::MandateCreate { from },
+                MandateCommand::List => crate::core::Command::MandateList,
+                MandateCommand::Delete { id } => crate::core::Command::MandateDelete { id },
+            }
+        }
     };
     match crate::core::execute(env, &command, context) {
         Ok(outcome) => RunOutput {
-            stdout: render_outcome(&outcome, cli.text),
+            stdout: render_outcome(&outcome, text),
             stderr: String::new(),
             code: 0,
         },
         Err(error) => RunOutput {
             stdout: String::new(),
-            stderr: render_error(&error, cli.text),
+            stderr: render_error(&error, text),
             code: 1,
         },
     }
@@ -157,6 +257,8 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
             out
         }
         Outcome::Mailboxes(list) => json_line(list),
+        Outcome::Messages(result) if text => render_messages(result),
+        Outcome::Messages(result) => json_line(result),
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),
@@ -178,6 +280,31 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
 fn json_line(value: &impl serde::Serialize) -> String {
     let mut out = serde_json::to_string(value).expect("results always serialise");
     out.push('\n');
+    out
+}
+
+fn render_messages(result: &SearchResult) -> String {
+    let mut out = format!(
+        "{} {}: showing {} of {} messages\n",
+        escape_controls(&result.account),
+        escape_controls(&result.mailbox),
+        result.messages.len(),
+        result.total
+    );
+    for m in &result.messages {
+        let flags: Vec<String> = m.flags.iter().map(|f| escape_controls(f)).collect();
+        out.push_str(&format!(
+            "{}  {}  {}  [{}]  {}\n",
+            escape_controls(&m.date),
+            escape_controls(&m.from),
+            escape_controls(&m.subject),
+            flags.join(" "),
+            escape_controls(&m.reference)
+        ));
+    }
+    if result.more {
+        out.push_str("more messages match; narrow the search or raise --limit\n");
+    }
     out
 }
 
@@ -242,6 +369,7 @@ fn render_error(error: &CoreError, text: bool) -> String {
 mod tests {
     use super::*;
     use crate::core::{MailboxEntry, MailboxList};
+    use crate::search::MessageSummary;
 
     #[test]
     fn text_output_escapes_control_characters_from_the_server() {
@@ -257,5 +385,50 @@ mod tests {
             "agent@example.test\n  Evil\\u{a}other@example.test\\u{d}\\u{1b}[31mRed Entwürfe\n"
         );
         assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn search_text_output_keeps_each_message_on_one_escaped_line() {
+        let outcome = Outcome::Messages(SearchResult {
+            account: "agent@example.test".to_string(),
+            mailbox: "INBOX".to_string(),
+            total: 3,
+            more: true,
+            messages: vec![MessageSummary {
+                reference: "agent@example.test/INBOX/1700000001/3".to_string(),
+                date: "2026-10-10T09:00:00Z".to_string(),
+                from: "Eve\r <eve@example.com>".to_string(),
+                subject: "Hi\n\u{1b}[31mred".to_string(),
+                flags: vec!["\\Seen".to_string(), "\\Flagged".to_string()],
+            }],
+        });
+        let text = render_outcome(&outcome, true);
+        assert_eq!(
+            text,
+            "agent@example.test INBOX: showing 1 of 3 messages\n\
+             2026-10-10T09:00:00Z  Eve\\u{d} <eve@example.com>  Hi\\u{a}\\u{1b}[31mred  [\\Seen \\Flagged]  agent@example.test/INBOX/1700000001/3\n\
+             more messages match; narrow the search or raise --limit\n"
+        );
+        assert_eq!(text.lines().count(), 3);
+    }
+
+    #[test]
+    fn search_options_refuse_line_breaks_bad_dates_and_limits() {
+        for args in [
+            &["search", "--subject", "a\nb"][..],
+            &["search", "--from", "a\rb"],
+            &["search", "--mailbox", "IN\0BOX"],
+            &["search", "--text", "x\ny"],
+            &["search", "--to", "x\r\n"],
+            &["search", "--since", "2026-13-01"],
+            &["search", "--before", "10/05/2026"],
+            &["search", "--limit", "0"],
+            &["search", "--limit", "1001"],
+            &["search", "--limit", "x"],
+        ] {
+            let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+            let err = Cli::try_parse_from(argv).expect_err(&format!("{args:?} parsed"));
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
     }
 }

@@ -11,8 +11,9 @@ use serde::Serialize;
 
 use crate::audit::{self, AuditLog, Decision};
 use crate::imap::{self, ImapError, Network};
-use crate::mandate::{Grant, Mandate, Operation};
+use crate::mandate::{Account, Grant, Mandate, Operation};
 use crate::seal::{self, AgentToken, ListedAccount};
+use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult};
 use crate::store::MandateStore;
 use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
@@ -89,6 +90,8 @@ impl<'a> Context<'a> {
 pub enum Command {
     /// List the mailboxes the Policy grants.
     List,
+    /// Search one granted mailbox.
+    Search(Query),
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -163,6 +166,8 @@ pub struct MailboxEntry {
 pub enum Outcome {
     /// Result of `list`.
     Mailboxes(MailboxList),
+    /// Result of `search`.
+    Messages(SearchResult),
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
@@ -185,6 +190,15 @@ pub enum CoreError {
         operation: Operation,
         /// Login name of the Account.
         account: String,
+        /// The mailbox, for operations on one mailbox.
+        mailbox: Option<String>,
+    },
+    /// The server refused to open the mailbox.
+    MailboxNotFound {
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox asked for, decoded UTF-8.
+        mailbox: String,
     },
     /// The server offered no TLS.
     TlsRequired {
@@ -260,6 +274,9 @@ pub struct ErrorBody {
     /// Login name of the Account involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The mailbox involved, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<String>,
     /// Login names of the Accounts to choose from, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<String>>,
@@ -283,6 +300,7 @@ impl CoreError {
             Self::MissingToken => "missing_token",
             Self::InvalidToken => "invalid_token",
             Self::Denied { .. } => "denied",
+            Self::MailboxNotFound { .. } => "mailbox_not_found",
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
@@ -302,11 +320,48 @@ impl CoreError {
 
     /// The error as a serialisable body.
     pub fn body(&self) -> ErrorBody {
+        if let Self::Denied {
+            operation,
+            account,
+            mailbox: Some(mailbox),
+        } = self
+        {
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(operation.as_str()),
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "no grant allows `{}` on mailbox {mailbox} of account {account}; ask the human to grant it, or run `agent-mail list` to see the mailboxes this token can use",
+                    operation.as_str()
+                ),
+            };
+        }
+        if let Self::MailboxNotFound { account, mailbox } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "mailbox {mailbox} does not exist on account {account}; run `agent-mail list` to see the mailbox names"
+                ),
+            };
+        }
         if let Self::AccountRequired { accounts } = self {
             return ErrorBody {
                 code: self.code(),
                 operation: None,
                 account: None,
+                mailbox: None,
                 accounts: Some(accounts.clone()),
                 id: None,
                 deleted: None,
@@ -322,6 +377,7 @@ impl CoreError {
                 code: self.code(),
                 operation: None,
                 account: None,
+                mailbox: None,
                 accounts: None,
                 id: Some(id.clone()),
                 deleted: None,
@@ -352,6 +408,7 @@ impl CoreError {
                 code: self.code(),
                 operation: None,
                 account: None,
+                mailbox: None,
                 accounts: None,
                 id: Some(id.clone()),
                 deleted: Some(*deleted),
@@ -366,6 +423,7 @@ impl CoreError {
                 code: self.code(),
                 operation: None,
                 account: None,
+                mailbox: None,
                 accounts: None,
                 id: None,
                 deleted: None,
@@ -383,7 +441,9 @@ impl CoreError {
             ),
             Self::InvalidToken => (None, None, "the agent token is not valid; check AGENT_MAIL_TOKEN or ask the human for a new token"
                     .to_string()),
-            Self::Denied { operation, account } => (
+            Self::Denied {
+                operation, account, ..
+            } => (
                 Some(operation.as_str()),
                 Some(account.clone()),
                 format!(
@@ -428,6 +488,7 @@ impl CoreError {
                     .to_string(),
             ),
             Self::AccountRequired { .. }
+            | Self::MailboxNotFound { .. }
             | Self::NotFound { .. }
             | Self::RevocationIncomplete { .. }
             | Self::InvalidMandateFile { .. } => {
@@ -462,6 +523,7 @@ impl CoreError {
             code: self.code(),
             operation,
             account,
+            mailbox: None,
             accounts: None,
             id: None,
             deleted: None,
@@ -495,6 +557,7 @@ pub fn execute(
                 account: trail.account,
                 mailbox: None,
                 messages: None,
+                results: None,
                 outcome: if trail.allowed {
                     Decision::Allowed
                 } else {
@@ -508,6 +571,39 @@ pub fn execute(
                 .append(&entry)
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Mailboxes)
+        }
+        Command::Search(query) => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                search(&mandate, query, context, &mut trail)
+            });
+            let found = result.as_ref().ok();
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::Search.as_str(),
+                account: trail.account,
+                mailbox: Some(query.mailbox.as_str().to_string()),
+                // References and a count only: never subjects, addresses
+                // or `total`.
+                messages: found.map(|r| r.messages.iter().map(|m| m.reference.clone()).collect()),
+                results: found.map(|r| r.messages.len()),
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Messages)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -661,16 +757,7 @@ fn list(
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<MailboxList, CoreError> {
-    // One Account per command until `--account` arrives (ticket 13); never
-    // merge Accounts silently.
-    let account = match mandate.accounts.as_slice() {
-        [account] => account,
-        accounts => {
-            return Err(CoreError::AccountRequired {
-                accounts: accounts.iter().map(|a| a.login.clone()).collect(),
-            });
-        }
-    };
+    let account = single_account(mandate)?;
     let login = account.login.clone();
     trail.account = Some(login.clone());
     // Deny by default, before any connection is made.
@@ -683,19 +770,12 @@ fn list(
         return Err(CoreError::Denied {
             operation: Operation::List,
             account: login,
+            mailbox: None,
         });
     }
     trail.allowed = true;
-    let raw = imap::list_mailboxes(account, &context.network).map_err(|e| {
-        let account = login.clone();
-        match e {
-            ImapError::TlsRequired => CoreError::TlsRequired { account },
-            ImapError::Certificate => CoreError::TlsCertificate { account },
-            ImapError::Connection => CoreError::Connection { account },
-            ImapError::Login => CoreError::LoginFailed { account },
-            ImapError::Protocol => CoreError::Protocol { account },
-        }
-    })?;
+    let raw = imap::list_mailboxes(account, &context.network)
+        .map_err(|e| connector_error(e, &login, None))?;
     let mailboxes = raw
         .into_iter()
         // Malformed modified UTF-7 falls back to the raw name, losslessly.
@@ -706,6 +786,104 @@ fn list(
     Ok(MailboxList {
         account: login,
         mailboxes,
+    })
+}
+
+/// The Mandate's only Account. One Account per command until `--account`
+/// arrives (ticket 13); never merge Accounts silently.
+fn single_account(mandate: &Mandate) -> Result<&Account, CoreError> {
+    match mandate.accounts.as_slice() {
+        [account] => Ok(account),
+        accounts => Err(CoreError::AccountRequired {
+            accounts: accounts.iter().map(|a| a.login.clone()).collect(),
+        }),
+    }
+}
+
+/// The structured error for a connector failure on `account`, and on
+/// `mailbox` for operations on one mailbox.
+fn connector_error(error: ImapError, account: &str, mailbox: Option<&str>) -> CoreError {
+    let account = account.to_string();
+    match error {
+        ImapError::TlsRequired => CoreError::TlsRequired { account },
+        ImapError::Certificate => CoreError::TlsCertificate { account },
+        ImapError::Connection => CoreError::Connection { account },
+        ImapError::Login => CoreError::LoginFailed { account },
+        ImapError::Protocol => CoreError::Protocol { account },
+        ImapError::MailboxNotFound => match mailbox {
+            Some(mailbox) => CoreError::MailboxNotFound {
+                account,
+                mailbox: mailbox.to_string(),
+            },
+            None => CoreError::Protocol { account },
+        },
+    }
+}
+
+fn search(
+    mandate: &Mandate,
+    query: &Query,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<SearchResult, CoreError> {
+    let account = single_account(mandate)?;
+    let login = account.login.clone();
+    trail.account = Some(login.clone());
+    // The query's values were checked when it was built (see
+    // `crate::search`); the mailbox is the Agent's decoded name, compared
+    // exactly. Deny by default, before any connection is made.
+    let mailbox = query.mailbox.as_str();
+    if !mandate
+        .policy
+        .allows_mailbox(Operation::Search, &login, mailbox)
+    {
+        return Err(CoreError::Denied {
+            operation: Operation::Search,
+            account: login,
+            mailbox: Some(mailbox.to_string()),
+        });
+    }
+    trail.allowed = true;
+    let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
+    let found = imap::search(
+        account,
+        &context.network,
+        mailbox,
+        &query.imap_criteria(),
+        limit,
+    )
+    .map_err(|e| connector_error(e, &login, Some(mailbox)))?;
+    let messages: Vec<MessageSummary> = found
+        .messages
+        .into_iter()
+        .map(|m| MessageSummary {
+            reference: MessageRef {
+                account: login.clone(),
+                mailbox: mailbox.to_string(),
+                uidvalidity: found.uidvalidity,
+                uid: m.uid,
+            }
+            .format(),
+            date: rfc3339_utc(u64::try_from(m.internal_date).unwrap_or(0)),
+            from: if m.from_address.is_empty() {
+                String::new()
+            } else {
+                search::format_address(m.from_name.as_deref(), &m.from_address)
+            },
+            subject: m
+                .subject
+                .as_deref()
+                .map(search::decode_rfc2047)
+                .unwrap_or_default(),
+            flags: m.flags,
+        })
+        .collect();
+    Ok(SearchResult {
+        account: login,
+        mailbox: mailbox.to_string(),
+        total: found.total,
+        more: found.total > messages.len(),
+        messages,
     })
 }
 
@@ -730,6 +908,16 @@ mod tests {
             CoreError::Denied {
                 operation: Operation::List,
                 account: account.clone(),
+                mailbox: None,
+            },
+            CoreError::Denied {
+                operation: Operation::Search,
+                account: account.clone(),
+                mailbox: Some("Archive".to_string()),
+            },
+            CoreError::MailboxNotFound {
+                account: account.clone(),
+                mailbox: "Missing".to_string(),
             },
             CoreError::TlsRequired {
                 account: account.clone(),
