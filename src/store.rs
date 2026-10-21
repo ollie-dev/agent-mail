@@ -8,6 +8,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreError;
 
+/// One stored record: its key and its value.
+pub type Entry = (Vec<u8>, Vec<u8>);
+
 /// Where sealed Mandates live.
 pub trait MandateStore {
     /// Returns the sealed record filed under `key`, if any.
@@ -17,6 +20,8 @@ pub trait MandateStore {
     fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     /// Removes the record filed under `key`. Returns whether one existed.
     fn delete(&self, key: &[u8]) -> Result<bool, StoreError>;
+    /// Every key the store holds, each with its value, in no set order.
+    fn entries(&self) -> Result<Vec<Entry>, StoreError>;
 }
 
 /// The store a release build uses: the Keychain on macOS.
@@ -45,6 +50,10 @@ impl MandateStore for EmptyStore {
     fn delete(&self, _key: &[u8]) -> Result<bool, StoreError> {
         Ok(false)
     }
+
+    fn entries(&self) -> Result<Vec<Entry>, StoreError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -55,10 +64,12 @@ mod keychain {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use core_foundation::data::CFData;
-    use security_framework::item::{ItemAddOptions, ItemAddValue, ItemClass};
+    use security_framework::item::{
+        ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, Limit, SearchResult,
+    };
     use security_framework::passwords;
 
-    use super::{MandateStore, StoreError};
+    use super::{Entry, MandateStore, StoreError};
 
     /// Keychain service name of every Mandate item.
     pub const SERVICE: &str = "agent-mail";
@@ -74,6 +85,46 @@ mod keychain {
 
     fn item_account(key: &[u8]) -> String {
         URL_SAFE_NO_PAD.encode(key)
+    }
+
+    impl KeychainStore {
+        /// The store key of every item with service `agent-mail`, found by
+        /// attributes only (`SecItemCopyMatching`, `kSecMatchLimitAll`). Reads
+        /// no value, so it never triggers a Keychain access prompt.
+        pub fn keys(&self) -> Result<Vec<Vec<u8>>, StoreError> {
+            Ok(self.accounts()?.into_iter().map(|(key, _)| key).collect())
+        }
+
+        /// Each item's store key with its raw item account.
+        fn accounts(&self) -> Result<Vec<(Vec<u8>, String)>, StoreError> {
+            let found = ItemSearchOptions::new()
+                .class(ItemClass::generic_password())
+                .service(SERVICE)
+                .load_attributes(true)
+                .limit(Limit::All)
+                .search();
+            let found = match found {
+                Ok(found) => found,
+                Err(e) if e.code() == ITEM_NOT_FOUND => return Ok(Vec::new()),
+                Err(_) => return Err(StoreError),
+            };
+            found
+                .iter()
+                .map(|item| {
+                    let account = match item {
+                        SearchResult::Dict(_) => item
+                            .simplify_dict()
+                            .and_then(|attributes| attributes.get("acct").cloned()),
+                        _ => None,
+                    }
+                    .ok_or(StoreError)?;
+                    let key = URL_SAFE_NO_PAD
+                        .decode(&account)
+                        .unwrap_or_else(|_| account.clone().into_bytes());
+                    Ok((key, account))
+                })
+                .collect()
+        }
     }
 
     impl MandateStore for KeychainStore {
@@ -105,6 +156,23 @@ mod keychain {
                 Err(_) => Err(StoreError),
             }
         }
+
+        /// Reads every value found by [`KeychainStore::keys`] one by one,
+        /// since fetching data with `kSecMatchLimitAll` is refused. An item
+        /// whose value cannot be read (e.g. access denied) is returned with
+        /// an empty value, so it is counted as unreadable, not dropped.
+        fn entries(&self) -> Result<Vec<Entry>, StoreError> {
+            let mut entries = Vec::new();
+            for (key, account) in self.accounts()? {
+                match passwords::get_generic_password(SERVICE, &account) {
+                    Ok(value) => entries.push((key, value)),
+                    // Deleted since the search: no longer held.
+                    Err(e) if e.code() == ITEM_NOT_FOUND => {}
+                    Err(_) => entries.push((key, Vec::new())),
+                }
+            }
+            Ok(entries)
+        }
     }
 }
 
@@ -117,7 +185,7 @@ mod memory {
     use std::fmt;
     use std::sync::Mutex;
 
-    use super::{MandateStore, StoreError};
+    use super::{Entry, MandateStore, StoreError};
 
     /// Marker that a release build must not contain (checked by a test).
     pub const MARKER: &str = "agent-mail-in-memory-store";
@@ -140,7 +208,7 @@ mod memory {
         }
 
         /// Every raw key and value, for inspecting what the store holds.
-        pub fn entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        pub fn entries(&self) -> Vec<Entry> {
             self.entries
                 .lock()
                 .expect("store lock poisoned")
@@ -182,6 +250,10 @@ mod memory {
                 .map_err(|_| StoreError)?
                 .remove(key)
                 .is_some())
+        }
+
+        fn entries(&self) -> Result<Vec<Entry>, StoreError> {
+            Ok(InMemoryStore::entries(self))
         }
     }
 }

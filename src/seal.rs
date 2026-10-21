@@ -4,6 +4,14 @@
 //! labels: the store lookup key, and the ChaCha20-Poly1305 key that seals the
 //! record. The record's plaintext holds the token hash, the Credential and the
 //! Policy together, so none of them can be swapped independently.
+//!
+//! A stored value (format version 2) is laid out as
+//! `version (1) | listing length (4, big-endian) | listing | nonce (12) |
+//! ciphertext and tag`. The listing is the Mandate's listable metadata in
+//! clear JSON (never a Credential, token or token hash), readable without a
+//! token by [`listing`]. It is bound to the sealed part as AEAD associated
+//! data together with the version and the store key, so changing any byte of
+//! it makes [`open`] fail.
 
 use std::fmt;
 
@@ -16,16 +24,18 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::mandate::Mandate;
+use crate::mandate::{Grant, Mandate, TlsMode};
 
 /// Prefix that makes Agent Tokens recognisable.
 pub const TOKEN_PREFIX: &str = "amt_";
 const TOKEN_BYTES: usize = 32;
-const RECORD_VERSION: u8 = 1;
+/// Version byte of the current record format.
+pub const RECORD_VERSION: u8 = 2;
+const LISTING_LEN_BYTES: usize = 4;
 const HKDF_SALT: &[u8] = b"agent-mail/v1/token-salt";
 const STORE_KEY_INFO: &[u8] = b"agent-mail/v1/store-key";
 const SEAL_KEY_INFO: &[u8] = b"agent-mail/v1/seal-key";
-const AAD_PREFIX: &[u8] = b"agent-mail/v1/record";
+const AAD_PREFIX: &[u8] = b"agent-mail/v2/record";
 
 /// The token that unlocks exactly one Mandate. Its `Debug` output is redacted
 /// and its memory is wiped when dropped.
@@ -147,7 +157,8 @@ pub fn short_id() -> String {
 pub struct SealedRecord {
     /// Lookup key, derived from the token.
     pub key: Vec<u8>,
-    /// Version byte, nonce, then ciphertext with tag.
+    /// The stored value: version, listing, then the sealed part (see the
+    /// module documentation).
     pub value: Vec<u8>,
 }
 
@@ -166,13 +177,128 @@ struct Plaintext {
     mandate: Mandate,
 }
 
-fn aad(store_key: &[u8]) -> Vec<u8> {
-    [AAD_PREFIX, store_key].concat()
+/// A Mandate's listable metadata, stored in clear next to the sealed part.
+/// Holds no Credential, token or token hash. It is shown without a token, so
+/// it is trusted only once [`open`] has verified the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Listing {
+    /// Short ID.
+    pub id: String,
+    /// Name the human gave the Mandate.
+    pub name: String,
+    /// Creation time, Unix seconds (UTC).
+    pub created: u64,
+    /// The covered Accounts, without their Credentials.
+    pub accounts: Vec<ListedAccount>,
+    /// The Policy's Grants.
+    pub grants: Vec<Grant>,
+}
+
+/// An Account as listed: everything but its Credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListedAccount {
+    /// IMAP login name.
+    pub login: String,
+    /// IMAP server host name.
+    pub host: String,
+    /// IMAP server port.
+    pub port: u16,
+    /// How the connection is secured.
+    pub tls: TlsMode,
+}
+
+impl Listing {
+    /// The listable metadata of `mandate`.
+    pub fn of(mandate: &Mandate) -> Self {
+        Self {
+            id: mandate.id.clone(),
+            name: mandate.name.clone(),
+            created: mandate.created,
+            accounts: mandate
+                .accounts
+                .iter()
+                .map(|a| ListedAccount {
+                    login: a.login.clone(),
+                    host: a.host.clone(),
+                    port: a.port,
+                    tls: a.tls,
+                })
+                .collect(),
+            grants: mandate.policy.grants.clone(),
+        }
+    }
+}
+
+/// A stored value whose listable metadata cannot be read: an old record
+/// format, or bytes that are not a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableRecord;
+
+/// The two parts of a stored value: the clear listing bytes and the sealed
+/// part (nonce, ciphertext and tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordParts<'a> {
+    /// The listing, as clear JSON bytes.
+    pub listing: &'a [u8],
+    /// Nonce, then ciphertext with tag.
+    pub sealed: &'a [u8],
+}
+
+/// Splits a stored value into its parts without a token.
+pub fn parts(value: &[u8]) -> Result<RecordParts<'_>, UnreadableRecord> {
+    let (&version, rest) = value.split_first().ok_or(UnreadableRecord)?;
+    if version != RECORD_VERSION || rest.len() < LISTING_LEN_BYTES {
+        return Err(UnreadableRecord);
+    }
+    let (len, rest) = rest.split_at(LISTING_LEN_BYTES);
+    let len = u32::from_be_bytes(len.try_into().expect("four bytes")) as usize;
+    if rest.len() < len {
+        return Err(UnreadableRecord);
+    }
+    let (listing, sealed) = rest.split_at(len);
+    if sealed.len() < aead::NONCE_LEN + aead::CHACHA20_POLY1305.tag_len() {
+        return Err(UnreadableRecord);
+    }
+    Ok(RecordParts { listing, sealed })
+}
+
+/// Joins a listing and a sealed part into a stored value. The inverse of
+/// [`parts`]; whether the result opens is up to [`open`].
+pub fn assemble(listing: &[u8], sealed: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(listing.len()).expect("listing fits a record");
+    let mut value = Vec::with_capacity(1 + LISTING_LEN_BYTES + listing.len() + sealed.len());
+    value.push(RECORD_VERSION);
+    value.extend_from_slice(&len.to_be_bytes());
+    value.extend_from_slice(listing);
+    value.extend_from_slice(sealed);
+    value
+}
+
+/// Reads the listable metadata of a stored value, without a token. Not
+/// authenticated: only [`open`] proves it matches the sealed Mandate.
+pub fn listing(value: &[u8]) -> Result<Listing, UnreadableRecord> {
+    let parts = parts(value)?;
+    serde_json::from_slice(parts.listing).map_err(|_| UnreadableRecord)
+}
+
+fn aad(store_key: &[u8], listing: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(listing.len()).expect("listing fits a record");
+    [
+        AAD_PREFIX,
+        &[RECORD_VERSION],
+        store_key,
+        &len.to_be_bytes(),
+        listing,
+    ]
+    .concat()
 }
 
 /// Seals `mandate` under `token`.
 pub fn seal(token: &AgentToken, mandate: &Mandate) -> SealedRecord {
     let key = token.store_key();
+    let listing = serde_json::to_vec(&Listing::of(mandate)).expect("a listing always serialises");
     let plaintext = Plaintext {
         token_hash: token.hash(),
         mandate: mandate.clone(),
@@ -193,14 +319,12 @@ pub fn seal(token: &AgentToken, mandate: &Mandate) -> SealedRecord {
         .seal_key()
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce),
-            Aad::from(aad(&key)),
+            Aad::from(aad(&key, &listing)),
             &mut *buf,
         )
         .expect("record fits the AEAD limits");
-    let mut value = Vec::with_capacity(1 + nonce.len() + buf.len());
-    value.push(RECORD_VERSION);
-    value.extend_from_slice(&nonce);
-    value.extend_from_slice(&buf);
+    let sealed = [&nonce[..], &buf[..]].concat();
+    let value = assemble(&listing, &sealed);
     SealedRecord { key, value }
 }
 
@@ -219,20 +343,27 @@ impl std::io::Write for ByteCounter {
 }
 
 /// Opens a sealed record with `token`. Fails on any tampering or wrong token.
+/// The clear listing must be byte-for-byte authentic, and must also match the
+/// Mandate sealed inside.
 pub fn open(token: &AgentToken, value: &[u8]) -> Result<Mandate, OpenError> {
-    let (&version, rest) = value.split_first().ok_or(OpenError)?;
-    if version != RECORD_VERSION || rest.len() < aead::NONCE_LEN {
-        return Err(OpenError);
-    }
-    let (nonce, ciphertext) = rest.split_at(aead::NONCE_LEN);
+    let parts = parts(value).map_err(|_| OpenError)?;
+    let (nonce, ciphertext) = parts.sealed.split_at(aead::NONCE_LEN);
     let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| OpenError)?;
     let mut buf = Zeroizing::new(ciphertext.to_vec());
     let plaintext = token
         .seal_key()
-        .open_in_place(nonce, Aad::from(aad(&token.store_key())), &mut buf)
+        .open_in_place(
+            nonce,
+            Aad::from(aad(&token.store_key(), parts.listing)),
+            &mut buf,
+        )
         .map_err(|_| OpenError)?;
     let plaintext: Plaintext = serde_json::from_slice(plaintext).map_err(|_| OpenError)?;
     if plaintext.token_hash != token.hash() {
+        return Err(OpenError);
+    }
+    let listed: Listing = serde_json::from_slice(parts.listing).map_err(|_| OpenError)?;
+    if listed != Listing::of(&plaintext.mandate) {
         return Err(OpenError);
     }
     Ok(plaintext.mandate)

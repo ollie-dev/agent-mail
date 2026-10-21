@@ -422,4 +422,52 @@ impl MandateStore for CountingStore {
         self.accesses.fetch_add(1, Ordering::SeqCst);
         self.inner.delete(key)
     }
+
+    fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, agent_mail::store::StoreError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        MandateStore::entries(&self.inner)
+    }
+}
+
+/// Mandate A of the list and delete fixtures: `work-inbox`, `aaaa1111`,
+/// created 2026-10-20T08:00:00Z, the fake Account on `port`.
+pub fn mandate_a(port: u16) -> Mandate {
+    Mandate {
+        name: "work-inbox".to_string(),
+        id: "aaaa1111".to_string(),
+        created: 1_792_483_200,
+        accounts: vec![account(LOGIN, port, TlsMode::Implicit)],
+        policy: Policy {
+            grants: vec![
+                grant(Operation::List, &["INBOX", "Archive"]),
+                grant(Operation::Search, &["INBOX"]),
+            ],
+        },
+    }
+}
+
+/// Mandate B of the list and delete fixtures: `other-archive`, `bbbb2222`,
+/// created 2026-10-21T09:30:15Z, the second fake Account on `port`.
+pub fn mandate_b(port: u16) -> Mandate {
+    Mandate {
+        name: "other-archive".to_string(),
+        id: "bbbb2222".to_string(),
+        created: 1_792_575_015,
+        accounts: vec![account(OTHER_LOGIN, port, TlsMode::Implicit)],
+        policy: Policy {
+            grants: vec![grant_on(Operation::List, OTHER_LOGIN, &["Archive"])],
+        },
+    }
+}
+
+/// The token hash as the record format defines it: base64url without
+/// padding of SHA-256 over the token's 32 secret bytes.
+pub fn token_hash(token: &str) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let body = token
+        .strip_prefix(seal::TOKEN_PREFIX)
+        .expect("token prefix");
+    let secret = URL_SAFE_NO_PAD.decode(body).expect("token body");
+    URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &secret))
 }

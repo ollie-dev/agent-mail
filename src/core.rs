@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::imap::{self, ImapError, Network};
-use crate::mandate::{Mandate, Operation};
-use crate::seal::{self, AgentToken};
+use crate::mandate::{Grant, Mandate, Operation};
+use crate::seal::{self, AgentToken, ListedAccount};
 use crate::store::MandateStore;
 use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
@@ -71,6 +71,48 @@ pub enum Command {
     List,
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate,
+    /// List every stored Mandate's metadata. Reads no token.
+    MandateList,
+    /// Delete the Mandate with short ID `id`. Reads no token and asks for no
+    /// Credential (ADR-0003).
+    MandateDelete {
+        /// The short ID, matched exactly. Untrusted input.
+        id: String,
+    },
+}
+
+/// Result of `mandate list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MandateListing {
+    /// The readable Mandates, by `created` ascending, then by ID.
+    pub mandates: Vec<MandateSummary>,
+    /// Stored records whose metadata could not be read, so not listed.
+    pub unreadable: usize,
+}
+
+/// One Mandate in a [`MandateListing`]. Never holds a Credential, token,
+/// token hash or store key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MandateSummary {
+    /// Short ID.
+    pub id: String,
+    /// Name.
+    pub name: String,
+    /// Creation time, RFC 3339 UTC.
+    pub created: String,
+    /// The covered Accounts.
+    pub accounts: Vec<ListedAccount>,
+    /// The Grants.
+    pub grants: Vec<Grant>,
+}
+
+/// Result of `mandate delete`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeletedMandate {
+    /// Short ID of the deleted Mandate.
+    pub id: String,
+    /// Its name.
+    pub name: String,
 }
 
 /// Result of `list`.
@@ -97,6 +139,10 @@ pub enum Outcome {
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
+    /// Result of `mandate list`.
+    Mandates(MandateListing),
+    /// Result of `mandate delete`.
+    Deleted(DeletedMandate),
 }
 
 /// A structured error. Never carries a token or a Credential.
@@ -151,6 +197,11 @@ pub enum CoreError {
     SandboxDetected,
     /// The human aborted `mandate create`; nothing was stored.
     Aborted,
+    /// No stored Mandate has this short ID.
+    NotFound {
+        /// The ID asked for.
+        id: String,
+    },
 }
 
 /// The JSON body of an error, in field order `code`, details, `message`.
@@ -167,6 +218,9 @@ pub struct ErrorBody {
     /// Login names of the Accounts to choose from, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<String>>,
+    /// The Mandate ID involved, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Human-readable explanation.
     pub message: String,
 }
@@ -188,6 +242,7 @@ impl CoreError {
             Self::InteractiveTerminalRequired => "interactive_terminal_required",
             Self::SandboxDetected => "sandbox_detected",
             Self::Aborted => "aborted",
+            Self::NotFound { .. } => "not_found",
         }
     }
 
@@ -199,9 +254,22 @@ impl CoreError {
                 operation: None,
                 account: None,
                 accounts: Some(accounts.clone()),
+                id: None,
                 message: format!(
                     "this agent token covers several accounts ({}) and choosing one is not supported yet; ask the human for a token whose Mandate covers a single account",
                     accounts.join(", ")
+                ),
+            };
+        }
+        if let Self::NotFound { id } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: None,
+                accounts: None,
+                id: Some(id.clone()),
+                message: format!(
+                    "no Mandate has ID {id}; run `agent-mail mandate list` to see the IDs"
                 ),
             };
         }
@@ -257,7 +325,9 @@ impl CoreError {
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
             ),
-            Self::AccountRequired { .. } => unreachable!("handled above"),
+            Self::AccountRequired { .. } | Self::NotFound { .. } => {
+                unreachable!("handled above")
+            }
             Self::InteractiveTerminalRequired => (
                 None,
                 None,
@@ -282,6 +352,7 @@ impl CoreError {
             operation,
             account,
             accounts: None,
+            id: None,
             message,
         }
     }
@@ -304,7 +375,90 @@ pub fn execute(
         Command::MandateCreate => {
             crate::create::run(env, context).map(|()| Outcome::MandateCreated)
         }
+        Command::MandateList => mandate_list(context).map(Outcome::Mandates),
+        Command::MandateDelete { id } => mandate_delete(id, context).map(Outcome::Deleted),
     }
+}
+
+/// Lists what the store holds from each record's clear metadata. No token
+/// is read, so this shows only what the store claims; trust comes from
+/// [`seal::open`] when a token is presented.
+fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
+    let entries = context
+        .store
+        .entries()
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    let mut listings = Vec::with_capacity(entries.len());
+    let mut unreadable = 0;
+    for (_, value) in &entries {
+        match seal::listing(value) {
+            Ok(listing) => listings.push(listing),
+            Err(_) => unreadable += 1,
+        }
+    }
+    listings.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+    let mandates = listings
+        .into_iter()
+        .map(|l| MandateSummary {
+            id: l.id,
+            name: l.name,
+            created: rfc3339_utc(l.created),
+            accounts: l.accounts,
+            grants: l.grants,
+        })
+        .collect();
+    Ok(MandateListing {
+        mandates,
+        unreadable,
+    })
+}
+
+/// Deletes the first record whose clear metadata carries ID `id` exactly.
+fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, CoreError> {
+    let entries = context
+        .store
+        .entries()
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    let found = entries.iter().find_map(|(key, value)| {
+        seal::listing(value)
+            .ok()
+            .filter(|l| l.id == id)
+            .map(|l| (key, l.name))
+    });
+    let Some((key, name)) = found else {
+        return Err(CoreError::NotFound { id: id.to_string() });
+    };
+    match context.store.delete(key) {
+        Ok(true) => Ok(DeletedMandate {
+            id: id.to_string(),
+            name,
+        }),
+        // Removed by someone else since it was read.
+        Ok(false) => Err(CoreError::NotFound { id: id.to_string() }),
+        Err(_) => Err(CoreError::StoreUnavailable),
+    }
+}
+
+/// Formats Unix seconds as RFC 3339 UTC, e.g. `2026-10-20T08:00:00Z`.
+pub fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
 }
 
 fn open_mandate(token: Option<&str>, context: &Context<'_>) -> Result<Mandate, CoreError> {
@@ -372,6 +526,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rfc3339_formats_utc_seconds() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_792_483_200), "2026-10-20T08:00:00Z");
+        assert_eq!(rfc3339_utc(1_792_575_015), "2026-10-21T09:30:15Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
     fn every_error_message_names_a_next_step() {
         let account = "agent@example.test".to_string();
         let errors = [
@@ -403,6 +565,9 @@ mod tests {
             CoreError::InteractiveTerminalRequired,
             CoreError::SandboxDetected,
             CoreError::Aborted,
+            CoreError::NotFound {
+                id: "ffffffff".to_string(),
+            },
         ];
         for error in errors {
             let message = error.body().message;
