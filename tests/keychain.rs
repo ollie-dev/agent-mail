@@ -32,8 +32,12 @@ fn keychain_round_trips_a_dummy_mandate_and_deletes_it() {
     store
         .put(&record.key, &record.value)
         .expect("put into the Keychain");
+    // Add-only: a second put under the same key fails and changes nothing.
+    let overwrite = store.put(&record.key, b"replacement");
     let stored = store.get(&record.key).expect("get from the Keychain");
     let deleted = store.delete(&record.key);
+
+    assert!(overwrite.is_err(), "put replaced an existing item");
 
     assert_eq!(stored.as_deref(), Some(record.value.as_slice()));
     assert_eq!(seal::open(&token, stored.as_deref().unwrap()), Ok(dummy));

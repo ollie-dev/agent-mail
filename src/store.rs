@@ -12,7 +12,8 @@ pub struct StoreError;
 pub trait MandateStore {
     /// Returns the sealed record filed under `key`, if any.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
-    /// Files `value` under `key`.
+    /// Files `value` under `key`. Add-only: fails if a record is already
+    /// filed under `key`, and never replaces it.
     fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     /// Removes the record filed under `key`. Returns whether one existed.
     fn delete(&self, key: &[u8]) -> Result<bool, StoreError>;
@@ -53,6 +54,8 @@ pub use keychain::KeychainStore;
 mod keychain {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use core_foundation::data::CFData;
+    use security_framework::item::{ItemAddOptions, ItemAddValue, ItemClass};
     use security_framework::passwords;
 
     use super::{MandateStore, StoreError};
@@ -82,9 +85,17 @@ mod keychain {
             }
         }
 
+        /// Add-only (`SecItemAdd`): an existing item, and its access list,
+        /// is never updated; `errSecDuplicateItem` is an error.
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
-            passwords::set_generic_password(SERVICE, &item_account(key), value)
-                .map_err(|_| StoreError)
+            let mut options = ItemAddOptions::new(ItemAddValue::Data {
+                class: ItemClass::generic_password(),
+                data: CFData::from_buffer(value),
+            });
+            options
+                .set_service(SERVICE)
+                .set_account_name(item_account(key));
+            options.add().map_err(|_| StoreError)
         }
 
         fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
@@ -156,10 +167,11 @@ mod memory {
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
-            self.entries
-                .lock()
-                .map_err(|_| StoreError)?
-                .insert(key.to_vec(), value.to_vec());
+            let mut entries = self.entries.lock().map_err(|_| StoreError)?;
+            if entries.contains_key(key) {
+                return Err(StoreError);
+            }
+            entries.insert(key.to_vec(), value.to_vec());
             Ok(())
         }
 
