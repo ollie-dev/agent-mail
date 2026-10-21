@@ -32,18 +32,49 @@ pub trait Terminal {
     fn reveal(&self, text: &str) -> Result<(), Cancelled>;
 }
 
-/// Escapes control characters (newlines, ANSI escapes) in server-supplied
-/// text, so a hostile server cannot forge lines or styling.
+/// Escapes control characters (newlines, ANSI escapes) and invisible format
+/// characters (bidi overrides, zero-width characters) in untrusted text, such
+/// as server-supplied names or store metadata, so it cannot forge lines,
+/// styling or visual order.
 pub fn escape_controls(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_format(c) {
                 c.escape_unicode().to_string()
             } else {
                 c.to_string()
             }
         })
         .collect()
+}
+
+/// Unicode format characters (general category Cf) that alter how text
+/// displays without showing themselves.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61c}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{890}'..='\u{891}'
+            | '\u{8e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 /// A terminal no human sits at. The default for contexts that never prompt.

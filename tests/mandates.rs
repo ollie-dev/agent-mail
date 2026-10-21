@@ -4,7 +4,7 @@
 mod support;
 
 use agent_mail::RunOutput;
-use agent_mail::seal::{AgentToken, TOKEN_PREFIX};
+use agent_mail::seal::{self, AgentToken, TOKEN_PREFIX};
 use agent_mail::store::{InMemoryStore, MandateStore};
 use serde_json::{Value, json};
 use support::{
@@ -396,4 +396,58 @@ fn version_one_record() -> Vec<u8> {
     value.extend_from_slice(&[7u8; 12]);
     value.extend_from_slice(&[9u8; 120]);
     value
+}
+
+#[test]
+fn delete_removes_every_record_with_the_id_so_a_decoy_cannot_block_revocation() {
+    let server = FakeImap::start(Mode::Implicit);
+    // Decoys filed before and after A in the store's enumeration order.
+    for decoy_key in [vec![0u8], vec![0xffu8; 33]] {
+        let store = InMemoryStore::new();
+        let a = store_mandate(&store, &mandate_a(server.port));
+        let b = store_mandate(&store, &mandate_b(server.port));
+        // A forged record: A's listing copied in clear, junk sealed part.
+        let (_, value) = store
+            .entries()
+            .into_iter()
+            .find(|(_, v)| seal::listing(v).unwrap().id == "aaaa1111")
+            .unwrap();
+        let listing = seal::parts(&value).unwrap().listing.to_vec();
+        let decoy = seal::assemble(&listing, &[0u8; 64]);
+        MandateStore::put(&store, &decoy_key, &decoy).unwrap();
+        assert_eq!(store.entries().len(), 3);
+
+        let out = run(&["mandate", "delete", "aaaa1111"], None, &store, &server);
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+        assert_eq!(
+            out.stdout,
+            "{\"deleted\":{\"id\":\"aaaa1111\",\"name\":\"work-inbox\"}}\n"
+        );
+        assert_eq!(store.entries().len(), 1, "a record with the ID survived");
+
+        let out = run(&["list"], Some(a.expose()), &store, &server);
+        assert_eq!(out.code, 1);
+        assert_eq!(error_of(&out)["code"], "invalid_token");
+        let out = run(&["list"], Some(b.expose()), &store, &server);
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+    }
+}
+
+#[test]
+fn text_listing_escapes_bidi_and_zero_width_characters() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let mut spoof = mandate_a(server.port);
+    spoof.name = "work\u{202e}xobni\u{200b}".to_string();
+    store_mandate(&store, &spoof);
+
+    let out = run(&["--text", "mandate", "list"], None, &store, &server);
+    assert_eq!(out.code, 0);
+    assert!(
+        out.stdout
+            .starts_with("aaaa1111  work\\u{202e}xobni\\u{200b}  created "),
+        "{:?}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains('\u{202e}') && !out.stdout.contains('\u{200b}'));
 }

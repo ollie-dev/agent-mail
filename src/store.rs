@@ -87,16 +87,24 @@ mod keychain {
         URL_SAFE_NO_PAD.encode(key)
     }
 
+    /// An item's store key (if its account decodes) and its raw account.
+    type ItemAccount = (Option<Vec<u8>>, String);
+
     impl KeychainStore {
         /// The store key of every item with service `agent-mail`, found by
         /// attributes only (`SecItemCopyMatching`, `kSecMatchLimitAll`). Reads
         /// no value, so it never triggers a Keychain access prompt.
         pub fn keys(&self) -> Result<Vec<Vec<u8>>, StoreError> {
-            Ok(self.accounts()?.into_iter().map(|(key, _)| key).collect())
+            Ok(self
+                .accounts()?
+                .into_iter()
+                .filter_map(|(key, _)| key)
+                .collect())
         }
 
-        /// Each item's store key with its raw item account.
-        fn accounts(&self) -> Result<Vec<(Vec<u8>, String)>, StoreError> {
+        /// Each item's raw item account, with its store key if the account
+        /// is valid base64url.
+        fn accounts(&self) -> Result<Vec<ItemAccount>, StoreError> {
             let found = ItemSearchOptions::new()
                 .class(ItemClass::generic_password())
                 .service(SERVICE)
@@ -118,9 +126,7 @@ mod keychain {
                         _ => None,
                     }
                     .ok_or(StoreError)?;
-                    let key = URL_SAFE_NO_PAD
-                        .decode(&account)
-                        .unwrap_or_else(|_| account.clone().into_bytes());
+                    let key = URL_SAFE_NO_PAD.decode(&account).ok();
                     Ok((key, account))
                 })
                 .collect()
@@ -164,6 +170,11 @@ mod keychain {
         fn entries(&self) -> Result<Vec<Entry>, StoreError> {
             let mut entries = Vec::new();
             for (key, account) in self.accounts()? {
+                let Some(key) = key else {
+                    // Not filed by agent-mail: count it, never target it.
+                    entries.push((account.into_bytes(), Vec::new()));
+                    continue;
+                };
                 match passwords::get_generic_password(SERVICE, &account) {
                     Ok(value) => entries.push((key, value)),
                     // Deleted since the search: no longer held.
