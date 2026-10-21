@@ -424,9 +424,17 @@ fn add_account(
         (host, port, tls, login, "Credential (password)")
     };
     let shown = escape_controls(&login);
+    let server = format!("{}:{port}", escape_controls(&host));
+    if looks_like_gmail(&login) && !host.eq_ignore_ascii_case(GMAIL_HOST) {
+        terminal.message(&format!(
+            "Warning: {shown} looks like a Gmail address, but the server is {server}, not \
+             {GMAIL_HOST}. The credential you type next goes to {server}; check the host \
+             before typing it."
+        ));
+    }
     loop {
         let credential: Credential = terminal
-            .hidden(&format!("{credential_prompt} for {shown}:"))
+            .hidden(&format!("{credential_prompt} for {shown} on {server}:"))
             .map_err(cancelled)?;
         let account = Account {
             login: login.clone(),
@@ -454,6 +462,12 @@ fn add_account(
             }
         }
     }
+}
+
+/// Whether `login` is a Gmail address (`@gmail.com` or `@googlemail.com`).
+fn looks_like_gmail(login: &str) -> bool {
+    let lower = login.trim().to_ascii_lowercase();
+    lower.ends_with("@gmail.com") || lower.ends_with("@googlemail.com")
 }
 
 fn failure_reason(error: &ImapError) -> &'static str {
@@ -608,6 +622,14 @@ mod tests {
         assert!(text.contains("evil\\u{a}name"));
         assert!(text.contains("Evil\\u{d}\\u{a}\\u{1b}[31mRed"));
         assert!(text.contains("agent@example.test  localhost:993  TLS implicit"));
+    }
+
+    #[test]
+    fn gmail_addresses_are_recognised() {
+        assert!(looks_like_gmail("Someone@GMail.com"));
+        assert!(looks_like_gmail("someone@googlemail.com"));
+        assert!(!looks_like_gmail("agent@example.test"));
+        assert!(!looks_like_gmail("someone@gmail.com.evil.test"));
     }
 
     #[test]

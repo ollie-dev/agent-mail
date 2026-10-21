@@ -6,14 +6,16 @@
 //! Credential field: the file never holds a Credential or an Agent Token.
 //!
 //! A file passed to `--from` is untrusted input. It is checked key by key
-//! before it is deserialised, so every problem is reported by key path and
-//! line number only and no value from the file is echoed (a pasted secret
+//! with source positions, so every problem is reported by line, and no key
+//! name or value from the file is echoed (a pasted secret, even as a key,
 //! must not end up in an error message).
 
-use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use toml::Spanned;
+use toml::de::{DeTable, DeValue};
 
 use crate::mandate::{Mandate, Operation, TlsMode};
 use crate::terminal::escape_controls;
@@ -100,34 +102,42 @@ impl MandateFile {
 
     /// Parses and validates TOML text.
     pub fn from_toml(text: &str) -> Result<Self, InvalidFile> {
-        let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
-            let place = e
-                .span()
-                .map(|span| {
-                    let (line, column) = line_column(text, span.start);
-                    format!(" at line {line}, column {column}")
-                })
-                .unwrap_or_default();
+        let root = DeTable::parse(text).map_err(|e| {
             // `Display` and `message()` may quote the offending source text,
             // so only the position is reported.
-            InvalidFile(format!("the file is not valid TOML{place}"))
+            match e.span() {
+                Some(span) => {
+                    let (line, column) = line_column(text, span.start);
+                    InvalidFile(format!("line {line}, column {column} is not valid TOML"))
+                }
+                None => InvalidFile("the file is not valid TOML".into()),
+            }
         })?;
-        check_table(&table)?;
-        let file: MandateFile = table
-            .try_into()
-            .map_err(|_| InvalidFile("the file does not match the Mandate file format".into()))?;
-        file.validate()?;
-        Ok(file)
+        let file = Walk { text }.file(root.get_ref())?;
+        // Defence in depth: the strict serde types must agree with the walk.
+        match toml::from_str::<MandateFile>(text) {
+            Ok(parsed) if parsed == file => Ok(file),
+            _ => Err(InvalidFile(
+                "the file does not match the Mandate file format".into(),
+            )),
+        }
     }
 
-    /// Reads, parses and validates the file at `path`.
+    /// Reads, parses and validates the file at `path`. The path must name a
+    /// regular file (symlinks are followed) before it is opened, so a FIFO or
+    /// device is never opened.
     pub fn load(path: &Path) -> Result<Self, InvalidFile> {
         use std::io::Read;
         let shown = escape_controls(&path.display().to_string());
         let cannot = |e: std::io::Error| InvalidFile(format!("cannot read {shown}: {}", e.kind()));
+        let not_regular = || InvalidFile(format!("{shown} is not a regular file"));
+        if !std::fs::metadata(path).map_err(cannot)?.is_file() {
+            return Err(not_regular());
+        }
         let file = std::fs::File::open(path).map_err(cannot)?;
+        // The path may have been swapped between the check and the open.
         if !file.metadata().map_err(cannot)?.is_file() {
-            return Err(InvalidFile(format!("{shown} is not a regular file")));
+            return Err(not_regular());
         }
         let mut bytes = Vec::new();
         file.take(MAX_FILE_BYTES + 1)
@@ -141,54 +151,6 @@ impl MandateFile {
         let text = String::from_utf8(bytes)
             .map_err(|_| InvalidFile(format!("{shown} is not UTF-8 text")))?;
         Self::from_toml(&text)
-    }
-
-    /// Checks what types cannot: non-empty names, ports from 1, distinct
-    /// logins, Grants naming a file Account, `draft` without mailboxes.
-    fn validate(&self) -> Result<(), InvalidFile> {
-        if self.name.trim().is_empty() {
-            return Err(InvalidFile("`name` is empty".into()));
-        }
-        if self.accounts.is_empty() {
-            return Err(InvalidFile("the file has no [[accounts]]".into()));
-        }
-        let mut logins = BTreeSet::new();
-        for (i, account) in self.accounts.iter().enumerate() {
-            let at = format!("accounts[{}]", i + 1);
-            if account.login.trim().is_empty() {
-                return Err(InvalidFile(format!("`{at}.login` is empty")));
-            }
-            if account.host.trim().is_empty() {
-                return Err(InvalidFile(format!("`{at}.host` is empty")));
-            }
-            if account.port == 0 {
-                return Err(InvalidFile(format!("`{at}.port` must be from 1 to 65535")));
-            }
-            if !logins.insert(account.login.as_str()) {
-                return Err(InvalidFile(format!(
-                    "two Accounts have the login {}",
-                    escape_controls(&account.login)
-                )));
-            }
-        }
-        for (i, grant) in self.grants.iter().enumerate() {
-            let at = format!("grants[{}]", i + 1);
-            if !logins.contains(grant.account.as_str()) {
-                return Err(InvalidFile(format!(
-                    "`{at}.account` names {}, which is not among the file's Accounts",
-                    escape_controls(&grant.account)
-                )));
-            }
-            if grant.operation == Operation::Draft && !grant.mailboxes.is_empty() {
-                return Err(InvalidFile(format!(
-                    "`{at}` is a draft Grant, which takes no mailboxes"
-                )));
-            }
-            if grant.mailboxes.iter().any(String::is_empty) {
-                return Err(InvalidFile(format!("`{at}.mailboxes` has an empty name")));
-            }
-        }
-        Ok(())
     }
 
     /// The decoded mailbox names the file grants on Account `login` for any
@@ -235,107 +197,190 @@ const TOP_KEYS: [&str; 3] = ["name", "accounts", "grants"];
 const ACCOUNT_KEYS: [&str; 4] = ["login", "host", "port", "tls"];
 const GRANT_KEYS: [&str; 3] = ["operation", "account", "mailboxes"];
 
-fn unknown_key(key: &str, at: &str) -> InvalidFile {
-    // Key names are reported (escaped); their values never are.
-    let key = escape_controls(key);
-    if at.is_empty() {
-        InvalidFile(format!("unknown key `{key}`"))
-    } else {
-        InvalidFile(format!("unknown key `{key}` in `{at}`"))
-    }
+type Value<'i> = Spanned<DeValue<'i>>;
+
+/// Checks the parsed file key by key and builds the [`MandateFile`].
+///
+/// Every problem names a line and what is wrong there. No key name or value
+/// from the file is repeated, except a login a Grant or a duplicate names
+/// (escaped), since that is how the human finds it.
+struct Walk<'t> {
+    text: &'t str,
 }
 
-fn wrong(at: &str, expected: &str) -> InvalidFile {
-    InvalidFile(format!("`{at}` must be {expected}"))
-}
+impl Walk<'_> {
+    fn at(&self, span: Range<usize>, what: &str) -> InvalidFile {
+        let (line, _) = line_column(self.text, span.start);
+        InvalidFile(format!("line {line}: {what}"))
+    }
 
-/// Checks keys and value types, naming the key path of the first problem.
-fn check_table(table: &toml::Table) -> Result<(), InvalidFile> {
-    if let Some(key) = table.keys().find(|k| !TOP_KEYS.contains(&k.as_str())) {
-        return Err(unknown_key(key, ""));
-    }
-    match table.get("name") {
-        None => return Err(InvalidFile("the key `name` is missing".into())),
-        Some(v) if !v.is_str() => return Err(wrong("name", "a string")),
-        Some(_) => {}
-    }
-    let accounts = match table.get("accounts") {
-        None => return Err(InvalidFile("the file has no [[accounts]]".into())),
-        Some(toml::Value::Array(items)) => items,
-        Some(_) => return Err(wrong("accounts", "an array of tables ([[accounts]])")),
-    };
-    for (i, item) in accounts.iter().enumerate() {
-        let at = format!("accounts[{}]", i + 1);
-        let entry = item
-            .as_table()
-            .ok_or_else(|| wrong(&at, "a table ([[accounts]])"))?;
-        check_keys(entry, &ACCOUNT_KEYS, &at)?;
-        check_string(entry, "login", &at)?;
-        check_string(entry, "host", &at)?;
-        match entry.get("port") {
-            Some(toml::Value::Integer(port)) if (1..=65535).contains(port) => {}
-            Some(toml::Value::Integer(_)) => {
-                return Err(wrong(&format!("{at}.port"), "from 1 to 65535"));
-            }
-            Some(_) => return Err(wrong(&format!("{at}.port"), "an integer")),
-            None => unreachable!("checked by check_keys"),
+    fn file(&self, table: &DeTable<'_>) -> Result<MandateFile, InvalidFile> {
+        self.known_keys(table, &TOP_KEYS, "unknown key at the top level")?;
+        let name = match table.get("name") {
+            None => return Err(InvalidFile("the Mandate name is missing".into())),
+            Some(v) => self.text_of(v, "the Mandate name must be a non-empty string")?,
+        };
+        let entries = match table.get("accounts") {
+            None => return Err(InvalidFile("the file has no [[accounts]] table".into())),
+            Some(v) => self.tables(v, "accounts must be [[accounts]] tables")?,
+        };
+        if entries.is_empty() {
+            return Err(InvalidFile("the file has no [[accounts]] table".into()));
         }
-        match entry.get("tls").and_then(toml::Value::as_str) {
-            Some("implicit" | "starttls") => {}
-            _ => {
-                return Err(wrong(&format!("{at}.tls"), "\"implicit\" or \"starttls\""));
-            }
-        }
-    }
-    let grants = match table.get("grants") {
-        None => return Ok(()),
-        Some(toml::Value::Array(items)) => items,
-        Some(_) => return Err(wrong("grants", "an array of tables ([[grants]])")),
-    };
-    for (i, item) in grants.iter().enumerate() {
-        let at = format!("grants[{}]", i + 1);
-        let entry = item
-            .as_table()
-            .ok_or_else(|| wrong(&at, "a table ([[grants]])"))?;
-        check_keys(entry, &GRANT_KEYS, &at)?;
-        let operation = entry.get("operation").and_then(toml::Value::as_str);
-        if !Operation::ALL
-            .iter()
-            .any(|op| Some(op.as_str()) == operation)
-        {
-            return Err(wrong(
-                &format!("{at}.operation"),
-                "one of list, search, read, flag, move, draft",
-            ));
-        }
-        check_string(entry, "account", &at)?;
-        match entry.get("mailboxes") {
-            Some(toml::Value::Array(names)) if names.iter().all(toml::Value::is_str) => {}
-            _ => {
-                return Err(wrong(
-                    &format!("{at}.mailboxes"),
-                    "an array of mailbox names",
+        let mut accounts: Vec<FileAccount> = Vec::new();
+        for (span, entry) in entries {
+            let account = self.account(span, entry)?;
+            if accounts.iter().any(|a| a.login == account.login) {
+                let login = entry.get("login").expect("checked").span();
+                return Err(self.at(
+                    login,
+                    &format!(
+                        "two Accounts have the login {}",
+                        escape_controls(&account.login)
+                    ),
                 ));
             }
+            accounts.push(account);
+        }
+        let entries = match table.get("grants") {
+            None => Vec::new(),
+            Some(v) => self.tables(v, "grants must be [[grants]] tables")?,
+        };
+        let mut grants = Vec::new();
+        for (span, entry) in entries {
+            grants.push(self.grant(span, entry, &accounts)?);
+        }
+        Ok(MandateFile {
+            name,
+            accounts,
+            grants,
+        })
+    }
+
+    fn account(&self, span: Range<usize>, entry: &DeTable<'_>) -> Result<FileAccount, InvalidFile> {
+        self.known_keys(entry, &ACCOUNT_KEYS, "unknown key in an [[accounts]] entry")?;
+        let field = |key: &str| {
+            entry.get(key).ok_or_else(|| {
+                self.at(span.clone(), &format!("an [[accounts]] entry has no {key}"))
+            })
+        };
+        let login = self.text_of(field("login")?, "the login must be a non-empty string")?;
+        let host = self.text_of(field("host")?, "the host must be a non-empty string")?;
+        let port = field("port")?;
+        let port = port
+            .get_ref()
+            .as_integer()
+            .and_then(|n| i64::from_str_radix(n.as_str(), n.radix()).ok())
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|n| *n != 0)
+            .ok_or_else(|| self.at(port.span(), "the port must be a number from 1 to 65535"))?;
+        let tls = field("tls")?;
+        let tls = match tls.get_ref().as_str() {
+            Some("implicit") => TlsMode::Implicit,
+            Some("starttls") => TlsMode::Starttls,
+            _ => {
+                return Err(self.at(tls.span(), "the TLS mode must be implicit or starttls"));
+            }
+        };
+        Ok(FileAccount {
+            login,
+            host,
+            port,
+            tls,
+        })
+    }
+
+    fn grant(
+        &self,
+        span: Range<usize>,
+        entry: &DeTable<'_>,
+        accounts: &[FileAccount],
+    ) -> Result<FileGrant, InvalidFile> {
+        self.known_keys(entry, &GRANT_KEYS, "unknown key in a [[grants]] entry")?;
+        let field = |key: &str| {
+            entry
+                .get(key)
+                .ok_or_else(|| self.at(span.clone(), &format!("a [[grants]] entry has no {key}")))
+        };
+        let operation = field("operation")?;
+        let operation = Operation::ALL
+            .into_iter()
+            .find(|op| operation.get_ref().as_str() == Some(op.as_str()))
+            .ok_or_else(|| {
+                self.at(
+                    operation.span(),
+                    "the operation must be one of list, search, read, flag, move, draft",
+                )
+            })?;
+        let account = field("account")?;
+        let login = self.text_of(account, "the Grant's account must be a non-empty string")?;
+        if !accounts.iter().any(|a| a.login == login) {
+            return Err(self.at(
+                account.span(),
+                &format!(
+                    "the Grant names Account {}, which is not among the file's Accounts",
+                    escape_controls(&login)
+                ),
+            ));
+        }
+        let list = field("mailboxes")?;
+        let bad = || self.at(list.span(), "the mailboxes must be a list of mailbox names");
+        let mut mailboxes = Vec::new();
+        for item in list.get_ref().as_array().ok_or_else(bad)?.iter() {
+            match item.get_ref().as_str() {
+                Some(name) if !name.is_empty() => mailboxes.push(name.to_string()),
+                _ => return Err(bad()),
+            }
+        }
+        if operation == Operation::Draft && !mailboxes.is_empty() {
+            return Err(self.at(list.span(), "a draft Grant takes no mailboxes"));
+        }
+        Ok(FileGrant {
+            operation,
+            account: login,
+            mailboxes,
+        })
+    }
+
+    fn known_keys(
+        &self,
+        table: &DeTable<'_>,
+        keys: &[&str],
+        what: &str,
+    ) -> Result<(), InvalidFile> {
+        match table
+            .iter()
+            .find(|(k, _)| !keys.contains(&k.get_ref().as_ref()))
+        {
+            Some((key, _)) => Err(self.at(key.span(), what)),
+            None => Ok(()),
         }
     }
-    Ok(())
-}
 
-fn check_keys(entry: &toml::Table, keys: &[&str], at: &str) -> Result<(), InvalidFile> {
-    if let Some(key) = entry.keys().find(|k| !keys.contains(&k.as_str())) {
-        return Err(unknown_key(key, at));
+    fn text_of(&self, value: &Value<'_>, what: &str) -> Result<String, InvalidFile> {
+        match value.get_ref().as_str() {
+            Some(text) if !text.trim().is_empty() => Ok(text.to_string()),
+            _ => Err(self.at(value.span(), what)),
+        }
     }
-    if let Some(key) = keys.iter().find(|k| !entry.contains_key(**k)) {
-        return Err(InvalidFile(format!("the key `{key}` is missing in `{at}`")));
-    }
-    Ok(())
-}
 
-fn check_string(entry: &toml::Table, key: &str, at: &str) -> Result<(), InvalidFile> {
-    match entry.get(key) {
-        Some(v) if v.is_str() => Ok(()),
-        _ => Err(wrong(&format!("{at}.{key}"), "a string")),
+    /// The tables of an array of tables, each with its span.
+    fn tables<'v, 'i>(
+        &self,
+        value: &'v Value<'i>,
+        what: &str,
+    ) -> Result<Vec<(Range<usize>, &'v DeTable<'i>)>, InvalidFile> {
+        let items = value
+            .get_ref()
+            .as_array()
+            .ok_or_else(|| self.at(value.span(), what))?;
+        items
+            .iter()
+            .map(|item| match item.get_ref().as_table() {
+                Some(table) => Ok((item.span(), table)),
+                None => Err(self.at(item.span(), what)),
+            })
+            .collect()
     }
 }
 
