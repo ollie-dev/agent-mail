@@ -123,6 +123,11 @@ pub enum ImapError {
     Protocol,
     /// The server refused to open the mailbox (`EXAMINE` answered `NO`).
     MailboxNotFound,
+    /// The mailbox's UIDVALIDITY differs from the reference's, so its UID
+    /// may now name another message. Nothing was fetched.
+    StaleReference,
+    /// No message has the UID (the server returned no FETCH for it).
+    MessageNotFound,
 }
 
 /// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
@@ -298,13 +303,7 @@ async fn search_in(
     criteria: &str,
     limit: usize,
 ) -> Result<Found, ImapError> {
-    let opened = session
-        .examine(crate::utf7::encode(mailbox))
-        .await
-        .map_err(|e| match e {
-            async_imap::error::Error::No(_) => ImapError::MailboxNotFound,
-            _ => ImapError::Protocol,
-        })?;
+    let opened = examine(session, mailbox).await?;
     let uidvalidity = opened.uid_validity.ok_or(ImapError::Protocol)?;
     let mut uids: Vec<u32> = session
         .uid_search(criteria)
@@ -343,6 +342,85 @@ async fn search_in(
         total,
         messages,
     })
+}
+
+/// Logs in, opens `mailbox` (decoded UTF-8, sent as modified UTF-7)
+/// read-only with `EXAMINE`, checks its UIDVALIDITY against `uidvalidity`,
+/// fetches the whole raw message `uid` with `BODY.PEEK[]` and logs out.
+/// Never changes mailbox state: no `SELECT`, no `STORE`, no non-peek fetch.
+pub fn read(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(
+            TIMEOUT,
+            read_async(account, network, mailbox, uidvalidity, uid),
+        )
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+async fn read_async(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let mut session = login(account, network).await?;
+    let result = read_in(&mut session, mailbox, uidvalidity, uid).await;
+    let _ = session.logout().await;
+    result
+}
+
+async fn read_in(
+    session: &mut TlsSession,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let opened = examine(session, mailbox).await?;
+    // Before any fetch: a renumbered mailbox must never yield another
+    // message's content.
+    if opened.uid_validity.ok_or(ImapError::Protocol)? != uidvalidity {
+        return Err(ImapError::StaleReference);
+    }
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    // Any unsolicited fetch for another UID is ignored.
+    let fetch = fetches
+        .iter()
+        .find(|f| f.uid == Some(uid))
+        .ok_or(ImapError::MessageNotFound)?;
+    fetch.body().map(<[u8]>::to_vec).ok_or(ImapError::Protocol)
+}
+
+/// Opens `mailbox` read-only.
+async fn examine(
+    session: &mut TlsSession,
+    mailbox: &str,
+) -> Result<async_imap::types::Mailbox, ImapError> {
+    session
+        .examine(crate::utf7::encode(mailbox))
+        .await
+        .map_err(|e| match e {
+            async_imap::error::Error::No(_) => ImapError::MailboxNotFound,
+            _ => ImapError::Protocol,
+        })
 }
 
 fn found_message(uid: u32, fetch: &Fetch) -> Result<FoundMessage, ImapError> {

@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::audit::{self, AuditLog, Decision};
 use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Account, Grant, Mandate, Operation};
+use crate::read::{self, ReadResult};
 use crate::seal::{self, AgentToken, ListedAccount};
 use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult};
 use crate::store::MandateStore;
@@ -92,6 +93,14 @@ pub enum Command {
     List,
     /// Search one granted mailbox.
     Search(Query),
+    /// Read one message by its reference, without marking it seen.
+    Read {
+        /// The message, as `search` returned it. Untrusted input; checked
+        /// again here with [`read::is_valid_reference`].
+        reference: MessageRef,
+        /// Return the whole body, untruncated.
+        full: bool,
+    },
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -168,6 +177,8 @@ pub enum Outcome {
     Mailboxes(MailboxList),
     /// Result of `search`.
     Messages(SearchResult),
+    /// Result of `read`.
+    Message(ReadResult),
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
@@ -193,6 +204,24 @@ pub enum CoreError {
         /// The mailbox, for operations on one mailbox.
         mailbox: Option<String>,
     },
+    /// The reference's UIDVALIDITY no longer matches the mailbox, so its
+    /// UID may name another message. Nothing was read.
+    StaleReference {
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox, decoded UTF-8.
+        mailbox: String,
+    },
+    /// The mailbox has no message with the reference's UID.
+    MessageNotFound {
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox, decoded UTF-8.
+        mailbox: String,
+    },
+    /// A message reference is malformed or holds CR, LF or NUL. The CLI
+    /// refuses such references while parsing; other adapters may reach this.
+    InvalidReference,
     /// The server refused to open the mailbox.
     MailboxNotFound {
         /// Login name of the Account.
@@ -301,6 +330,9 @@ impl CoreError {
             Self::InvalidToken => "invalid_token",
             Self::Denied { .. } => "denied",
             Self::MailboxNotFound { .. } => "mailbox_not_found",
+            Self::StaleReference { .. } => "stale_reference",
+            Self::MessageNotFound { .. } => "message_not_found",
+            Self::InvalidReference => "invalid_reference",
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
@@ -354,6 +386,30 @@ impl CoreError {
                 message: format!(
                     "mailbox {mailbox} does not exist on account {account}; run `agent-mail list` to see the mailbox names"
                 ),
+            };
+        }
+        if let Self::StaleReference { account, mailbox }
+        | Self::MessageNotFound { account, mailbox } = self
+        {
+            let message = if matches!(self, Self::StaleReference { .. }) {
+                format!(
+                    "mailbox {mailbox} of account {account} was renumbered since this reference was made (its UIDVALIDITY changed), so the message was not read; run `agent-mail search` on mailbox {mailbox} again for a fresh reference"
+                )
+            } else {
+                format!(
+                    "mailbox {mailbox} of account {account} has no message with this reference's UID, perhaps because it was moved or deleted; run `agent-mail search` on mailbox {mailbox} again for a current reference"
+                )
+            };
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(Operation::Read.as_str()),
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message,
             };
         }
         if let Self::AccountRequired { accounts } = self {
@@ -487,8 +543,16 @@ impl CoreError {
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
             ),
+            Self::InvalidReference => (
+                Some(Operation::Read.as_str()),
+                None,
+                "the message reference is malformed; run `agent-mail search` and pass a `ref` exactly as it prints it"
+                    .to_string(),
+            ),
             Self::AccountRequired { .. }
             | Self::MailboxNotFound { .. }
+            | Self::StaleReference { .. }
+            | Self::MessageNotFound { .. }
             | Self::NotFound { .. }
             | Self::RevocationIncomplete { .. }
             | Self::InvalidMandateFile { .. } => {
@@ -604,6 +668,38 @@ pub fn execute(
                 .append(&entry)
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Messages)
+        }
+        Command::Read { reference, full } => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                read(&mandate, reference, *full, context, &mut trail)
+            });
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::Read.as_str(),
+                account: trail.account,
+                mailbox: Some(reference.mailbox.clone()),
+                // The reference only: never a subject, address, body or
+                // attachment name.
+                messages: Some(vec![reference.format()]),
+                results: None,
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Message)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -817,7 +913,88 @@ fn connector_error(error: ImapError, account: &str, mailbox: Option<&str>) -> Co
             },
             None => CoreError::Protocol { account },
         },
+        ImapError::StaleReference => match mailbox {
+            Some(mailbox) => CoreError::StaleReference {
+                account,
+                mailbox: mailbox.to_string(),
+            },
+            None => CoreError::Protocol { account },
+        },
+        ImapError::MessageNotFound => match mailbox {
+            Some(mailbox) => CoreError::MessageNotFound {
+                account,
+                mailbox: mailbox.to_string(),
+            },
+            None => CoreError::Protocol { account },
+        },
     }
+}
+
+fn read(
+    mandate: &Mandate,
+    reference: &MessageRef,
+    full: bool,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<ReadResult, CoreError> {
+    // Checked again here, not only by the CLI parser: no CR, LF or NUL may
+    // reach the server, and the UID must be a real one.
+    if !read::is_valid_reference(reference) {
+        return Err(CoreError::InvalidReference);
+    }
+    let login = reference.account.as_str();
+    let mailbox = reference.mailbox.as_str();
+    trail.account = Some(login.to_string());
+    // Deny by default, before any connection is made. The Account is the
+    // Mandate's Account with exactly this login, so a reference naming an
+    // uncovered Account never uses another Account's Credential.
+    let denied = || CoreError::Denied {
+        operation: Operation::Read,
+        account: login.to_string(),
+        mailbox: Some(mailbox.to_string()),
+    };
+    let account = mandate
+        .accounts
+        .iter()
+        .find(|a| a.login == login)
+        .ok_or_else(denied)?;
+    if !mandate
+        .policy
+        .allows_mailbox(Operation::Read, login, mailbox)
+    {
+        return Err(denied());
+    }
+    trail.allowed = true;
+    let raw = imap::read(
+        account,
+        &context.network,
+        mailbox,
+        reference.uidvalidity,
+        reference.uid,
+    )
+    .map_err(|e| connector_error(e, login, Some(mailbox)))?;
+    let parsed = read::parse_message(&raw).ok_or_else(|| CoreError::Protocol {
+        account: login.to_string(),
+    })?;
+    let (body, truncated) = read::truncate(parsed.body, full);
+    Ok(ReadResult {
+        reference: reference.format(),
+        account: login.to_string(),
+        mailbox: mailbox.to_string(),
+        date: parsed
+            .date
+            .and_then(|secs| u64::try_from(secs).ok())
+            .map(rfc3339_utc)
+            .unwrap_or_default(),
+        from: parsed.from,
+        to: parsed.to,
+        cc: parsed.cc,
+        subject: parsed.subject,
+        message_id: parsed.message_id,
+        body,
+        truncated,
+        attachments: parsed.attachments,
+    })
 }
 
 fn search(
@@ -919,6 +1096,20 @@ mod tests {
                 account: account.clone(),
                 mailbox: "Missing".to_string(),
             },
+            CoreError::Denied {
+                operation: Operation::Read,
+                account: account.clone(),
+                mailbox: Some("Read".to_string()),
+            },
+            CoreError::StaleReference {
+                account: account.clone(),
+                mailbox: "Read".to_string(),
+            },
+            CoreError::MessageNotFound {
+                account: account.clone(),
+                mailbox: "Read".to_string(),
+            },
+            CoreError::InvalidReference,
             CoreError::TlsRequired {
                 account: account.clone(),
             },
