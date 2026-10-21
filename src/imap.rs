@@ -5,9 +5,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_imap::Client;
 use async_imap::imap_proto::{Capability, Response, Status};
 use async_imap::types::UnsolicitedResponse;
+use async_imap::types::{Fetch, Flag};
+use async_imap::{Client, Session};
 use futures_util::TryStreamExt;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -120,6 +121,8 @@ pub enum ImapError {
     Login,
     /// The server sent something unexpected.
     Protocol,
+    /// The server refused to open the mailbox (`EXAMINE` answered `NO`).
+    MailboxNotFound,
 }
 
 /// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
@@ -160,7 +163,11 @@ fn tls_connector(trust: &TlsTrust) -> Result<TlsConnector, ImapError> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-async fn list_async(account: &Account, network: &Network) -> Result<Vec<String>, ImapError> {
+type TlsSession = Session<tokio_rustls::client::TlsStream<TcpStream>>;
+
+/// Connects with TLS (implicit, or a mandatory STARTTLS upgrade) and logs
+/// in. The Credential is sent only over the established TLS session.
+async fn login(account: &Account, network: &Network) -> Result<TlsSession, ImapError> {
     let connector = tls_connector(&network.trust)?;
     let server_name =
         ServerName::try_from(account.host.clone()).map_err(|_| ImapError::Connection)?;
@@ -198,10 +205,14 @@ async fn list_async(account: &Account, network: &Network) -> Result<Vec<String>,
     };
 
     let client = Client::new(tls);
-    let mut session = client
+    client
         .login(&account.login, account.credential.expose())
         .await
-        .map_err(|_| ImapError::Login)?;
+        .map_err(|_| ImapError::Login)
+}
+
+async fn list_async(account: &Account, network: &Network) -> Result<Vec<String>, ImapError> {
+    let mut session = login(account, network).await?;
     let names: Vec<String> = session
         .list(Some(""), Some("*"))
         .await
@@ -212,6 +223,166 @@ async fn list_async(account: &Account, network: &Network) -> Result<Vec<String>,
         .map_err(|_| ImapError::Protocol)?;
     let _ = session.logout().await;
     Ok(names)
+}
+
+/// What a search found: the mailbox's UIDVALIDITY, how many messages
+/// matched, and the header data of the newest `limit` of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The mailbox's UIDVALIDITY.
+    pub uidvalidity: u32,
+    /// How many messages matched.
+    pub total: usize,
+    /// The fetched messages, UID descending.
+    pub messages: Vec<FoundMessage>,
+}
+
+/// Header data of one message, as the server sent it. Untrusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundMessage {
+    /// The UID.
+    pub uid: u32,
+    /// Internal date, Unix seconds.
+    pub internal_date: i64,
+    /// Display name of the first From address, raw (may be RFC 2047).
+    pub from_name: Option<String>,
+    /// `mailbox@host` of the first From address, `""` when absent.
+    pub from_address: String,
+    /// The Subject, raw (may be RFC 2047).
+    pub subject: Option<String>,
+    /// Flags, in server order.
+    pub flags: Vec<String>,
+}
+
+/// Logs in, opens `mailbox` (decoded UTF-8, sent as modified UTF-7) read-only
+/// with `EXAMINE`, runs `UID SEARCH criteria`, fetches flags, internal date
+/// and envelope of the `limit` highest matching UIDs only, and logs out.
+/// Never changes mailbox state: no `SELECT`, no `STORE`, no body fetch.
+pub fn search(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    criteria: &str,
+    limit: usize,
+) -> Result<Found, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(
+            TIMEOUT,
+            search_async(account, network, mailbox, criteria, limit),
+        )
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+async fn search_async(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    criteria: &str,
+    limit: usize,
+) -> Result<Found, ImapError> {
+    let mut session = login(account, network).await?;
+    let result = search_in(&mut session, mailbox, criteria, limit).await;
+    let _ = session.logout().await;
+    result
+}
+
+async fn search_in(
+    session: &mut TlsSession,
+    mailbox: &str,
+    criteria: &str,
+    limit: usize,
+) -> Result<Found, ImapError> {
+    let opened = session
+        .examine(crate::utf7::encode(mailbox))
+        .await
+        .map_err(|e| match e {
+            async_imap::error::Error::No(_) => ImapError::MailboxNotFound,
+            _ => ImapError::Protocol,
+        })?;
+    let uidvalidity = opened.uid_validity.ok_or(ImapError::Protocol)?;
+    let mut uids: Vec<u32> = session
+        .uid_search(criteria)
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .into_iter()
+        .collect();
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    let total = uids.len();
+    uids.truncate(limit);
+    if uids.is_empty() {
+        return Ok(Found {
+            uidvalidity,
+            total,
+            messages: Vec::new(),
+        });
+    }
+    let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(set.join(","), "(UID FLAGS INTERNALDATE ENVELOPE)")
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    let mut messages = Vec::with_capacity(uids.len());
+    for uid in uids {
+        // A message expunged meanwhile has no fetch; it is left out. Any
+        // unsolicited fetch for another UID is ignored.
+        if let Some(fetch) = fetches.iter().find(|f| f.uid == Some(uid)) {
+            messages.push(found_message(uid, fetch)?);
+        }
+    }
+    Ok(Found {
+        uidvalidity,
+        total,
+        messages,
+    })
+}
+
+fn found_message(uid: u32, fetch: &Fetch) -> Result<FoundMessage, ImapError> {
+    let internal_date = fetch
+        .internal_date()
+        .ok_or(ImapError::Protocol)?
+        .timestamp();
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let envelope = fetch.envelope();
+    let from = envelope
+        .and_then(|e| e.from.as_ref())
+        .and_then(|list| list.iter().find(|a| a.mailbox.is_some()));
+    let from_address = from.map_or_else(String::new, |a| {
+        let mailbox = a.mailbox.as_deref().map(text).unwrap_or_default();
+        match a.host.as_deref() {
+            Some(host) => format!("{mailbox}@{}", text(host)),
+            None => mailbox,
+        }
+    });
+    Ok(FoundMessage {
+        uid,
+        internal_date,
+        from_name: from.and_then(|a| a.name.as_deref()).map(text),
+        from_address,
+        subject: envelope.and_then(|e| e.subject.as_deref()).map(text),
+        flags: fetch.flags().map(|f| flag_name(&f)).collect(),
+    })
+}
+
+fn flag_name(flag: &Flag<'_>) -> String {
+    match flag {
+        Flag::Seen => "\\Seen".to_string(),
+        Flag::Answered => "\\Answered".to_string(),
+        Flag::Flagged => "\\Flagged".to_string(),
+        Flag::Deleted => "\\Deleted".to_string(),
+        Flag::Draft => "\\Draft".to_string(),
+        Flag::Recent => "\\Recent".to_string(),
+        Flag::MayCreate => "\\*".to_string(),
+        Flag::Custom(name) => name.to_string(),
+    }
 }
 
 fn handshake_error(error: std::io::Error) -> ImapError {
