@@ -441,6 +441,7 @@ fn ac7_readme_documents_location_and_fields() {
         "account",
         "mailbox",
         "messages",
+        "results",
         "outcome",
         "reason",
     ] {

@@ -47,6 +47,9 @@ pub struct Entry {
     /// Message references involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<String>>,
+    /// Number of results returned, if the operation returns results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<usize>,
     /// The Policy's decision.
     pub outcome: Decision,
     /// The stable error code if the call failed.
@@ -346,6 +349,7 @@ mod tests {
             account: None,
             mailbox: None,
             messages: None,
+            results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),
         }
@@ -450,6 +454,7 @@ mod tests {
             account: Some("a\r\nb@example.test".to_string()),
             mailbox: Some("Evil\n{\"outcome\":\"allowed\"}".to_string()),
             messages: Some(vec!["1\n2".to_string()]),
+            results: Some(2),
             outcome: Decision::Denied,
             reason: Some("denied"),
         };
@@ -458,7 +463,7 @@ mod tests {
         assert!(line.ends_with('\n'));
         assert_eq!(
             line,
-            "{\"time\":\"2026-10-21T09:30:15Z\",\"mandate\":\"aaaa1111\",\"operation\":\"move\",\"account\":\"a\\r\\nb@example.test\",\"mailbox\":\"Evil\\n{\\\"outcome\\\":\\\"allowed\\\"}\",\"messages\":[\"1\\n2\"],\"outcome\":\"denied\",\"reason\":\"denied\"}\n"
+            "{\"time\":\"2026-10-21T09:30:15Z\",\"mandate\":\"aaaa1111\",\"operation\":\"move\",\"account\":\"a\\r\\nb@example.test\",\"mailbox\":\"Evil\\n{\\\"outcome\\\":\\\"allowed\\\"}\",\"messages\":[\"1\\n2\"],\"results\":2,\"outcome\":\"denied\",\"reason\":\"denied\"}\n"
         );
     }
 
@@ -475,6 +480,7 @@ mod tests {
             account: None,
             mailbox: None,
             messages: None,
+            results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),
         };
