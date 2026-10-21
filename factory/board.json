@@ -137,6 +137,31 @@
       "reason": "",
       "updated": "2026-10-21T18:35:20Z",
       "builder": "a89c040f844981c7c"
+    },
+    {
+      "id": "006-mandate-export-from",
+      "title": "Mandate export and from-file",
+      "feature": "Ticket 05: Export a Mandate's choices and re-create from file (.scratch/agent-mail-v1/issues/05-mandate-export-from.md)",
+      "branch": "factory/006-mandate-export-from",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-21T19:37:15Z",
+      "builder": "a3cf0c1e1a59536e2"
     }
   ]
 }
