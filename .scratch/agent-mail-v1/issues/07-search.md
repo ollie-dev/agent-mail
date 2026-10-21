@@ -4,7 +4,7 @@
 
 **Blocked by:** 02, 06
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Searching INBOX by `--from alice@example.com` returns only matching messages from the fake server, newest first, with date, from, subject, flags and message reference
 - [ ] Each criterion (from, to, subject, text, since, before, unseen, flagged) narrows results as expected, and criteria combine with AND
