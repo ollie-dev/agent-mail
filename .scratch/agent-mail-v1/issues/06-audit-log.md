@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A successful `list` call appends one entry with time, Mandate short ID, operation, Account and outcome `allowed`
 - [ ] A denied call appends an entry with outcome `denied` and the reason

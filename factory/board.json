@@ -162,6 +162,31 @@
       "reason": "",
       "updated": "2026-10-21T19:37:15Z",
       "builder": "a3cf0c1e1a59536e2"
+    },
+    {
+      "id": "007-audit-log",
+      "title": "Audit log",
+      "feature": "Ticket 06: Audit log (.scratch/agent-mail-v1/issues/06-audit-log.md)",
+      "branch": "factory/007-audit-log",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-21T20:21:21Z",
+      "builder": "affa852a3ad1ca369"
     }
   ]
 }
