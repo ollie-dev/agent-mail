@@ -9,7 +9,7 @@
 - [x] Ticket 04: `mandate list` and `mandate delete` (.scratch/agent-mail-v1/issues/04-mandate-list-delete.md) → 005-mandate-list-delete
 - [x] Ticket 05: Export a Mandate's choices and re-create from file (.scratch/agent-mail-v1/issues/05-mandate-export-from.md) → 006-mandate-export-from
 - [x] Ticket 06: Audit log (.scratch/agent-mail-v1/issues/06-audit-log.md) → 007-audit-log
-- [ ] Ticket 07: Search messages (.scratch/agent-mail-v1/issues/07-search.md)
+- [x] Ticket 07: Search messages (.scratch/agent-mail-v1/issues/07-search.md) → 008-search-messages
 - [ ] Ticket 08: Read a message (.scratch/agent-mail-v1/issues/08-read.md)
 - [ ] Ticket 09: Set and clear read and starred flags (.scratch/agent-mail-v1/issues/09-flag.md)
 - [ ] Ticket 10: Move a message between granted mailboxes (.scratch/agent-mail-v1/issues/10-move.md)

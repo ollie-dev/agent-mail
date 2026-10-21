@@ -187,6 +187,24 @@
       "reason": "",
       "updated": "2026-10-21T20:21:21Z",
       "builder": "affa852a3ad1ca369"
+    },
+    {
+      "id": "008-search-messages",
+      "title": "Search messages",
+      "feature": "Ticket 07: Search messages (.scratch/agent-mail-v1/issues/07-search.md)",
+      "branch": "factory/008-search-messages",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "reason": "",
+      "updated": "2026-10-21T20:54:50Z",
+      "builder": "a5fe9e88b47865275"
     }
   ]
 }
