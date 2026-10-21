@@ -451,3 +451,133 @@ fn text_listing_escapes_bidi_and_zero_width_characters() {
     );
     assert!(!out.stdout.contains('\u{202e}') && !out.stdout.contains('\u{200b}'));
 }
+
+/// Wraps an [`InMemoryStore`] and hides the value of the record filed under
+/// `hidden` from enumeration, as the Keychain does for an item whose access
+/// list no longer trusts the binary. Lookups by key are unaffected.
+struct HidingStore {
+    inner: InMemoryStore,
+    hidden: Vec<u8>,
+}
+
+impl MandateStore for HidingStore {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, agent_mail::store::StoreError> {
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), agent_mail::store::StoreError> {
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<bool, agent_mail::store::StoreError> {
+        self.inner.delete(key)
+    }
+
+    fn entries(&self) -> Result<Vec<agent_mail::store::Entry>, agent_mail::store::StoreError> {
+        Ok(self
+            .inner
+            .entries()
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if k == self.hidden { Vec::new() } else { v };
+                (k, v)
+            })
+            .collect())
+    }
+}
+
+fn run_on(args: &[&str], token: Option<&str>, store: &dyn MandateStore) -> RunOutput {
+    let mut env = std::collections::HashMap::new();
+    if let Some(token) = token {
+        env.insert(agent_mail::TOKEN_VAR.to_string(), token.to_string());
+    }
+    let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+    agent_mail::run(argv, &env, &agent_mail::Context::new(store))
+}
+
+/// A readable decoy carrying A's ID, with `name`, under `key`.
+fn decoy(store: &InMemoryStore, port: u16, key: &[u8], name: &str) {
+    let mut forged = mandate_a(port);
+    forged.name = name.to_string();
+    let record = seal::seal(&AgentToken::mint(), &forged);
+    let listing = seal::parts(&record.value).unwrap().listing.to_vec();
+    store
+        .put(key, &seal::assemble(&listing, &[0u8; 64]))
+        .unwrap();
+}
+
+#[test]
+fn delete_does_not_claim_success_while_an_unreadable_record_may_survive() {
+    let server = FakeImap::start(Mode::Implicit);
+    let inner = InMemoryStore::new();
+    let a = store_mandate(&inner, &mandate_a(server.port));
+    let b = store_mandate(&inner, &mandate_b(server.port));
+    decoy(&inner, server.port, &[0u8], "work-inbox");
+    let store = HidingStore {
+        hidden: a.store_key(),
+        inner,
+    };
+
+    let message = "deleted the readable records with ID aaaa1111, but 1 stored record could not be read and may still hold this Mandate, so its agent token may still work; check Keychain Access for `agent-mail` items that `agent-mail mandate list` does not show and delete them";
+    let out = run_on(&["mandate", "delete", "aaaa1111"], None, &store);
+    assert_eq!(out.code, 1, "claimed success: {:?}", out.stdout);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr,
+        // Keys in the order every error object uses (sorted).
+        format!(
+            "{{\"error\":{{\"code\":\"revocation_incomplete\",\"deleted\":1,\"id\":\"aaaa1111\",\"message\":\"{message}\",\"unreadable\":1}}}}\n"
+        )
+    );
+    // The decoy went; the hidden real record is what the error warns about.
+    assert_eq!(store.inner.entries().len(), 2);
+    assert!(store.inner.get(&a.store_key()).unwrap().is_some());
+
+    // Asked again: nothing readable matches, still not a success.
+    let out = run_on(&["--text", "mandate", "delete", "aaaa1111"], None, &store);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr,
+        "error: revocation_incomplete: no readable Mandate has ID aaaa1111, but 1 stored record could not be read and may hold it, so its agent token may still work; check Keychain Access for `agent-mail` items that `agent-mail mandate list` does not show and delete them\n"
+    );
+
+    // Readable Mandates are still deleted, but success is not claimed.
+    let out = run_on(&["mandate", "delete", "bbbb2222"], None, &store);
+    assert_eq!(out.code, 1);
+    assert_eq!(error_of(&out)["code"], "revocation_incomplete");
+    assert_eq!(error_of(&out)["deleted"], 1);
+    let out = run_on(&["list"], Some(b.expose()), &store);
+    assert_eq!(error_of(&out)["code"], "invalid_token");
+}
+
+#[test]
+fn delete_names_the_mandate_only_if_every_matching_record_agrees() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let a = store_mandate(&store, &mandate_a(server.port));
+    decoy(&store, server.port, &[0u8], "forged-name");
+
+    let out = run(&["mandate", "delete", "aaaa1111"], None, &store, &server);
+    assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+    assert_eq!(out.stdout, "{\"deleted\":{\"id\":\"aaaa1111\"}}\n");
+    assert!(store.entries().is_empty());
+    let out = run(&["list"], Some(a.expose()), &store, &server);
+    assert_eq!(error_of(&out)["code"], "invalid_token");
+
+    let store = InMemoryStore::new();
+    store_mandate(&store, &mandate_a(server.port));
+    decoy(&store, server.port, &[0u8], "forged-name");
+    let out = run(
+        &["--text", "mandate", "delete", "aaaa1111"],
+        None,
+        &store,
+        &server,
+    );
+    assert_eq!(out.code, 0);
+    assert_eq!(
+        out.stdout,
+        "Deleted Mandate (ID aaaa1111). The stored records with this ID had different names, so none is shown.\n"
+    );
+    assert!(!out.stdout.contains("forged-name") && !out.stdout.contains("work-inbox"));
+}
