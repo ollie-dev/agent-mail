@@ -5,9 +5,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::audit::{self, AuditLog, Decision};
 use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Grant, Mandate, Operation};
 use crate::seal::{self, AgentToken, ListedAccount};
@@ -18,22 +20,24 @@ use crate::utf7;
 /// Environment variable holding the presented Agent Token.
 pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
 
-/// What the core runs against: the Mandate store, the network and the
-/// Terminal (used only by `mandate create`).
+/// What the core runs against: the Mandate store, the network, the
+/// Terminal (used only by `mandate create`) and the audit log.
 pub struct Context<'a> {
     pub(crate) store: &'a dyn MandateStore,
     pub(crate) network: Network,
     pub(crate) terminal: &'a dyn Terminal,
+    pub(crate) audit: AuditLog,
 }
 
 impl<'a> Context<'a> {
-    /// A context using `store`, the operating system's certificate verifier
-    /// and no terminal.
+    /// A context using `store`, the operating system's certificate verifier,
+    /// no terminal and the audit log at the platform's per-user location.
     pub fn new(store: &'a dyn MandateStore) -> Self {
         Self {
             store,
             network: Network::platform(),
             terminal: &NoTerminal,
+            audit: AuditLog::platform(),
         }
     }
 
@@ -42,7 +46,9 @@ impl<'a> Context<'a> {
         Self { terminal, ..self }
     }
 
-    /// A test context trusting only `roots`, such as the fake server's CA.
+    /// A test context trusting only `roots`, such as the fake server's CA,
+    /// and writing its audit log to a fresh temporary file, never to the
+    /// user's data directory.
     #[cfg(any(test, feature = "test-support"))]
     pub fn trusting_only(
         store: &'a dyn MandateStore,
@@ -50,8 +56,21 @@ impl<'a> Context<'a> {
     ) -> Self {
         Self {
             network: Network::trusting_only(roots),
-            ..Self::new(store)
+            ..Self::new(store).with_audit_log(AuditLog::temporary())
         }
+    }
+
+    /// The same context, appending audit entries to `audit`. Test builds
+    /// only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_audit_log(self, audit: AuditLog) -> Self {
+        Self { audit, ..self }
+    }
+
+    /// The audit log this context appends to. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn audit_log(&self) -> &AuditLog {
+        &self.audit
     }
 
     /// The same context, connecting to `to_host:to_port` whenever an Account
@@ -226,6 +245,8 @@ pub enum CoreError {
         /// Stored records that could not be read.
         unreadable: usize,
     },
+    /// The audit entry could not be appended, so the result was withheld.
+    AuditUnavailable,
 }
 
 /// The JSON body of an error, in field order `code`, details, `message`.
@@ -275,6 +296,7 @@ impl CoreError {
             Self::NotFound { .. } => "not_found",
             Self::RevocationIncomplete { .. } => "revocation_incomplete",
             Self::InvalidMandateFile { .. } => "invalid_mandate_file",
+            Self::AuditUnavailable => "audit_unavailable",
         }
     }
 
@@ -429,6 +451,12 @@ impl CoreError {
                 "mandate create was aborted and nothing was stored; run `agent-mail mandate create` again to start over"
                     .to_string(),
             ),
+            Self::AuditUnavailable => (
+                None,
+                None,
+                "the call could not be recorded in the audit log, so no result is returned; ask the human to check that the agent-mail data directory is writable"
+                    .to_string(),
+            ),
         };
         ErrorBody {
             code: self.code(),
@@ -453,9 +481,33 @@ pub fn execute(
 ) -> Result<Outcome, CoreError> {
     match command {
         Command::List => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let mandate = open_mandate(token, context)?;
-            list(&mandate, context).map(Outcome::Mailboxes)
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                list(&mandate, context, &mut trail)
+            });
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::List.as_str(),
+                account: trail.account,
+                mailbox: None,
+                messages: None,
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Mailboxes)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -573,6 +625,24 @@ pub fn rfc3339_utc(secs: u64) -> String {
     )
 }
 
+/// What an Agent call got as far as, for its audit entry. Holds no
+/// Credential or token.
+#[derive(Default)]
+struct Trail {
+    /// Short ID of the opened Mandate.
+    mandate: Option<String>,
+    /// Login of the chosen Account.
+    account: Option<String>,
+    /// Whether the Policy granted the operation.
+    allowed: bool,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 fn open_mandate(token: Option<&str>, context: &Context<'_>) -> Result<Mandate, CoreError> {
     let token = match token {
         None | Some("") => return Err(CoreError::MissingToken),
@@ -586,7 +656,11 @@ fn open_mandate(token: Option<&str>, context: &Context<'_>) -> Result<Mandate, C
     seal::open(&token, &record).map_err(|_| CoreError::InvalidToken)
 }
 
-fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreError> {
+fn list(
+    mandate: &Mandate,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<MailboxList, CoreError> {
     // One Account per command until `--account` arrives (ticket 13); never
     // merge Accounts silently.
     let account = match mandate.accounts.as_slice() {
@@ -598,6 +672,7 @@ fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreErr
         }
     };
     let login = account.login.clone();
+    trail.account = Some(login.clone());
     // Deny by default, before any connection is made.
     if mandate
         .policy
@@ -610,6 +685,7 @@ fn list(mandate: &Mandate, context: &Context<'_>) -> Result<MailboxList, CoreErr
             account: login,
         });
     }
+    trail.allowed = true;
     let raw = imap::list_mailboxes(account, &context.network).map_err(|e| {
         let account = login.clone();
         match e {
@@ -693,6 +769,7 @@ mod tests {
                 deleted: 0,
                 unreadable: 1,
             },
+            CoreError::AuditUnavailable,
         ];
         for error in errors {
             let message = error.body().message;
