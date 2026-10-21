@@ -33,6 +33,8 @@ pub const SANDBOX_INDICATORS: &[&str] = &[
     // OpenAI Codex CLI sandbox.
     "CODEX_SANDBOX",
     "CODEX_SANDBOX_NETWORK_DISABLED",
+    // opencode sessions.
+    "OPENCODE",
     // Gemini CLI sessions and its sandbox.
     "GEMINI_CLI",
     "GEMINI_SANDBOX",

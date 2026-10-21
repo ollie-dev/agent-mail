@@ -244,6 +244,7 @@ fn ac7_tampered_or_wrongly_keyed_record_fails_through_list() {
     let (key, mut value) = tampered.entries().remove(0);
     let last = value.len() - 1;
     value[last] ^= 0x01;
+    agent_mail::store::MandateStore::delete(&tampered, &key).unwrap();
     agent_mail::store::MandateStore::put(&tampered, &key, &value).unwrap();
     let (out, _) = list_both_modes(Some(token.expose()), &tampered, &server);
     assert_token_error(&out, "invalid_token");

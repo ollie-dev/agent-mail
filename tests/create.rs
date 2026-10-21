@@ -435,6 +435,7 @@ fn ac8_each_sandbox_indicator_is_refused() {
         "CODEX_SANDBOX",
         "CODEX_SANDBOX_NETWORK_DISABLED",
         "SANDBOX_RUNTIME",
+        "OPENCODE",
     ] {
         assert!(SANDBOX_INDICATORS.contains(&required), "{required} missing");
     }

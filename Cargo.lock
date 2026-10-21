@@ -17,6 +17,7 @@ dependencies = [
  "async-imap",
  "base64 0.22.1",
  "clap",
+ "core-foundation",
  "futures-util",
  "inquire",
  "log",
