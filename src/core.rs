@@ -4,6 +4,7 @@
 //! enforces the Policy (deny by default) and performs the mail operation.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::Serialize;
 
@@ -70,7 +71,11 @@ pub enum Command {
     /// List the mailboxes the Policy grants.
     List,
     /// Guided creation of a Mandate by the human (`mandate create`).
-    MandateCreate,
+    MandateCreate {
+        /// A Mandate file whose choices pre-fill the flow (`--from`).
+        /// Untrusted input; it never supplies a Credential.
+        from: Option<PathBuf>,
+    },
     /// List every stored Mandate's metadata. Reads no token.
     MandateList,
     /// Delete the Mandate with short ID `id`. Reads no token and asks for no
@@ -200,6 +205,12 @@ pub enum CoreError {
     SandboxDetected,
     /// The human aborted `mandate create`; nothing was stored.
     Aborted,
+    /// The `--from` Mandate file cannot be read or is malformed. Nothing was
+    /// asked and nothing was stored.
+    InvalidMandateFile {
+        /// What is wrong, by key path or line. Never quotes a file value.
+        problem: String,
+    },
     /// No stored Mandate has this short ID.
     NotFound {
         /// The ID asked for.
@@ -263,6 +274,7 @@ impl CoreError {
             Self::Aborted => "aborted",
             Self::NotFound { .. } => "not_found",
             Self::RevocationIncomplete { .. } => "revocation_incomplete",
+            Self::InvalidMandateFile { .. } => "invalid_mandate_file",
         }
     }
 
@@ -327,6 +339,20 @@ impl CoreError {
                 ),
             };
         }
+        if let Self::InvalidMandateFile { problem } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: None,
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "the Mandate file cannot be used ({problem}), so nothing was asked or stored; check the file, or run `agent-mail mandate create` without --from"
+                ),
+            };
+        }
         let (operation, account, message) = match self {
             Self::MissingToken => (
                 None,
@@ -381,7 +407,8 @@ impl CoreError {
             ),
             Self::AccountRequired { .. }
             | Self::NotFound { .. }
-            | Self::RevocationIncomplete { .. } => {
+            | Self::RevocationIncomplete { .. }
+            | Self::InvalidMandateFile { .. } => {
                 unreachable!("handled above")
             }
             Self::InteractiveTerminalRequired => (
@@ -430,8 +457,8 @@ pub fn execute(
             let mandate = open_mandate(token, context)?;
             list(&mandate, context).map(Outcome::Mailboxes)
         }
-        Command::MandateCreate => {
-            crate::create::run(env, context).map(|()| Outcome::MandateCreated)
+        Command::MandateCreate { from } => {
+            crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
         }
         Command::MandateList => mandate_list(context).map(Outcome::Mandates),
         Command::MandateDelete { id } => mandate_delete(id, context).map(Outcome::Deleted),
@@ -652,6 +679,9 @@ mod tests {
             CoreError::Aborted,
             CoreError::NotFound {
                 id: "ffffffff".to_string(),
+            },
+            CoreError::InvalidMandateFile {
+                problem: "line 8: unknown key in an [[accounts]] entry".to_string(),
             },
             CoreError::RevocationIncomplete {
                 id: "aaaa1111".to_string(),

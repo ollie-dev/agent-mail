@@ -18,11 +18,17 @@ pub trait Terminal {
     fn text(&self, prompt: &str, default: Option<&str>) -> Result<String, Cancelled>;
     /// Asks for a Credential with hidden input: nothing is echoed or masked.
     fn hidden(&self, prompt: &str) -> Result<Credential, Cancelled>;
-    /// Asks the human to pick one of `options`; returns its index.
-    fn choose(&self, prompt: &str, options: &[String]) -> Result<usize, Cancelled>;
-    /// Asks the human to tick any of `options`; returns the ticked indexes in
-    /// option order.
-    fn checklist(&self, prompt: &str, options: &[String]) -> Result<Vec<usize>, Cancelled>;
+    /// Asks the human to pick one of `options`, with the cursor starting on
+    /// `default`; returns the picked index.
+    fn choose(&self, prompt: &str, options: &[String], default: usize) -> Result<usize, Cancelled>;
+    /// Asks the human to tick any of `options`, with the indexes in `ticked`
+    /// ticked to begin with; returns the ticked indexes in option order.
+    fn checklist(
+        &self,
+        prompt: &str,
+        options: &[String],
+        ticked: &[usize],
+    ) -> Result<Vec<usize>, Cancelled>;
     /// Asks a yes/no question.
     fn confirm(&self, prompt: &str, default: bool) -> Result<bool, Cancelled>;
     /// Shows a message.
@@ -94,11 +100,21 @@ impl Terminal for NoTerminal {
         Err(Cancelled)
     }
 
-    fn choose(&self, _prompt: &str, _options: &[String]) -> Result<usize, Cancelled> {
+    fn choose(
+        &self,
+        _prompt: &str,
+        _options: &[String],
+        _default: usize,
+    ) -> Result<usize, Cancelled> {
         Err(Cancelled)
     }
 
-    fn checklist(&self, _prompt: &str, _options: &[String]) -> Result<Vec<usize>, Cancelled> {
+    fn checklist(
+        &self,
+        _prompt: &str,
+        _options: &[String],
+        _ticked: &[usize],
+    ) -> Result<Vec<usize>, Cancelled> {
         Err(Cancelled)
     }
 
@@ -161,16 +177,28 @@ impl Terminal for InquireTerminal {
             .map_err(|_| Cancelled)
     }
 
-    fn choose(&self, prompt: &str, options: &[String]) -> Result<usize, Cancelled> {
+    fn choose(&self, prompt: &str, options: &[String], default: usize) -> Result<usize, Cancelled> {
         inquire::Select::new(prompt, options.to_vec())
+            .with_starting_cursor(default.min(options.len().saturating_sub(1)))
             .without_filtering()
             .raw_prompt()
             .map(|choice| choice.index)
             .map_err(|_| Cancelled)
     }
 
-    fn checklist(&self, prompt: &str, options: &[String]) -> Result<Vec<usize>, Cancelled> {
+    fn checklist(
+        &self,
+        prompt: &str,
+        options: &[String],
+        ticked: &[usize],
+    ) -> Result<Vec<usize>, Cancelled> {
+        let initial: Vec<usize> = ticked
+            .iter()
+            .copied()
+            .filter(|i| *i < options.len())
+            .collect();
         let mut ticked: Vec<usize> = inquire::MultiSelect::new(prompt, options.to_vec())
+            .with_default(&initial)
             .with_help_message("space to tick, enter to accept")
             .raw_prompt()
             .map_err(|_| Cancelled)?
@@ -231,6 +259,10 @@ mod scripted {
         Tick(Vec<String>),
         /// Answers a yes/no question.
         Confirm(bool),
+        /// Accepts what the prompt offers unchanged: the text default (or
+        /// an empty string without one), the default choice, the pre-ticked
+        /// options, or the default yes/no.
+        Accept,
         /// Cancels the prompt, as Esc or Ctrl-C would.
         Cancel,
     }
@@ -287,6 +319,12 @@ mod scripted {
         pub options: Vec<String>,
         /// The answer given. Always `None` for hidden prompts and messages.
         pub answer: Option<String>,
+        /// What the prompt offered before any answer: the text default, the
+        /// label the choice cursor started on, or `yes`/`no` for a yes/no
+        /// question. `None` for other entries and text prompts without one.
+        pub default: Option<String>,
+        /// The labels a checklist showed ticked before any answer.
+        pub pre_ticked: Vec<String>,
     }
 
     /// A test terminal that replays queued answers and records a transcript.
@@ -363,11 +401,25 @@ mod scripted {
         }
 
         fn record(&self, kind: Kind, text: &str, options: &[String], answer: Option<String>) {
+            self.record_offer(kind, text, options, answer, None, Vec::new());
+        }
+
+        fn record_offer(
+            &self,
+            kind: Kind,
+            text: &str,
+            options: &[String],
+            answer: Option<String>,
+            default: Option<String>,
+            pre_ticked: Vec<String>,
+        ) {
             self.transcript.borrow_mut().push(Entry {
                 kind,
                 text: text.to_string(),
                 options: options.to_vec(),
                 answer,
+                default,
+                pre_ticked,
             });
         }
 
@@ -385,17 +437,26 @@ mod scripted {
         }
 
         fn text(&self, prompt: &str, default: Option<&str>) -> Result<String, Cancelled> {
+            let offered = default.map(str::to_string);
+            let record = |answer| {
+                self.record_offer(Kind::Text, prompt, &[], answer, offered.clone(), Vec::new());
+            };
             match self.next(Kind::Text, prompt) {
                 Answer::Text(value) => {
                     let value = match default {
                         Some(default) if value.is_empty() => default.to_string(),
                         _ => value,
                     };
-                    self.record(Kind::Text, prompt, &[], Some(value.clone()));
+                    record(Some(value.clone()));
+                    Ok(value)
+                }
+                Answer::Accept => {
+                    let value = default.unwrap_or_default().to_string();
+                    record(Some(value.clone()));
                     Ok(value)
                 }
                 Answer::Cancel => {
-                    self.record(Kind::Text, prompt, &[], None);
+                    record(None);
                     Err(Cancelled)
                 }
                 other => panic!("text prompt {prompt:?} got {other:?}"),
@@ -411,22 +472,72 @@ mod scripted {
             }
         }
 
-        fn choose(&self, prompt: &str, options: &[String]) -> Result<usize, Cancelled> {
+        fn choose(
+            &self,
+            prompt: &str,
+            options: &[String],
+            default: usize,
+        ) -> Result<usize, Cancelled> {
+            let offered = options.get(default).cloned();
+            let record = |answer| {
+                self.record_offer(
+                    Kind::Choice,
+                    prompt,
+                    options,
+                    answer,
+                    offered.clone(),
+                    Vec::new(),
+                );
+            };
             match self.next(Kind::Choice, prompt) {
                 Answer::Choose(label) => {
                     let index = Self::index_of(options, &label, prompt);
-                    self.record(Kind::Choice, prompt, options, Some(label));
+                    record(Some(label));
                     Ok(index)
                 }
+                Answer::Accept => {
+                    let label = offered
+                        .clone()
+                        .unwrap_or_else(|| panic!("choice {prompt:?} has no default"));
+                    record(Some(label));
+                    Ok(default)
+                }
                 Answer::Cancel => {
-                    self.record(Kind::Choice, prompt, options, None);
+                    record(None);
                     Err(Cancelled)
                 }
                 other => panic!("choice {prompt:?} got {other:?}"),
             }
         }
 
-        fn checklist(&self, prompt: &str, options: &[String]) -> Result<Vec<usize>, Cancelled> {
+        fn checklist(
+            &self,
+            prompt: &str,
+            options: &[String],
+            ticked: &[usize],
+        ) -> Result<Vec<usize>, Cancelled> {
+            let mut initial: Vec<usize> = ticked.to_vec();
+            initial.sort_unstable();
+            initial.dedup();
+            let pre_ticked: Vec<String> = initial
+                .iter()
+                .map(|i| {
+                    options
+                        .get(*i)
+                        .unwrap_or_else(|| panic!("pre-tick {i} out of range at {prompt:?}"))
+                        .clone()
+                })
+                .collect();
+            let record = |answer| {
+                self.record_offer(
+                    Kind::Checklist,
+                    prompt,
+                    options,
+                    answer,
+                    None,
+                    pre_ticked.clone(),
+                );
+            };
             match self.next(Kind::Checklist, prompt) {
                 Answer::Tick(labels) => {
                     let mut ticked: Vec<usize> = labels
@@ -435,30 +546,44 @@ mod scripted {
                         .collect();
                     ticked.sort_unstable();
                     ticked.dedup();
-                    self.record(Kind::Checklist, prompt, options, Some(labels.join(", ")));
+                    record(Some(labels.join(", ")));
                     Ok(ticked)
                 }
+                Answer::Accept => {
+                    record(Some(pre_ticked.join(", ")));
+                    Ok(initial)
+                }
                 Answer::Cancel => {
-                    self.record(Kind::Checklist, prompt, options, None);
+                    record(None);
                     Err(Cancelled)
                 }
                 other => panic!("checklist {prompt:?} got {other:?}"),
             }
         }
 
-        fn confirm(&self, prompt: &str, _default: bool) -> Result<bool, Cancelled> {
-            match self.next(Kind::Confirm, prompt) {
-                Answer::Confirm(yes) => {
-                    let answer = if yes { "yes" } else { "no" };
-                    self.record(Kind::Confirm, prompt, &[], Some(answer.to_string()));
-                    Ok(yes)
-                }
+        fn confirm(&self, prompt: &str, default: bool) -> Result<bool, Cancelled> {
+            let word = |yes: bool| if yes { "yes" } else { "no" }.to_string();
+            let record = |answer| {
+                self.record_offer(
+                    Kind::Confirm,
+                    prompt,
+                    &[],
+                    answer,
+                    Some(word(default)),
+                    Vec::new(),
+                );
+            };
+            let yes = match self.next(Kind::Confirm, prompt) {
+                Answer::Confirm(yes) => yes,
+                Answer::Accept => default,
                 Answer::Cancel => {
-                    self.record(Kind::Confirm, prompt, &[], None);
-                    Err(Cancelled)
+                    record(None);
+                    return Err(Cancelled);
                 }
                 other => panic!("confirm {prompt:?} got {other:?}"),
-            }
+            };
+            record(Some(word(yes)));
+            Ok(yes)
         }
 
         fn message(&self, text: &str) {
