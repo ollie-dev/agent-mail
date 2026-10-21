@@ -41,7 +41,7 @@ pub enum CliCommand {
     /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
     /// default; errors go to stderr as JSON with a stable `code`.
     List,
-    /// Create and manage Mandates (run by the human, not by agents)
+    /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         #[command(subcommand)]
         command: MandateCommand,

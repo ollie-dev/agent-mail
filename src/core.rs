@@ -413,29 +413,43 @@ fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
     })
 }
 
-/// Deletes the first record whose clear metadata carries ID `id` exactly.
+/// Deletes every record whose clear metadata carries ID `id` exactly.
+///
+/// The metadata is unauthenticated and any local process can add an item, so
+/// a decoy may copy a real Mandate's ID. Removing only one match could leave
+/// the real record, and its token, in place while reporting success; so all
+/// matches go, and success means none is left.
 fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, CoreError> {
     let entries = context
         .store
         .entries()
         .map_err(|_| CoreError::StoreUnavailable)?;
-    let found = entries.iter().find_map(|(key, value)| {
-        seal::listing(value)
-            .ok()
-            .filter(|l| l.id == id)
-            .map(|l| (key, l.name))
-    });
-    let Some((key, name)) = found else {
-        return Err(CoreError::NotFound { id: id.to_string() });
-    };
-    match context.store.delete(key) {
-        Ok(true) => Ok(DeletedMandate {
+    let matches: Vec<_> = entries
+        .iter()
+        .filter_map(|(key, value)| {
+            seal::listing(value)
+                .ok()
+                .filter(|l| l.id == id)
+                .map(|l| (key, l.name))
+        })
+        .collect();
+    let mut deleted = None;
+    for (key, name) in matches {
+        match context.store.delete(key) {
+            Ok(true) => {
+                deleted.get_or_insert(name);
+            }
+            // Removed by someone else since it was read.
+            Ok(false) => {}
+            Err(_) => return Err(CoreError::StoreUnavailable),
+        }
+    }
+    match deleted {
+        Some(name) => Ok(DeletedMandate {
             id: id.to_string(),
             name,
         }),
-        // Removed by someone else since it was read.
-        Ok(false) => Err(CoreError::NotFound { id: id.to_string() }),
-        Err(_) => Err(CoreError::StoreUnavailable),
+        None => Err(CoreError::NotFound { id: id.to_string() }),
     }
 }
 
