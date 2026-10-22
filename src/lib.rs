@@ -203,7 +203,7 @@ pub struct DraftArgs {
     /// A recipient, as a bare address local@domain; repeat for several recipients
     #[arg(long, value_name = "ADDR", required = true, value_parser = address)]
     pub to: Vec<String>,
-    /// The subject; required unless --reply-to is given, which derives it
+    /// The subject of a new message; required without --reply-to and not allowed with it, as a reply takes the original's
     #[arg(
         long,
         value_name = "TEXT",
