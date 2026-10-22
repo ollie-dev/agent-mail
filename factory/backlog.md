@@ -15,7 +15,7 @@
 - [x] Ticket 10: Move a message between granted mailboxes (.scratch/agent-mail-v1/issues/10-move.md) → 011-move-message
 - [x] Ticket 11: Create drafts, including replies (.scratch/agent-mail-v1/issues/11-draft.md) → 012-create-drafts
 - [x] Ticket 12: Gmail search syntax and opt-in live Gmail test (.scratch/agent-mail-v1/issues/12-gmail-search-live-test.md) → 013-gmail-search-live-test
-- [ ] Ticket 13: Several Mandates per Agent and `whoami` (.scratch/agent-mail-v1/issues/13-multiple-tokens-whoami.md)
+- [x] Ticket 13: Several Mandates per Agent and `whoami` (.scratch/agent-mail-v1/issues/13-multiple-tokens-whoami.md) → 014-multiple-mandates-whoami
 - [ ] Ticket 14: Work inside the Claude Code sandbox via its proxy (.scratch/agent-mail-v1/issues/14-sandbox-proxy.md)
 - [ ] Ticket 15: MCP server with all Agent commands (.scratch/agent-mail-v1/issues/15-mcp-server.md)
 - [ ] Ticket 16: Hardened-runtime self-check and release pipeline (.scratch/agent-mail-v1/issues/16-self-check-release.md)
