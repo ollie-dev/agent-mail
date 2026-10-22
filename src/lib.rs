@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod core;
 pub mod create;
+pub mod draft;
 pub mod export;
 pub mod flag;
 pub mod imap;
@@ -108,6 +109,25 @@ pub enum CliCommand {
     /// search, nothing is moved and the call fails with `stale_reference`:
     /// search again for a fresh reference.
     Move(MoveArgs),
+    /// Create a draft in the account's Drafts mailbox for the human to review and send, optionally as a reply
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `draft` grant on
+    /// the account; a reply (--reply-to) also needs a `read` grant on the
+    /// original's mailbox. --to is repeatable and takes bare addresses
+    /// (local@domain, no display names). Give --subject for a new message,
+    /// or --reply-to with a reference exactly as `agent-mail search` prints
+    /// it: the draft then threads with the original (In-Reply-To and
+    /// References) and its subject is the original's with `Re: ` in front,
+    /// added only once. The draft goes to the mailbox the server marks with
+    /// the \Drafts special-use attribute, whatever its name, with the
+    /// \Draft flag; with none marked, the call fails with
+    /// `drafts_not_found`. Prints one JSON object on stdout: ref (the new
+    /// draft's reference, null when the server does not report it),
+    /// account, mailbox, to, subject and original (the --reply-to
+    /// reference, or null). Drafts cannot be changed or removed with
+    /// agent-mail afterwards; the human reviews and sends them in their own
+    /// mail client.
+    Draft(DraftArgs),
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -175,6 +195,60 @@ pub struct MoveArgs {
     pub to: SearchText,
     #[command(flatten)]
     pub output: TextOutput,
+}
+
+/// Options of `draft`.
+#[derive(Debug, Args)]
+pub struct DraftArgs {
+    /// A recipient, as a bare address local@domain; repeat for several recipients
+    #[arg(long, value_name = "ADDR", required = true, value_parser = address)]
+    pub to: Vec<String>,
+    /// The subject; required unless --reply-to is given, which derives it
+    #[arg(
+        long,
+        value_name = "TEXT",
+        required_unless_present = "reply_to",
+        conflicts_with = "reply_to",
+        allow_hyphen_values = true,
+        value_parser = subject
+    )]
+    pub subject: Option<String>,
+    /// The plain-text body; may span several lines
+    #[arg(long, value_name = "TEXT", required = true, allow_hyphen_values = true, value_parser = body)]
+    pub body: String,
+    /// Reply to this message, by its reference exactly as `agent-mail search` prints it in `ref`
+    #[arg(long, value_name = "REF", value_parser = reference)]
+    pub reply_to: Option<MessageRef>,
+    #[command(flatten)]
+    pub output: TextOutput,
+}
+
+fn address(value: &str) -> Result<String, crate::search::InvalidValue> {
+    if crate::draft::is_valid_address(value) {
+        Ok(value.to_string())
+    } else {
+        Err(crate::search::InvalidValue(
+            "must be a bare address local@domain: printable ASCII, no spaces, display names or brackets, at most 254 characters",
+        ))
+    }
+}
+
+fn subject(value: &str) -> Result<String, crate::search::InvalidValue> {
+    if crate::draft::is_valid_subject(value) {
+        Ok(value.to_string())
+    } else {
+        Err(crate::search::InvalidValue(
+            "must not be empty or hold a line break or NUL",
+        ))
+    }
+}
+
+fn body(value: &str) -> Result<String, crate::search::InvalidValue> {
+    if crate::draft::is_valid_body(value) {
+        Ok(value.to_string())
+    } else {
+        Err(crate::search::InvalidValue("must not hold a NUL character"))
+    }
 }
 
 fn mailbox_name(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
@@ -353,6 +427,15 @@ where
                 target: args.to,
             }
         }
+        CliCommand::Draft(args) => {
+            text |= args.output.text;
+            crate::core::Command::Draft {
+                to: args.to,
+                subject: args.subject,
+                body: args.body,
+                reply_to: args.reply_to,
+            }
+        }
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -413,6 +496,8 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
         Outcome::Flagged(result) => json_line(result),
         Outcome::Moved(result) if text => format!("{}\n", result.text_line()),
         Outcome::Moved(result) => json_line(result),
+        Outcome::Drafted(result) if text => format!("{}\n", result.text_line()),
+        Outcome::Drafted(result) => json_line(result),
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),

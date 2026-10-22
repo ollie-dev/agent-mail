@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_imap::imap_proto::rfc4315::UidSetMember;
-use async_imap::imap_proto::{Capability, Response, ResponseCode, Status};
+use async_imap::imap_proto::{Capability, NameAttribute, Response, ResponseCode, Status};
 use async_imap::types::UnsolicitedResponse;
 use async_imap::types::{Fetch, Flag};
 use async_imap::{Client, Session};
@@ -137,6 +137,9 @@ pub enum ImapError {
     /// The server refused to move or copy into the target mailbox (`NO`,
     /// e.g. `[TRYCREATE]`).
     TargetNotFound,
+    /// No mailbox `LIST` returned carries the `\Drafts` special-use
+    /// attribute. Nothing was appended.
+    DraftsNotFound,
 }
 
 /// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
@@ -670,6 +673,190 @@ fn quoted(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// The original message of a reply draft: its mailbox (decoded UTF-8),
+/// the reference's UIDVALIDITY and its UID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyTo<'a> {
+    /// The mailbox, decoded UTF-8.
+    pub mailbox: &'a str,
+    /// The reference's UIDVALIDITY.
+    pub uidvalidity: u32,
+    /// The UID.
+    pub uid: u32,
+}
+
+/// Logs in and appends a draft, in one session:
+///
+/// 1. With `reply_to`, opens its mailbox read-only with `EXAMINE`, checks
+///    its UIDVALIDITY, and fetches the original's header section with
+///    `UID FETCH <uid> (UID BODY.PEEK[HEADER])` only, so it is not marked
+///    `\Seen`.
+/// 2. Calls `build` with those headers (`None` without `reply_to`) for the
+///    message to append.
+/// 3. Sends `LIST "" "*"`; the Drafts mailbox is the first entry, in server
+///    order, whose attributes include `\Drafts`. Its raw name goes into
+///    `drafts` as soon as it is found. Without one, fails with
+///    [`ImapError::DraftsNotFound`] before any `APPEND`.
+/// 4. Sends `APPEND <raw name> (\Draft) {n}` and the message, the raw name
+///    the server listed sent back unchanged as a quoted string.
+/// 5. Logs out.
+///
+/// Returns the Drafts mailbox's UIDVALIDITY and the new UID when the server
+/// reports them in an `APPENDUID` response code (RFC 4315), else `None`.
+/// Never sends `SELECT`, `STORE`, `COPY`, `MOVE`, `EXPUNGE` or `CLOSE`.
+pub fn draft(
+    account: &Account,
+    network: &Network,
+    reply_to: Option<ReplyTo<'_>>,
+    drafts: &mut Option<String>,
+    build: impl FnOnce(Option<&[u8]>) -> String,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(TIMEOUT, async {
+            let mut session = login(account, network).await?;
+            let result = draft_in(&mut session, reply_to, drafts, build).await;
+            let _ = session.logout().await;
+            result
+        })
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+async fn draft_in(
+    session: &mut TlsSession,
+    reply_to: Option<ReplyTo<'_>>,
+    drafts: &mut Option<String>,
+    build: impl FnOnce(Option<&[u8]>) -> String,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    let headers = match reply_to {
+        Some(original) => Some(original_headers(session, original).await?),
+        None => None,
+    };
+    let message = build(headers.as_deref());
+    let listed: Vec<(String, bool)> = session
+        .list(Some(""), Some("*"))
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .map_ok(|name| {
+            let is_drafts = name.attributes().iter().any(|a| match a {
+                NameAttribute::Drafts => true,
+                NameAttribute::Extension(e) => e.eq_ignore_ascii_case("\\Drafts"),
+                _ => false,
+            });
+            (name.name().to_string(), is_drafts)
+        })
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    let raw = listed
+        .into_iter()
+        .find_map(|(name, is_drafts)| is_drafts.then_some(name))
+        .ok_or(ImapError::DraftsNotFound)?;
+    // The name came from the server: it must still fit a quoted string.
+    if raw.is_empty() || raw.contains(['\r', '\n', '\0']) {
+        return Err(ImapError::Protocol);
+    }
+    *drafts = Some(raw.clone());
+    append(session, &raw, &message).await
+}
+
+/// The header section of the reply's original message, fetched with a
+/// `.PEEK` fetch after `EXAMINE` and the UIDVALIDITY check.
+async fn original_headers(
+    session: &mut TlsSession,
+    original: ReplyTo<'_>,
+) -> Result<Vec<u8>, ImapError> {
+    let opened = examine(session, original.mailbox).await?;
+    // Before any fetch: a renumbered mailbox must never yield another
+    // message's headers.
+    if opened.uid_validity.ok_or(ImapError::Protocol)? != original.uidvalidity {
+        return Err(ImapError::StaleReference);
+    }
+    let uid = original.uid;
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid.to_string(), "(UID BODY.PEEK[HEADER])")
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    // Any unsolicited fetch for another UID is ignored.
+    let fetch = fetches
+        .iter()
+        .find(|f| f.uid == Some(uid))
+        .ok_or(ImapError::MessageNotFound)?;
+    fetch
+        .header()
+        .or_else(|| fetch.body())
+        .map(<[u8]>::to_vec)
+        .ok_or(ImapError::Protocol)
+}
+
+/// Sends `APPEND <raw> (\Draft) {n}`, waits for the continuation, sends
+/// the message, and reads the responses itself, since async-imap drops
+/// response codes. Returns the UIDVALIDITY and UID of an `APPENDUID` code
+/// naming exactly one message. A refusal is [`ImapError::Protocol`].
+async fn append(
+    session: &mut TlsSession,
+    raw: &str,
+    message: &str,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    let id = session
+        .run_command(format!(
+            "APPEND {} (\\Draft) {{{}}}",
+            quoted(raw),
+            message.len()
+        ))
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    loop {
+        let response = session
+            .read_response()
+            .await
+            .map_err(|_| ImapError::Protocol)?
+            .ok_or(ImapError::Protocol)?;
+        match response.parsed() {
+            Response::Continue { .. } => break,
+            Response::Done { tag, .. } if *tag == id => return Err(ImapError::Protocol),
+            _ => {}
+        }
+    }
+    // The literal, followed by the CRLF that ends the command.
+    session
+        .run_command_untagged(message)
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    loop {
+        let response = session
+            .read_response()
+            .await
+            .map_err(|_| ImapError::Protocol)?
+            .ok_or(ImapError::Protocol)?;
+        if let Response::Done {
+            tag,
+            status,
+            outcome,
+        } = response.parsed()
+            && *tag == id
+        {
+            return match status {
+                Status::Ok => Ok(outcome.code.as_ref().and_then(|code| match code {
+                    ResponseCode::AppendUid(uidvalidity, set) => {
+                        single_uid(set).map(|uid| (*uidvalidity, uid))
+                    }
+                    _ => None,
+                })),
+                _ => Err(ImapError::Protocol),
+            };
+        }
+    }
 }
 
 /// The flags of message `uid` in the open mailbox, `None` if it has none.
