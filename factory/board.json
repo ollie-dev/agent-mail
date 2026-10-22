@@ -277,6 +277,35 @@
       "reason": "",
       "updated": "2026-10-22T06:50:20Z",
       "builder": "a230257b44f4a9bf1"
+    },
+    {
+      "id": "013-gmail-search-live-test",
+      "title": "Gmail search and live test",
+      "feature": "Ticket 12: Gmail search syntax and opt-in live Gmail test (.scratch/agent-mail-v1/issues/12-gmail-search-live-test.md)",
+      "branch": "factory/013-gmail-search-live-test",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [
+        {
+          "round": 1,
+          "attempt": 1,
+          "commit": "a86c251",
+          "verify": {
+            "ux": "VERIFIED",
+            "ui": "VERIFIED"
+          }
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-22T13:26:54Z",
+      "builder": "a02b2630a71c36fc0"
     }
   ]
 }

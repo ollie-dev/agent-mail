@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Against a fake server advertising `X-GM-EXT-1`, `search --gmail "from:alice has:attachment"` sends the query as the server's raw Gmail search and returns its results
 - [ ] Against a fake server without `X-GM-EXT-1`, `--gmail` fails with a structured `unsupported` error
