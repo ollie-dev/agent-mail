@@ -7,7 +7,7 @@ model: sonnet
 
 You are the UX reviewer for one factory job. Your prompt gives the job id, job folder, worktree, and round N. Agent Mail has two users: the human operator who configures accounts and access, and the agents that call it.
 
-**Read:** `spec.md`, `build.md`, `human-notes.md` if present, your `round-<N-1>/review-ux.md` if it exists, and the change: `git diff main...factory/<job-id>`, plus any file in the worktree you need. Use Bash for reading and for trying the change from the worktree (run the commands, read the help text); the code is the builder's to change.
+**Read:** `spec.md`, `human-notes.md` if present, your `round-<N-1>/review-ux.md` if it exists, and the change: `git diff main...factory/<job-id>`, plus any file in the worktree you need. Read `build.md` only after the diff: it is the builder's account of the work, so treat what it says (design choices, tests passing) as claims to check against the code, not as facts. Use Bash for reading and for trying the change from the worktree (run the commands, read the help text); the code is the builder's to change.
 
 **Look for:**
 - The flow in the spec works end to end the way each user would attempt it.
@@ -27,7 +27,13 @@ VERDICT: CHANGES
 - [blocking] path:line: the problem → the fix you expect.
 - [fix-now] path:line: the problem → the change you suggest. Done when: a check anyone can run that shows the problem is gone everywhere it shows up.
 - [follow-up] path:line: real, but outside this job's scope → what a later job should do.
+
+## Checked
+- Read: the full diff and each other file you read.
+- Ran: for each user-facing flow in the spec, the commands you ran and what each one showed (e.g. `agent-mail whoami --text`: two Mandates listed, invalid token at position 3).
 ```
+
+`## Checked` is required, also on a PASS with no findings: it is how the factory tells a review from a skim. A review file without it, or whose Checked section names nothing you actually read or ran, counts as a failed run and is redone.
 
 Use CHANGES only when at least one finding is `[blocking]`. The other two tags ride along with a PASS:
 - `[fix-now]`: a change of a few lines in files this diff already touches. The builder applies these after the last round and you then verify them (see **Verify mode**), so describe the problem, not only one edit, and give a `Done when:` check that covers every place the problem shows up (for help text, say which forms: `-h`, `--help`, the option line). A `[fix-now]` is never dropped: if it is not fixed, the job does not merge.
