@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With two tokens for Mandates covering different Accounts, `list --account work` uses the Mandate covering `work` and `list --account private` the other
 - [ ] With one reachable Account, `--account` can be omitted; with several, omitting it returns a structured error listing the choices
