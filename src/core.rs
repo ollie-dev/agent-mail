@@ -396,6 +396,25 @@ pub enum CoreError {
         /// Login name of the Account.
         account: String,
     },
+    /// The proxy refused to open a tunnel to the Account's server, e.g.
+    /// because the host is not on the sandbox's allowlist. Nothing reached
+    /// the server.
+    ProxyRefused {
+        /// Login name of the Account.
+        account: String,
+        /// The Account's host.
+        host: String,
+        /// The Account's port.
+        port: u16,
+    },
+    /// A proxy variable holds a value that is not a usable proxy URL.
+    /// Nothing was connected to. The value is never echoed or logged.
+    InvalidProxy {
+        /// Login name of the Account.
+        account: String,
+        /// The variable, e.g. `HTTPS_PROXY`.
+        variable: &'static str,
+    },
     /// The server refused the login.
     LoginFailed {
         /// Login name of the Account.
@@ -464,6 +483,9 @@ pub struct ErrorBody {
     /// Login name of the Account involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The mail server host involved, if any (`proxy_refused`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// The mailbox involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox: Option<String>,
@@ -506,6 +528,8 @@ impl CoreError {
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
+            Self::ProxyRefused { .. } => "proxy_refused",
+            Self::InvalidProxy { .. } => "invalid_proxy",
             Self::LoginFailed { .. } => "login_failed",
             Self::Protocol { .. } => "server_error",
             Self::StoreUnavailable => "store_unavailable",
@@ -539,6 +563,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "no presented Mandate covers account {account}, so no grant can allow `{}` on it; run `agent-mail whoami` to see the accounts the presented tokens cover, or ask the human for a token whose Mandate covers account {account}",
                     operation.as_str()
@@ -561,6 +586,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "no grant allows `{}` on mailbox {mailbox} of account {account}; ask the human to grant it, or run `agent-mail list` to see the mailboxes this token can use",
                     operation.as_str()
@@ -578,6 +604,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "mailbox {mailbox} does not exist on account {account}; run `agent-mail list` to see the mailbox names"
                 ),
@@ -619,6 +646,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message,
             };
         }
@@ -644,6 +672,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message,
             };
         }
@@ -658,8 +687,31 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "the mail server of account {account} does not support Gmail search (it does not advertise X-GM-EXT-1), so mailbox {mailbox} was not searched; run `agent-mail search` with the standard criteria (--from, --to, --subject, --text, --since, --before, --unseen, --flagged) instead of --gmail"
+                ),
+            };
+        }
+        if let Self::ProxyRefused {
+            account,
+            host,
+            port,
+        } = self
+        {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: Some(account.clone()),
+                host: Some(host.clone()),
+                mailbox: None,
+                accounts: None,
+                mandates: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "the network proxy refused the connection to the mail server {host}:{port} of account {account}, so nothing was sent to it; ask the human to allow the host {host} in the sandbox's allowed domains (for the Claude Code sandbox, its network allowed-domains setting), then retry"
                 ),
             };
         }
@@ -674,6 +726,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "the presented agent tokens reach several accounts ({}) and the command names none of them, so nothing was done; run the command again with --account <LOGIN>, naming one of these accounts",
                     accounts.join(", ")
@@ -691,6 +744,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "the presented Mandates {} all cover account {account}, and agent-mail never picks one, so nothing was done; set AGENT_MAIL_TOKEN to only one of these tokens, or ask the human to delete one of these Mandates with `agent-mail mandate delete <ID>`",
                     mandates.join(", ")
@@ -708,6 +762,7 @@ impl CoreError {
                 id: Some(id.clone()),
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "no Mandate has ID {id}; run `agent-mail mandate list` to see the IDs"
                 ),
@@ -740,6 +795,7 @@ impl CoreError {
                 id: Some(id.clone()),
                 deleted: Some(*deleted),
                 unreadable: Some(*unreadable),
+                host: None,
                 message: format!(
                     "{done}, so its agent token may still work; check Keychain Access for `agent-mail` items that `agent-mail mandate list` does not show and delete them"
                 ),
@@ -756,6 +812,7 @@ impl CoreError {
                 id: None,
                 deleted: None,
                 unreadable: None,
+                host: None,
                 message: format!(
                     "the Mandate file cannot be used ({problem}), so nothing was asked or stored; check the file, or run `agent-mail mandate create` without --from"
                 ),
@@ -796,6 +853,13 @@ impl CoreError {
                 Some(account.clone()),
                 "could not reach the mail server; check the network and retry, or ask the human to check the account's host and port"
                     .to_string(),
+            ),
+            Self::InvalidProxy { account, variable } => (
+                None,
+                Some(account.clone()),
+                format!(
+                    "the proxy setting in {variable} is not a usable proxy URL (expected http://host:port or socks5://host:port, optionally with user:password@), so nothing was connected to; ask the human to fix or unset {variable}"
+                ),
             ),
             Self::LoginFailed { account } => (
                 None,
@@ -852,6 +916,7 @@ impl CoreError {
             | Self::SameMailbox { .. }
             | Self::MoveUnsupported { .. }
             | Self::Unsupported { .. }
+            | Self::ProxyRefused { .. }
             | Self::NotFound { .. }
             | Self::RevocationIncomplete { .. }
             | Self::InvalidMandateFile { .. } => {
@@ -892,6 +957,7 @@ impl CoreError {
             id: None,
             deleted: None,
             unreadable: None,
+            host: None,
             message,
         }
     }
@@ -966,6 +1032,14 @@ pub fn execute_reporting(
     command: &Command,
     context: &Context<'_>,
 ) -> Report {
+    // Proxy variables come from `env`, not the process environment, so
+    // adapters and tests decide them.
+    let context = &Context {
+        store: context.store,
+        network: context.network.clone().with_proxy_from_env(env),
+        terminal: context.terminal,
+        audit: context.audit.clone(),
+    };
     let mut invalid_tokens = Vec::new();
     let result = run_command(env, command, context, &mut invalid_tokens);
     Report {
@@ -1572,6 +1646,12 @@ fn connector_error(
         ImapError::TlsRequired => CoreError::TlsRequired { account },
         ImapError::Certificate => CoreError::TlsCertificate { account },
         ImapError::Connection => CoreError::Connection { account },
+        ImapError::ProxyRefused { host, port } => CoreError::ProxyRefused {
+            account,
+            host,
+            port,
+        },
+        ImapError::InvalidProxy { variable } => CoreError::InvalidProxy { account, variable },
         ImapError::Login => CoreError::LoginFailed { account },
         ImapError::Protocol => CoreError::Protocol { account },
         ImapError::MailboxNotFound => match mailbox {

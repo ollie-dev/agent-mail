@@ -470,16 +470,26 @@ fn looks_like_gmail(login: &str) -> bool {
     lower.ends_with("@gmail.com") || lower.ends_with("@googlemail.com")
 }
 
-fn failure_reason(error: &ImapError) -> &'static str {
+fn failure_reason(error: &ImapError) -> String {
     match error {
-        ImapError::Login => "the server refused the login; check the credential",
+        ImapError::ProxyRefused { host, port } => format!(
+            "the proxy refused the connection to {}:{port}; allow that host in the proxy, or unset the proxy variable",
+            escape_controls(host)
+        ),
+        ImapError::InvalidProxy { variable } => {
+            format!("{variable} is not a usable proxy URL; fix or unset it")
+        }
+        ImapError::Login => "the server refused the login; check the credential".to_string(),
         ImapError::TlsRequired => {
             "the server did not offer TLS, so the credential was not sent; check the TLS mode"
+                .to_string()
         }
         ImapError::Certificate => {
-            "the server's TLS certificate is not trusted; check the host name"
+            "the server's TLS certificate is not trusted; check the host name".to_string()
         }
-        ImapError::Connection => "could not reach the server; check the host, port and network",
+        ImapError::Connection => {
+            "could not reach the server; check the host, port and network".to_string()
+        }
         ImapError::Protocol
         | ImapError::MailboxNotFound
         | ImapError::StaleReference
@@ -488,7 +498,7 @@ fn failure_reason(error: &ImapError) -> &'static str {
         | ImapError::TargetNotFound
         | ImapError::DraftsNotFound
         | ImapError::GmailUnsupported => {
-            "the server answered unexpectedly; check the server settings"
+            "the server answered unexpectedly; check the server settings".to_string()
         }
     }
 }
