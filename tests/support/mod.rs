@@ -478,6 +478,8 @@ struct State {
     drafts: Option<String>,
     /// Every accepted `APPEND`: raw mailbox, flags, raw message.
     appended: Vec<(String, Vec<String>, String)>,
+    /// Scripted `X-GM-RAW` results: raw mailbox, exact query, UIDs.
+    gmail: Vec<(String, String, Vec<u32>)>,
 }
 
 impl State {
@@ -610,6 +612,23 @@ impl FakeImap {
     /// and the raw message.
     pub fn appended(&self) -> Vec<(String, Vec<String>, String)> {
         self.state.lock().unwrap().appended.clone()
+    }
+
+    /// Scripts the UIDs an `X-GM-RAW` search for exactly `query` returns in
+    /// `INBOX`. Unscripted queries match nothing. Only answered when the
+    /// server advertises `X-GM-EXT-1`; otherwise `X-GM-RAW` gets `BAD`.
+    pub fn script_gmail_search(&self, query: &str, uids: &[u32]) {
+        self.script_gmail_search_in("INBOX", query, uids);
+    }
+
+    /// Like [`FakeImap::script_gmail_search`], in mailbox `mailbox` (raw
+    /// name).
+    pub fn script_gmail_search_in(&self, mailbox: &str, query: &str, uids: &[u32]) {
+        self.state.lock().unwrap().gmail.push((
+            mailbox.to_string(),
+            query.to_string(),
+            uids.to_vec(),
+        ));
     }
 
     /// Number of TCP connections accepted.
@@ -789,7 +808,11 @@ fn session(
                 state.searches.push(args.to_string());
                 let reply = match opened {
                     None => format!("{tag} BAD no mailbox open\r\n"),
-                    Some((index, _)) => match search_uids(&state.mailboxes[index], args) {
+                    Some((index, _)) => match search_uids(
+                        &state.mailboxes[index],
+                        args,
+                        state.advertises("X-GM-EXT-1").then_some(&state.gmail),
+                    ) {
                         Some(uids) => {
                             let uids: Vec<String> = uids.iter().map(u32::to_string).collect();
                             let sep = if uids.is_empty() { "" } else { " " };
@@ -1128,8 +1151,14 @@ fn imap_date(text: &str) -> Option<(u32, u32, u32)> {
 
 /// Evaluates `UID SEARCH` criteria (RFC 3501 subset: `CHARSET`, `ALL`,
 /// `FROM`, `TO`, `SUBJECT`, `TEXT`, `SINCE`, `BEFORE`, `UNSEEN`, `FLAGGED`,
-/// combined with AND) against `mailbox`. `None` for anything else.
-fn search_uids(mailbox: &FakeMailbox, args: &str) -> Option<Vec<u32>> {
+/// combined with AND) against `mailbox`, and, when `gmail` holds the
+/// scripted results (the server advertises `X-GM-EXT-1`), `X-GM-RAW`.
+/// `None` for anything else.
+fn search_uids(
+    mailbox: &FakeMailbox,
+    args: &str,
+    gmail: Option<&Vec<(String, String, Vec<u32>)>>,
+) -> Option<Vec<u32>> {
     let tokens = imap_strings(args);
     let mut tokens = tokens.iter();
     type Test = Box<dyn Fn(&FakeMessage) -> bool>;
@@ -1173,6 +1202,15 @@ fn search_uids(mailbox: &FakeMailbox, args: &str) -> Option<Vec<u32>> {
             }
             "UNSEEN" => tests.push(Box::new(|m| !m.flags.iter().any(|f| f == "\\Seen"))),
             "FLAGGED" => tests.push(Box::new(|m| m.flags.iter().any(|f| f == "\\Flagged"))),
+            "X-GM-RAW" => {
+                let query = tokens.next()?;
+                let uids: Vec<u32> = gmail?
+                    .iter()
+                    .filter(|(name, q, _)| name == mailbox.name && q == query)
+                    .flat_map(|(_, _, uids)| uids.iter().copied())
+                    .collect();
+                tests.push(Box::new(move |m| uids.contains(&m.uid)));
+            }
             _ => return None,
         }
     }

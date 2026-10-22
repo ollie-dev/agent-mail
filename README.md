@@ -8,6 +8,7 @@ Agent Mail is a simple and secure way to configure access to your email for your
 ```
 agent-mail search [--mailbox NAME] [--from S] [--to S] [--subject S] [--text S]
                   [--since YYYY-MM-DD] [--before YYYY-MM-DD] [--unseen] [--flagged] [--limit N]
+agent-mail search [--mailbox NAME] --gmail QUERY [--limit N]
 ```
 
 - `--mailbox`: the mailbox name as `agent-mail list` prints it. Default `INBOX`.
@@ -15,6 +16,7 @@ agent-mail search [--mailbox NAME] [--from S] [--to S] [--subject S] [--text S]
 - `--since`: received on or after the date. `--before`: received before the date. Both compare the day the server received the message.
 - `--unseen`, `--flagged`: only unread, or only flagged, messages.
 - `--limit N`: return at most N messages, 1 to 1000. Default 20.
+- `--gmail QUERY`: search with Gmail's own search syntax instead, for example `agent-mail search --gmail "has:attachment newer_than:7d"`. See below.
 
 Criteria combine with AND; with none, every message matches. Results are newest first (highest UID first). Because `--text` after `search` is the text criterion, ask for human-readable output by putting `--text` before the subcommand: `agent-mail --text search --from alice@example.com`.
 
@@ -25,6 +27,8 @@ The JSON result has `account`, `mailbox`, `total` (how many messages matched), `
 - `from`: the first sender, `Name <addr>` or `addr`.
 - `subject`: the decoded subject.
 - `flags`: the server's flags, e.g. `\Seen`, `\Flagged`.
+
+**Gmail search.** With `--gmail QUERY`, the query is passed to the server unchanged as Gmail's raw search (`X-GM-RAW`), so every Gmail operator such as `from:`, `has:attachment`, `newer_than:7d` or `label:` works as it does in Gmail's search box. It works only on servers that advertise Gmail's IMAP extensions (`X-GM-EXT-1`); elsewhere the call fails with `unsupported` before any mailbox is opened, and the standard criteria are the way to search. `--gmail` cannot be combined with the standard criteria (`--from`, `--to`, `--subject`, `--text`, `--since`, `--before`, `--unseen`, `--flagged`): that is a usage error (exit code 2). It works with `--mailbox` and `--limit`. The query must not be empty or hold a line break or NUL. Grants, the limit, the result shape and the audit line are the same as for a standard search, and, as with the standard criteria, the query is never written to the audit log or echoed in an error.
 
 A message reference has the form `<account>/<mailbox>/<uidvalidity>/<uid>`. The account and mailbox are percent-encoded like URL path segments: letters, digits and `-._~!$&'()*+,;=:@` stay as they are, every other byte of their UTF-8 (such as `%`, `/`, `[`, `]` or a space) becomes `%XX` with upper-case hex. For example, message 7 in `[Gmail]/Entwürfe` with UIDVALIDITY 1700000003 is `agent@example.test/%5BGmail%5D%2FEntw%C3%BCrfe/1700000003/7`. The UIDVALIDITY ties the reference to the mailbox's current numbering, so a reference can be recognised as stale if the server ever renumbers the mailbox.
 
@@ -158,6 +162,21 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 - `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
 - `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found` or `invalid_draft`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
 The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
+
+## Development
+
+`cargo test` runs the test suite against an in-process fake IMAP server; it never talks to a real mail server.
+
+**Live Gmail test.** `tests/gmail_live.rs` holds an opt-in test against a real Gmail account, ignored by default. It checks `list`, a standard search, a `--gmail` search, that the Drafts mailbox is found, and that `read` leaves a message unread. It only reads: it creates no draft, sets no flag and moves no message. Use a dedicated test account, never your own mail, with IMAP enabled and an app password. Its INBOX must not be empty and must hold at least one unread message. Export the account's address and app password, then run the test:
+
+```
+export AGENT_MAIL_LIVE_GMAIL_ADDRESS=you.test@gmail.com
+read -rs AGENT_MAIL_LIVE_GMAIL_APP_PASSWORD     # type the app password; it stays out of your shell history
+export AGENT_MAIL_LIVE_GMAIL_APP_PASSWORD
+cargo test --test gmail_live -- --ignored
+```
+
+The app password is held in memory only: the test keeps it in an in-memory Mandate store, writes its audit lines to a temporary file, and checks that neither the output nor that file contains it or the agent token. Without the two variables the test prints a one-line skip message and passes.
