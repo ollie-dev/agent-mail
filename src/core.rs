@@ -267,6 +267,15 @@ pub enum CoreError {
         /// The source mailbox, decoded UTF-8.
         mailbox: String,
     },
+    /// A Gmail search was asked for, but the server does not advertise
+    /// Gmail's extensions (`X-GM-EXT-1`). No mailbox was opened and nothing
+    /// was searched. The query is never echoed.
+    Unsupported {
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox asked for, decoded UTF-8.
+        mailbox: String,
+    },
     /// The reference's UIDVALIDITY no longer matches the mailbox, so its
     /// UID may name another message. Nothing was read or changed.
     StaleReference {
@@ -424,6 +433,7 @@ impl CoreError {
             Self::InvalidDraft { .. } => "invalid_draft",
             Self::SameMailbox { .. } => "same_mailbox",
             Self::MoveUnsupported { .. } => "move_unsupported",
+            Self::Unsupported { .. } => "unsupported",
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
@@ -539,6 +549,21 @@ impl CoreError {
                 deleted: None,
                 unreadable: None,
                 message,
+            };
+        }
+        if let Self::Unsupported { account, mailbox } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(Operation::Search.as_str()),
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "the mail server of account {account} does not support Gmail search (it does not advertise X-GM-EXT-1), so mailbox {mailbox} was not searched; run `agent-mail search` with the standard criteria (--from, --to, --subject, --text, --since, --before, --unseen, --flagged) instead of --gmail"
+                ),
             };
         }
         if let Self::AccountRequired { accounts } = self {
@@ -706,6 +731,7 @@ impl CoreError {
             | Self::MessageNotFound { .. }
             | Self::SameMailbox { .. }
             | Self::MoveUnsupported { .. }
+            | Self::Unsupported { .. }
             | Self::NotFound { .. }
             | Self::RevocationIncomplete { .. }
             | Self::InvalidMandateFile { .. } => {
@@ -1237,6 +1263,13 @@ fn connector_error(
             None => CoreError::Protocol { account },
         },
         ImapError::DraftsNotFound => CoreError::DraftsNotFound { account },
+        ImapError::GmailUnsupported => match mailbox {
+            Some(mailbox) => CoreError::Unsupported {
+                account,
+                mailbox: mailbox.to_string(),
+            },
+            None => CoreError::Protocol { account },
+        },
         // Only a move reports these, and it maps them itself.
         ImapError::MoveUnsupported | ImapError::TargetNotFound => CoreError::Protocol { account },
     }
@@ -1630,6 +1663,7 @@ fn search(
         &context.network,
         mailbox,
         &query.imap_criteria(),
+        query.gmail.is_some(),
         limit,
     )
     .map_err(|e| connector_error(e, Operation::Search, &login, Some(mailbox)))?;
@@ -1761,6 +1795,10 @@ mod tests {
             CoreError::MoveUnsupported {
                 account: account.clone(),
                 mailbox: "Filing".to_string(),
+            },
+            CoreError::Unsupported {
+                account: account.clone(),
+                mailbox: "INBOX".to_string(),
             },
             CoreError::Denied {
                 operation: Operation::Draft,

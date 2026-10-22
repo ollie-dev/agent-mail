@@ -265,7 +265,7 @@ fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
 /// Options of `search`.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Mailbox to search, by its name as `agent-mail list` prints it
+    /// Mailbox to search, as `agent-mail list` names it
     #[arg(long, value_name = "NAME", default_value = "INBOX", value_parser = search_text)]
     pub mailbox: SearchText,
     /// Messages whose From header contains S
@@ -292,9 +292,31 @@ pub struct SearchArgs {
     /// Only flagged messages
     #[arg(long)]
     pub flagged: bool,
+    /// Search in Gmail's search syntax, e.g. "from:alice has:attachment"
+    ///
+    /// The query is sent to the server unchanged. Works only on servers
+    /// advertising Gmail's extensions (X-GM-EXT-1) and fails with
+    /// `unsupported` elsewhere. Cannot be combined with --from, --to,
+    /// --subject, --text, --since, --before, --unseen or --flagged, but
+    /// works with --mailbox and --limit.
+    #[arg(
+        long,
+        value_name = "QUERY",
+        allow_hyphen_values = true,
+        value_parser = gmail_query,
+        conflicts_with_all = ["from", "to", "subject", "text", "since", "before", "unseen", "flagged"]
+    )]
+    pub gmail: Option<SearchText>,
     /// Return at most N messages, 1 to 1000
     #[arg(long, value_name = "N", default_value = "20", value_parser = limit)]
     pub limit: Limit,
+}
+
+fn gmail_query(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+    if value.is_empty() {
+        return Err(crate::search::InvalidValue("must not be empty"));
+    }
+    SearchText::new(value)
 }
 
 fn search_text(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
@@ -321,6 +343,7 @@ impl From<SearchArgs> for Query {
             before: args.before,
             unseen: args.unseen,
             flagged: args.flagged,
+            gmail: args.gmail,
             limit: args.limit,
         }
     }

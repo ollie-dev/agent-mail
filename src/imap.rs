@@ -140,6 +140,9 @@ pub enum ImapError {
     /// No mailbox `LIST` returned carries the `\Drafts` special-use
     /// attribute. Nothing was appended.
     DraftsNotFound,
+    /// A Gmail search was asked for, but the server does not advertise
+    /// `X-GM-EXT-1`. No mailbox was opened and nothing was searched.
+    GmailUnsupported,
 }
 
 /// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
@@ -275,11 +278,17 @@ pub struct FoundMessage {
 /// with `EXAMINE`, runs `UID SEARCH criteria`, fetches flags, internal date
 /// and envelope of the `limit` highest matching UIDs only, and logs out.
 /// Never changes mailbox state: no `SELECT`, no `STORE`, no body fetch.
+///
+/// With `gmail` (the criteria hold `X-GM-RAW`), the capabilities are read
+/// after login first, and the search fails with
+/// [`ImapError::GmailUnsupported`] before `EXAMINE` unless the server
+/// advertises `X-GM-EXT-1`.
 pub fn search(
     account: &Account,
     network: &Network,
     mailbox: &str,
     criteria: &str,
+    gmail: bool,
     limit: usize,
 ) -> Result<Found, ImapError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -289,7 +298,7 @@ pub fn search(
     runtime.block_on(async {
         tokio::time::timeout(
             TIMEOUT,
-            search_async(account, network, mailbox, criteria, limit),
+            search_async(account, network, mailbox, criteria, gmail, limit),
         )
         .await
         .map_err(|_| ImapError::Connection)?
@@ -301,10 +310,24 @@ async fn search_async(
     network: &Network,
     mailbox: &str,
     criteria: &str,
+    gmail: bool,
     limit: usize,
 ) -> Result<Found, ImapError> {
     let mut session = login(account, network).await?;
-    let result = search_in(&mut session, mailbox, criteria, limit).await;
+    let result = async {
+        // Before EXAMINE: a server without Gmail's extensions opens no
+        // mailbox for a Gmail query.
+        if gmail
+            && !capability_atoms(&mut session)
+                .await?
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case("X-GM-EXT-1"))
+        {
+            return Err(ImapError::GmailUnsupported);
+        }
+        search_in(&mut session, mailbox, criteria, limit).await
+    }
+    .await;
     let _ = session.logout().await;
     result
 }
@@ -540,17 +563,8 @@ async fn move_in(
     uid: u32,
     target: &str,
 ) -> Result<Option<(u32, u32)>, ImapError> {
-    // Read after login: servers such as Gmail advertise more once
-    // authenticated.
-    let capabilities = session
-        .capabilities()
-        .await
-        .map_err(|_| ImapError::Protocol)?;
-    let has = |name: &str| {
-        capabilities.iter().any(
-            |c| matches!(c, async_imap::types::Capability::Atom(a) if a.eq_ignore_ascii_case(name)),
-        )
-    };
+    let capabilities = capability_atoms(session).await?;
+    let has = |name: &str| capabilities.iter().any(|c| c.eq_ignore_ascii_case(name));
     let (can_move, uidplus) = (has("MOVE"), has("UIDPLUS"));
     // Before any change: without either, the only way would be a plain
     // EXPUNGE, which also removes messages the human marked \Deleted.
@@ -592,6 +606,22 @@ async fn move_in(
         .await
         .map_err(|_| ImapError::Protocol)?;
     Ok(copied)
+}
+
+/// The capability atoms the server advertises. Asked after login, since
+/// servers such as Gmail advertise more once authenticated.
+async fn capability_atoms(session: &mut TlsSession) -> Result<Vec<String>, ImapError> {
+    let capabilities = session
+        .capabilities()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    Ok(capabilities
+        .iter()
+        .filter_map(|c| match c {
+            async_imap::types::Capability::Atom(a) => Some(a.to_string()),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Runs a `UID MOVE` or `UID COPY` of `uid` and reads its responses
@@ -740,6 +770,36 @@ async fn draft_in(
         None => None,
     };
     let message = build(headers.as_deref());
+    let raw = find_drafts(session).await?;
+    *drafts = Some(raw.clone());
+    append(session, &raw, &message).await
+}
+
+/// Logs in, sends `LIST "" "*"` and logs out. Returns the raw name of the
+/// first mailbox, in server order, whose attributes include the `\Drafts`
+/// special-use attribute (RFC 6154), or [`ImapError::DraftsNotFound`].
+/// `draft` finds its target the same way.
+pub fn drafts_mailbox(account: &Account, network: &Network) -> Result<String, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(TIMEOUT, async {
+            let mut session = login(account, network).await?;
+            let result = find_drafts(&mut session).await;
+            let _ = session.logout().await;
+            result
+        })
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+/// The raw name of the first listed mailbox marked `\Drafts`. The name
+/// came from the server, so one that would not fit a quoted string is
+/// [`ImapError::Protocol`].
+async fn find_drafts(session: &mut TlsSession) -> Result<String, ImapError> {
     let listed: Vec<(String, bool)> = session
         .list(Some(""), Some("*"))
         .await
@@ -763,8 +823,7 @@ async fn draft_in(
     if raw.is_empty() || raw.contains(['\r', '\n', '\0']) {
         return Err(ImapError::Protocol);
     }
-    *drafts = Some(raw.clone());
-    append(session, &raw, &message).await
+    Ok(raw)
 }
 
 /// The header section of the reply's original message, fetched with a
