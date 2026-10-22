@@ -297,6 +297,17 @@ pub enum CoreError {
         /// The mailbox, for operations on one mailbox.
         mailbox: Option<String>,
     },
+    /// No presented Mandate covers the Account, so no Grant can allow the
+    /// operation. Reported with code `denied` and the same fields as
+    /// [`CoreError::Denied`]; only the message differs.
+    Uncovered {
+        /// The operation that was refused.
+        operation: Operation,
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox, for operations on one mailbox.
+        mailbox: Option<String>,
+    },
     /// `move` named the reference's own mailbox as the target. Nothing was
     /// moved and no connection was made.
     SameMailbox {
@@ -481,7 +492,7 @@ impl CoreError {
         match self {
             Self::MissingToken => "missing_token",
             Self::InvalidToken => "invalid_token",
-            Self::Denied { .. } => "denied",
+            Self::Denied { .. } | Self::Uncovered { .. } => "denied",
             Self::MailboxNotFound { .. } => "mailbox_not_found",
             Self::StaleReference { .. } => "stale_reference",
             Self::MessageNotFound { .. } => "message_not_found",
@@ -512,6 +523,28 @@ impl CoreError {
 
     /// The error as a serialisable body.
     pub fn body(&self) -> ErrorBody {
+        if let Self::Uncovered {
+            operation,
+            account,
+            mailbox,
+        } = self
+        {
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(operation.as_str()),
+                account: Some(account.clone()),
+                mailbox: mailbox.clone(),
+                accounts: None,
+                mandates: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "no presented Mandate covers account {account}, so no grant can allow `{}` on it; run `agent-mail whoami` to see the accounts the presented tokens cover, or ask the human for a token whose Mandate covers account {account}",
+                    operation.as_str()
+                ),
+            };
+        }
         if let Self::Denied {
             operation,
             account,
@@ -812,6 +845,7 @@ impl CoreError {
             ),
             Self::AccountRequired { .. }
             | Self::AmbiguousMandate { .. }
+            | Self::Uncovered { .. }
             | Self::MailboxNotFound { .. }
             | Self::StaleReference { .. }
             | Self::MessageNotFound { .. }
@@ -1495,11 +1529,7 @@ fn list(
     // Deny by default, before any connection is made: an Account no opened
     // Mandate covers is denied, and only the selected Mandate's Grants count.
     let Some((mandate, account)) = presented.select(&login, trail)? else {
-        return Err(CoreError::Denied {
-            operation: Operation::List,
-            account: login,
-            mailbox: None,
-        });
+        return Err(uncovered(Operation::List, &login, None));
     };
     if mandate
         .policy
@@ -1609,7 +1639,8 @@ fn read(
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let (mandate, account) = selection?.ok_or_else(denied)?;
+    let (mandate, account) =
+        selection?.ok_or_else(|| uncovered(Operation::Read, login, Some(mailbox)))?;
     if !mandate
         .policy
         .allows_mailbox(Operation::Read, login, mailbox)
@@ -1682,7 +1713,8 @@ fn flag(
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let (mandate, account) = selection?.ok_or_else(denied)?;
+    let (mandate, account) =
+        selection?.ok_or_else(|| uncovered(Operation::Flag, login, Some(mailbox)))?;
     if !mandate
         .policy
         .allows_mailbox(Operation::Flag, login, mailbox)
@@ -1745,7 +1777,8 @@ fn move_message(
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let (mandate, account) = selection?.ok_or_else(|| denied(mailbox))?;
+    let (mandate, account) =
+        selection?.ok_or_else(|| uncovered(Operation::Move, login, Some(mailbox)))?;
     for name in [mailbox, target] {
         if !mandate.policy.allows_mailbox(Operation::Move, login, name) {
             return Err(denied(name));
@@ -1847,7 +1880,9 @@ fn draft(
                 account: login.to_string(),
                 mailbox: Some(reference.mailbox.clone()),
             };
-            let (mandate, account) = selection?.1?.ok_or_else(read_denied)?;
+            let (mandate, account) = selection?.1?.ok_or_else(|| {
+                uncovered(Operation::Read, login, Some(reference.mailbox.as_str()))
+            })?;
             require_draft_grant(mandate, login)?;
             if !mandate
                 .policy
@@ -1861,11 +1896,7 @@ fn draft(
             let (login, selected) = selection?;
             trail.account = Some(login.clone());
             let Some((mandate, account)) = selected? else {
-                return Err(CoreError::Denied {
-                    operation: Operation::Draft,
-                    account: login,
-                    mailbox: None,
-                });
+                return Err(uncovered(Operation::Draft, &login, None));
             };
             require_draft_grant(mandate, &login)?;
             account
@@ -1942,6 +1973,16 @@ fn draft(
     })
 }
 
+/// The `denied` error for `operation` on an Account no presented Mandate
+/// covers.
+fn uncovered(operation: Operation, login: &str, mailbox: Option<&str>) -> CoreError {
+    CoreError::Uncovered {
+        operation,
+        account: login.to_string(),
+        mailbox: mailbox.map(str::to_string),
+    }
+}
+
 /// Fails with `denied` for `draft` unless a `draft` Grant covers the
 /// Account. `draft` Grants take no mailboxes.
 fn require_draft_grant(mandate: &Mandate, login: &str) -> Result<(), CoreError> {
@@ -1973,11 +2014,7 @@ fn search(
     // An Account no opened Mandate covers is denied before any connection,
     // and only the selected Mandate's Grants count.
     let Some((mandate, account)) = presented.select(&login, trail)? else {
-        return Err(CoreError::Denied {
-            operation: Operation::Search,
-            account: login,
-            mailbox: Some(mailbox.to_string()),
-        });
+        return Err(uncovered(Operation::Search, &login, Some(mailbox)));
     };
     // The query's values were checked when it was built (see
     // `crate::search`); the mailbox is the Agent's decoded name, compared
@@ -2178,6 +2215,16 @@ mod tests {
             CoreError::StoreUnavailable,
             CoreError::AccountRequired {
                 accounts: vec![account.clone(), "other@example.test".to_string()],
+            },
+            CoreError::Uncovered {
+                operation: Operation::List,
+                account: account.clone(),
+                mailbox: None,
+            },
+            CoreError::Uncovered {
+                operation: Operation::Read,
+                account: account.clone(),
+                mailbox: Some("INBOX".to_string()),
             },
             CoreError::AmbiguousMandate {
                 account: account.clone(),
