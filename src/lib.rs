@@ -292,9 +292,25 @@ pub struct SearchArgs {
     /// Only flagged messages
     #[arg(long)]
     pub flagged: bool,
+    /// Search with Gmail's own search syntax, e.g. "from:alice has:attachment", sent to the server unchanged; works only on servers advertising Gmail's extensions (X-GM-EXT-1) and fails with `unsupported` elsewhere; cannot be combined with --from, --to, --subject, --text, --since, --before, --unseen or --flagged, but works with --mailbox and --limit
+    #[arg(
+        long,
+        value_name = "QUERY",
+        allow_hyphen_values = true,
+        value_parser = gmail_query,
+        conflicts_with_all = ["from", "to", "subject", "text", "since", "before", "unseen", "flagged"]
+    )]
+    pub gmail: Option<SearchText>,
     /// Return at most N messages, 1 to 1000
     #[arg(long, value_name = "N", default_value = "20", value_parser = limit)]
     pub limit: Limit,
+}
+
+fn gmail_query(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+    if value.is_empty() {
+        return Err(crate::search::InvalidValue("must not be empty"));
+    }
+    SearchText::new(value)
 }
 
 fn search_text(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
@@ -321,6 +337,7 @@ impl From<SearchArgs> for Query {
             before: args.before,
             unseen: args.unseen,
             flagged: args.flagged,
+            gmail: args.gmail,
             limit: args.limit,
         }
     }

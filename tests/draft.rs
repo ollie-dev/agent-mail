@@ -1016,3 +1016,25 @@ fn help_says_subject_and_reply_to_cannot_be_combined() {
         &t(1),
     ]);
 }
+
+#[test]
+fn drafts_mailbox_returns_the_first_listed_drafts_mailbox_or_drafts_not_found() {
+    use agent_mail::imap::{self, ImapError, Network};
+
+    let server = FakeImap::start_with_list(Mode::Implicit, &[], &[], Some("[Gmail]/Entw&APw-rfe"));
+    let network = Network::trusting_only(vec![server.ca.clone()]);
+    let gmail = account(LOGIN, server.port, TlsMode::Implicit);
+    assert_eq!(
+        imap::drafts_mailbox(&gmail, &network),
+        Ok("[Gmail]/Entw&APw-rfe".to_string())
+    );
+    assert_eq!(server.commands(), ["LOGIN", "LIST", "LOGOUT"]);
+
+    let none = FakeImap::start_with_list(Mode::Implicit, &[], &["Drafts"], None);
+    let network = Network::trusting_only(vec![none.ca.clone()]);
+    let plain = account(LOGIN, none.port, TlsMode::Implicit);
+    assert_eq!(
+        imap::drafts_mailbox(&plain, &network),
+        Err(ImapError::DraftsNotFound)
+    );
+}

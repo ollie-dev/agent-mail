@@ -28,7 +28,18 @@ struct Setup {
 
 impl Setup {
     fn new(grants: Vec<Grant>) -> Self {
-        let server = FakeImap::start(Mode::Implicit);
+        Self::on(FakeImap::start(Mode::Implicit), grants)
+    }
+
+    /// Like [`Setup::new`], against a fake advertising `X-GM-EXT-1`.
+    fn gmail(grants: Vec<Grant>) -> Self {
+        Self::on(
+            FakeImap::start_with_capabilities(Mode::Implicit, &["X-GM-EXT-1"]),
+            grants,
+        )
+    }
+
+    fn on(server: FakeImap, grants: Vec<Grant>) -> Self {
         let store = InMemoryStore::new();
         let mandate = Mandate {
             name: "work-inbox".to_string(),
@@ -737,4 +748,303 @@ fn readme_documents_search_and_its_audit_fields() {
             "README audit section lacks {needle}"
         );
     }
+}
+
+#[test]
+fn ac1_gmail_query_is_sent_unchanged_as_x_gm_raw_and_decides_the_result() {
+    let s = Setup::gmail(vec![grant(Operation::Search, &["INBOX"])]);
+    s.server
+        .script_gmail_search("from:alice has:attachment", &[1]);
+    let result = s.search(&["--gmail", "from:alice has:attachment"]);
+    assert_eq!(
+        s.server.searches(),
+        ["X-GM-RAW \"from:alice has:attachment\""]
+    );
+    assert_eq!(result["mailbox"], "INBOX");
+    assert_eq!(result["total"], 1);
+    assert_eq!(result["more"], false);
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["ref"], inbox_ref(1));
+    assert_eq!(messages[0]["subject"], "Quarterly report");
+
+    // The standard criterion would have found UIDs 3 and 1.
+    let standard = s.search(&["--from", "alice"]);
+    assert_eq!(uids(&standard), [3, 1]);
+}
+
+#[test]
+fn ac1_gmail_query_is_quoted_and_marked_utf8() {
+    let s = Setup::gmail(vec![grant(Operation::Search, &["INBOX"])]);
+    s.search(&["--gmail", "von:jürgen"]);
+    s.search(&["--gmail", "subject:\"a\\b\""]);
+    let injection = s.search(&["--gmail", "x\" ALL \"y"]);
+    assert_eq!(injection["total"], 0);
+    assert_eq!(
+        s.server.searches(),
+        [
+            "CHARSET UTF-8 X-GM-RAW \"von:jürgen\"",
+            "X-GM-RAW \"subject:\\\"a\\\\b\\\"\"",
+            "X-GM-RAW \"x\\\" ALL \\\"y\"",
+        ]
+    );
+}
+
+#[test]
+fn ac1_bad_gmail_queries_and_combinations_are_usage_errors_without_a_connection() {
+    let s = Setup::gmail(vec![grant(Operation::Search, &["*"])]);
+    let cases: [&[&str]; 12] = [
+        &["--gmail", ""],
+        &["--gmail", "a\rb"],
+        &["--gmail", "a\nb"],
+        &["--gmail", "a\0b"],
+        &["--gmail", "x", "--from", "alice"],
+        &["--gmail", "x", "--to", "bob"],
+        &["--to", "bob", "--gmail", "x"],
+        &["--gmail", "x", "--subject", "s"],
+        &["--gmail", "x", "--text", "t"],
+        &["--gmail", "x", "--since", "2026-10-05"],
+        &["--gmail", "x", "--before", "2026-10-05"],
+        &["--gmail", "x", "--unseen"],
+    ];
+    let flagged: &[&str] = &["--flagged", "--gmail", "x"];
+    for args in cases.iter().copied().chain(std::iter::once(flagged)) {
+        let argv: Vec<&str> = std::iter::once("search")
+            .chain(args.iter().copied())
+            .collect();
+        let out = s.run(&argv);
+        assert_eq!(out.code, 2, "{args:?}");
+        assert_eq!(out.stdout, "");
+        assert!(out.stderr.contains("--gmail"), "{args:?}: {:?}", out.stderr);
+    }
+    assert_eq!(s.server.connections(), 0);
+    assert!(s.audit().is_empty());
+}
+
+#[test]
+fn ac2_gmail_on_a_server_without_x_gm_ext_1_is_unsupported() {
+    let s = Setup::new(vec![grant(Operation::Search, &["INBOX"])]);
+    let out = s.run(&["search", "--gmail", "has:attachment"]);
+    assert_eq!(out.code, 1, "{:?}", out.stderr);
+    assert_eq!(out.stdout, "");
+    let error = error_of(&out);
+    assert_eq!(error["code"], "unsupported");
+    assert_eq!(error["account"], LOGIN);
+    assert_eq!(error["mailbox"], "INBOX");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("Gmail search"), "{message}");
+    assert!(
+        message.contains("--from") && message.contains("--subject"),
+        "{message}"
+    );
+    assert!(!message.contains("has:attachment"), "{message}");
+    assert!(!out.stderr.contains("has:attachment"));
+
+    let commands = s.server.commands();
+    for verb in ["EXAMINE", "SELECT", "UID SEARCH"] {
+        assert!(
+            !commands.iter().any(|c| c == verb),
+            "{verb} in {commands:?}"
+        );
+    }
+    assert_eq!(commands.last().map(String::as_str), Some("LOGOUT"));
+    assert!(s.server.searches().is_empty());
+
+    let text = s.run(&["--text", "search", "--gmail", "has:attachment"]);
+    assert_eq!(text.code, 1);
+    assert_eq!(text.stdout, "");
+    assert!(
+        text.stderr.starts_with("error: unsupported: ") && text.stderr.contains("Gmail search"),
+        "{:?}",
+        text.stderr
+    );
+    assert!(!text.stderr.contains("has:attachment"));
+}
+
+#[test]
+fn ac3_gmail_outside_the_granted_mailbox_is_denied() {
+    assert_denied(
+        vec![grant(Operation::Search, &["INBOX"])],
+        &["--mailbox", "Archive", "--gmail", "from:alice"],
+        "Archive",
+    );
+}
+
+#[test]
+fn ac3_gmail_without_a_search_grant_is_denied() {
+    assert_denied(
+        vec![grant(Operation::Read, &["INBOX"])],
+        &["--gmail", "x"],
+        "INBOX",
+    );
+}
+
+#[test]
+fn ac3_gmail_respects_the_limit() {
+    let s = Setup::gmail(vec![grant(Operation::Search, &["Archive"])]);
+    let all: Vec<u32> = (1..=25).collect();
+    s.server
+        .script_gmail_search_in("Archive", "label:all", &all);
+
+    let five = s.search(&[
+        "--mailbox",
+        "Archive",
+        "--gmail",
+        "label:all",
+        "--limit",
+        "5",
+    ]);
+    assert_eq!(uids(&five), [25, 24, 23, 22, 21]);
+    assert_eq!(five["total"], 25);
+    assert_eq!(five["more"], true);
+    assert_refs(&five, "Archive", ARCHIVE_UIDVALIDITY);
+
+    let default = s.search(&["--mailbox", "Archive", "--gmail", "label:all"]);
+    assert_eq!(uids(&default), (6..=25).rev().collect::<Vec<u32>>());
+    assert_eq!(default["total"], 25);
+    assert_eq!(default["more"], true);
+
+    let connections = s.server.connections();
+    for limit in ["0", "1001"] {
+        let out = s.run(&[
+            "search",
+            "--mailbox",
+            "Archive",
+            "--gmail",
+            "label:all",
+            "--limit",
+            limit,
+        ]);
+        assert_eq!(out.code, 2, "--limit {limit}");
+        assert_eq!(out.stdout, "");
+    }
+    assert_eq!(s.server.connections(), connections);
+}
+
+#[test]
+fn ac3_gmail_audit_lines_match_standard_search_and_never_hold_the_query() {
+    let s = Setup::gmail(vec![grant(Operation::Search, &["INBOX"])]);
+    s.server
+        .script_gmail_search("from:alice has:attachment", &[1]);
+    s.search(&["--gmail", "from:alice has:attachment"]);
+    let lines = s.audit();
+    assert_eq!(
+        single_entry(&lines),
+        json!({
+            "mandate": "aaaa1111",
+            "operation": "search",
+            "account": LOGIN,
+            "mailbox": "INBOX",
+            "messages": [inbox_ref(1)],
+            "results": 1,
+            "outcome": "allowed"
+        })
+    );
+    assert_eq!(
+        keys_in_order(&lines[0]),
+        [
+            "time",
+            "mandate",
+            "operation",
+            "account",
+            "mailbox",
+            "messages",
+            "results",
+            "outcome"
+        ]
+    );
+
+    // Denied: outside the Grant.
+    let out = s.run(&[
+        "search",
+        "--mailbox",
+        "Archive",
+        "--gmail",
+        "has:attachment",
+    ]);
+    assert_eq!(out.code, 1);
+    let mut entry = parse_line(&s.audit()[1]);
+    entry.remove("time");
+    assert_eq!(
+        Value::Object(entry),
+        json!({
+            "mandate": "aaaa1111",
+            "operation": "search",
+            "account": LOGIN,
+            "mailbox": "Archive",
+            "outcome": "denied",
+            "reason": "denied"
+        })
+    );
+
+    // Unsupported: a server without X-GM-EXT-1.
+    let plain = Setup::new(vec![grant(Operation::Search, &["INBOX"])]);
+    let out = plain.run(&["search", "--gmail", "has:attachment"]);
+    assert_eq!(out.code, 1);
+    let lines = plain.audit();
+    assert_eq!(
+        single_entry(&lines),
+        json!({
+            "mandate": "aaaa1111",
+            "operation": "search",
+            "account": LOGIN,
+            "mailbox": "INBOX",
+            "outcome": "allowed",
+            "reason": "unsupported"
+        })
+    );
+
+    for log in [&s.log, &plain.log] {
+        let bytes = std::fs::read(log).unwrap();
+        for needle in [
+            "has:attachment",
+            "from:alice",
+            CREDENTIAL,
+            s.token.expose(),
+            plain.token.expose(),
+        ] {
+            assert!(
+                !contains_bytes(&bytes, needle.as_bytes()),
+                "the audit log holds {needle:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ac6_readme_and_help_document_gmail_search_and_the_live_test() {
+    let search = readme_section("Search");
+    for needle in [
+        "--gmail QUERY",
+        "agent-mail search --gmail \"has:attachment newer_than:7d\"",
+        "X-GM-EXT-1",
+        "unsupported",
+    ] {
+        assert!(
+            search.contains(needle),
+            "README Search section lacks {needle}"
+        );
+    }
+    let readme =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .unwrap();
+    for needle in [
+        "AGENT_MAIL_LIVE_GMAIL_ADDRESS",
+        "AGENT_MAIL_LIVE_GMAIL_APP_PASSWORD",
+        "cargo test --test gmail_live -- --ignored",
+    ] {
+        assert!(readme.contains(needle), "README lacks {needle}");
+    }
+
+    let s = Setup::granted();
+    let out = s.run(&["search", "--help"]);
+    assert_eq!(out.code, 0);
+    for needle in ["--gmail <QUERY>", "X-GM-EXT-1", "cannot be combined"] {
+        assert!(
+            out.stdout.contains(needle),
+            "help lacks {needle}: {}",
+            out.stdout
+        );
+    }
+    assert_eq!(s.server.connections(), 0);
 }

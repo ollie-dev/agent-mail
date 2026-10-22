@@ -177,6 +177,10 @@ pub struct Query {
     pub unseen: bool,
     /// `FLAGGED`.
     pub flagged: bool,
+    /// A Gmail search query, sent unchanged as `X-GM-RAW`. When set, it is
+    /// the whole search: the standard criteria above are not sent, and the
+    /// server must advertise `X-GM-EXT-1`.
+    pub gmail: Option<SearchText>,
     /// At most this many results.
     pub limit: Limit,
 }
@@ -194,13 +198,23 @@ impl Query {
             before: None,
             unseen: false,
             flagged: false,
+            gmail: None,
             limit: Limit::default(),
         }
     }
 
     /// The `UID SEARCH` arguments: `CHARSET UTF-8` first when any string is
-    /// not ASCII, then each criterion, or `ALL` when there is none.
+    /// not ASCII, then each criterion, or `ALL` when there is none. A Gmail
+    /// query is sent alone as `X-GM-RAW <quoted query>`.
     pub fn imap_criteria(&self) -> String {
+        if let Some(gmail) = &self.gmail {
+            let raw = format!("X-GM-RAW {}", gmail.quoted());
+            return if gmail.as_str().is_ascii() {
+                raw
+            } else {
+                format!("CHARSET UTF-8 {raw}")
+            };
+        }
         let mut keys = Vec::new();
         let mut ascii = true;
         for (name, value) in [
@@ -598,6 +612,26 @@ mod tests {
         assert_eq!(
             query.imap_criteria(),
             "CHARSET UTF-8 FROM \"alice\" SUBJECT \"für\" SINCE 05-Oct-2026 UNSEEN FLAGGED"
+        );
+    }
+
+    #[test]
+    fn gmail_queries_are_sent_raw_and_quoted() {
+        let gmail = |q: &str| Query {
+            gmail: Some(SearchText::new(q).unwrap()),
+            ..Query::all(SearchText::new("INBOX").unwrap())
+        };
+        assert_eq!(
+            gmail("from:alice has:attachment").imap_criteria(),
+            "X-GM-RAW \"from:alice has:attachment\""
+        );
+        assert_eq!(
+            gmail("von:jürgen").imap_criteria(),
+            "CHARSET UTF-8 X-GM-RAW \"von:jürgen\""
+        );
+        assert_eq!(
+            gmail("subject:\"a\\b\"").imap_criteria(),
+            "X-GM-RAW \"subject:\\\"a\\\\b\\\"\""
         );
     }
 
