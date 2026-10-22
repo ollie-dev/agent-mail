@@ -1,7 +1,8 @@
 //! The core: the single entry point every adapter calls.
 //!
-//! Given the presented Agent Token and a command, it opens the Mandate,
-//! enforces the Policy (deny by default) and performs the mail operation.
+//! Given the presented Agent Tokens and a command, it opens their Mandates,
+//! selects the one Mandate covering the command's Account, enforces that
+//! Mandate's Policy only (deny by default) and performs the mail operation.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,13 +17,14 @@ use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Account, Grant, Mandate, Operation};
 use crate::move_message::MoveResult;
 use crate::read::{self, ReadResult};
-use crate::seal::{self, AgentToken, ListedAccount};
+use crate::seal::{self, AgentToken, ListedAccount, Listing};
 use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult, SearchText};
 use crate::store::MandateStore;
 use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
 
-/// Environment variable holding the presented Agent Token.
+/// Environment variable holding the presented Agent Tokens, one or more,
+/// comma-separated.
 pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
 
 /// What the core runs against: the Mandate store, the network, the
@@ -93,9 +95,19 @@ impl<'a> Context<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// List the mailboxes the Policy grants.
-    List,
+    List {
+        /// The target Account's login (`--account`). `None` means the only
+        /// reachable Account. Untrusted input; checked again here with
+        /// [`is_valid_account`] and compared exactly against logins.
+        account: Option<String>,
+    },
     /// Search one granted mailbox.
-    Search(Query),
+    Search {
+        /// The criteria.
+        query: Query,
+        /// The target Account's login, as for [`Command::List`].
+        account: Option<String>,
+    },
     /// Read one message by its reference, without marking it seen.
     Read {
         /// The message, as `search` returned it. Untrusted input; checked
@@ -141,7 +153,14 @@ pub enum Command {
         /// The original message of a reply, as `search` returned it.
         /// Untrusted input; checked again with [`read::is_valid_reference`].
         reply_to: Option<MessageRef>,
+        /// The target Account's login without `reply_to`, as for
+        /// [`Command::List`]. With `reply_to` the Account is always the
+        /// reference's and this is ignored (the CLI refuses both together).
+        account: Option<String>,
     },
+    /// Show the presented tokens' Mandates and Grants. Reads only the
+    /// Mandate store and touches no mail.
+    Whoami,
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -195,6 +214,30 @@ pub struct DeletedMandate {
     pub name: Option<String>,
 }
 
+/// Result of `whoami`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WhoamiResult {
+    /// The opened Mandates, in token order.
+    pub mandates: Vec<WhoamiMandate>,
+    /// The positions in [`TOKEN_VAR`] of the presented tokens that are not
+    /// valid, ascending.
+    pub invalid_tokens: Vec<usize>,
+}
+
+/// One opened Mandate in a [`WhoamiResult`], taken from its authenticated
+/// record. Never holds a Credential, token, token hash or store key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WhoamiMandate {
+    /// Short ID.
+    pub id: String,
+    /// Name.
+    pub name: String,
+    /// The covered Accounts, without their Credentials.
+    pub accounts: Vec<ListedAccount>,
+    /// The Grants.
+    pub grants: Vec<Grant>,
+}
+
 /// Result of `list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MailboxList {
@@ -233,6 +276,8 @@ pub enum Outcome {
     Mandates(MandateListing),
     /// Result of `mandate delete`.
     Deleted(DeletedMandate),
+    /// Result of `whoami`.
+    Whoami(WhoamiResult),
 }
 
 /// A structured error. Never carries a token or a Credential.
@@ -240,7 +285,8 @@ pub enum Outcome {
 pub enum CoreError {
     /// No Agent Token was presented.
     MissingToken,
-    /// The token is malformed, unknown, or its record does not open.
+    /// No presented token is valid: each is malformed, unknown, or its
+    /// record does not open.
     InvalidToken,
     /// The Policy has no Grant for the operation on the Account.
     Denied {
@@ -351,10 +397,19 @@ pub enum CoreError {
     },
     /// The Mandate store could not be read or written.
     StoreUnavailable,
-    /// The Mandate covers several Accounts and the command names none.
+    /// The presented Mandates reach several Accounts and the command names
+    /// none (or names one that is not acceptable, such as an empty login).
     AccountRequired {
-        /// Login names of the covered Accounts.
+        /// Login names of the reachable Accounts.
         accounts: Vec<String>,
+    },
+    /// Two or more presented Mandates cover the target Account. agent-mail
+    /// never picks one; nothing was checked or connected.
+    AmbiguousMandate {
+        /// Login name of the Account.
+        account: String,
+        /// Short IDs of the Mandates covering it, in token order.
+        mandates: Vec<String>,
     },
     /// `mandate create` was run without a terminal a human can use.
     InteractiveTerminalRequired,
@@ -404,6 +459,9 @@ pub struct ErrorBody {
     /// Login names of the Accounts to choose from, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<String>>,
+    /// Short IDs of the Mandates involved, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mandates: Option<Vec<String>>,
     /// The Mandate ID involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -441,6 +499,7 @@ impl CoreError {
             Self::Protocol { .. } => "server_error",
             Self::StoreUnavailable => "store_unavailable",
             Self::AccountRequired { .. } => "account_required",
+            Self::AmbiguousMandate { .. } => "ambiguous_mandate",
             Self::InteractiveTerminalRequired => "interactive_terminal_required",
             Self::SandboxDetected => "sandbox_detected",
             Self::Aborted => "aborted",
@@ -465,6 +524,7 @@ impl CoreError {
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -481,6 +541,7 @@ impl CoreError {
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -521,6 +582,7 @@ impl CoreError {
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -545,6 +607,7 @@ impl CoreError {
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -558,6 +621,7 @@ impl CoreError {
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -573,12 +637,30 @@ impl CoreError {
                 account: None,
                 mailbox: None,
                 accounts: Some(accounts.clone()),
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
                 message: format!(
-                    "this agent token covers several accounts ({}) and choosing one is not supported yet; ask the human for a token whose Mandate covers a single account",
+                    "the presented agent tokens reach several accounts ({}) and the command names none of them, so nothing was done; run the command again with --account <LOGIN>, naming one of these accounts",
                     accounts.join(", ")
+                ),
+            };
+        }
+        if let Self::AmbiguousMandate { account, mandates } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: None,
+                account: Some(account.clone()),
+                mailbox: None,
+                accounts: None,
+                mandates: Some(mandates.clone()),
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message: format!(
+                    "the presented Mandates {} all cover account {account}, and agent-mail never picks one, so nothing was done; set AGENT_MAIL_TOKEN to only one of these tokens, or ask the human to delete one of these Mandates with `agent-mail mandate delete <ID>`",
+                    mandates.join(", ")
                 ),
             };
         }
@@ -589,6 +671,7 @@ impl CoreError {
                 account: None,
                 mailbox: None,
                 accounts: None,
+                mandates: None,
                 id: Some(id.clone()),
                 deleted: None,
                 unreadable: None,
@@ -620,6 +703,7 @@ impl CoreError {
                 account: None,
                 mailbox: None,
                 accounts: None,
+                mandates: None,
                 id: Some(id.clone()),
                 deleted: Some(*deleted),
                 unreadable: Some(*unreadable),
@@ -635,6 +719,7 @@ impl CoreError {
                 account: None,
                 mailbox: None,
                 accounts: None,
+                mandates: None,
                 id: None,
                 deleted: None,
                 unreadable: None,
@@ -649,7 +734,7 @@ impl CoreError {
                 None,
                 "no agent token presented; set AGENT_MAIL_TOKEN".to_string(),
             ),
-            Self::InvalidToken => (None, None, "the agent token is not valid; check AGENT_MAIL_TOKEN or ask the human for a new token"
+            Self::InvalidToken => (None, None, "no agent token in AGENT_MAIL_TOKEN is valid; check AGENT_MAIL_TOKEN or ask the human for a new token"
                     .to_string()),
             Self::Denied {
                 operation, account, ..
@@ -726,6 +811,7 @@ impl CoreError {
                     .to_string(),
             ),
             Self::AccountRequired { .. }
+            | Self::AmbiguousMandate { .. }
             | Self::MailboxNotFound { .. }
             | Self::StaleReference { .. }
             | Self::MessageNotFound { .. }
@@ -768,6 +854,7 @@ impl CoreError {
             account,
             mailbox: None,
             accounts: None,
+            mandates: None,
             id: None,
             deleted: None,
             unreadable: None,
@@ -776,23 +863,96 @@ impl CoreError {
     }
 }
 
-/// Runs `command` with the process environment `env`. Agent commands read
-/// the presented token from [`TOKEN_VAR`]; `mandate create` reads no token
-/// and checks `env` only for agent sandbox indicators.
+/// What [`execute_reporting`] returns: the command's result, and next to
+/// it the invalid presented tokens that were ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// The result or the structured error.
+    pub result: Result<Outcome, CoreError>,
+    /// Positions in [`TOKEN_VAR`] of presented tokens that are not valid and
+    /// were ignored while at least one other token opened its Mandate,
+    /// ascending. Empty when every token opened, when the command reads no
+    /// token, for `whoami` (which reports them in its result) and when no
+    /// token at all opened (that is the `invalid_token` error).
+    pub invalid_tokens: Vec<usize>,
+}
+
+/// A warning shown next to a result or error. Never holds token text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Warning {
+    /// Stable machine-readable code.
+    pub code: &'static str,
+    /// Positions in [`TOKEN_VAR`] the warning is about.
+    pub positions: Vec<usize>,
+    /// Human-readable explanation naming the next step.
+    pub message: String,
+}
+
+impl Warning {
+    /// The `invalid_token` warning for the ignored tokens at `positions`,
+    /// or `None` when there are none.
+    pub fn invalid_tokens(positions: &[usize]) -> Option<Self> {
+        let list = positions
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = match positions {
+            [] => return None,
+            [_] => format!(
+                "the token at position {list} of AGENT_MAIL_TOKEN is not valid and was ignored; check it, or ask the human for a new token"
+            ),
+            _ => format!(
+                "the tokens at positions {list} of AGENT_MAIL_TOKEN are not valid and were ignored; check them, or ask the human for new tokens"
+            ),
+        };
+        Some(Self {
+            code: "invalid_token",
+            positions: positions.to_vec(),
+            message,
+        })
+    }
+}
+
+/// Runs `command` with the process environment `env`, dropping the
+/// invalid-token report. See [`execute_reporting`].
 pub fn execute(
     env: &HashMap<String, String>,
     command: &Command,
     context: &Context<'_>,
 ) -> Result<Outcome, CoreError> {
+    execute_reporting(env, command, context).result
+}
+
+/// Runs `command` with the process environment `env`. Agent commands read
+/// the presented tokens from [`TOKEN_VAR`]; `mandate create` reads no token
+/// and checks `env` only for agent sandbox indicators.
+pub fn execute_reporting(
+    env: &HashMap<String, String>,
+    command: &Command,
+    context: &Context<'_>,
+) -> Report {
+    let mut invalid_tokens = Vec::new();
+    let result = run_command(env, command, context, &mut invalid_tokens);
+    Report {
+        result,
+        invalid_tokens,
+    }
+}
+
+fn run_command(
+    env: &HashMap<String, String>,
+    command: &Command,
+    context: &Context<'_>,
+    invalid: &mut Vec<usize>,
+) -> Result<Outcome, CoreError> {
     match command {
-        Command::List => {
+        Command::List { account } => {
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
-                list(&mandate, context, &mut trail)
-            });
+            let result = open_for_agent(token, context, invalid)
+                .and_then(|presented| list(&presented, account.as_deref(), context, &mut trail));
             let entry = audit::Entry {
                 time,
                 mandate: trail.mandate,
@@ -818,13 +978,12 @@ pub fn execute(
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Mailboxes)
         }
-        Command::Search(query) => {
+        Command::Search { query, account } => {
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
-                search(&mandate, query, context, &mut trail)
+            let result = open_for_agent(token, context, invalid).and_then(|presented| {
+                search(&presented, query, account.as_deref(), context, &mut trail)
             });
             let found = result.as_ref().ok();
             let entry = audit::Entry {
@@ -858,10 +1017,8 @@ pub fn execute(
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
-                read(&mandate, reference, *full, context, &mut trail)
-            });
+            let result = open_for_agent(token, context, invalid)
+                .and_then(|presented| read(&presented, reference, *full, context, &mut trail));
             let entry = audit::Entry {
                 time,
                 mandate: trail.mandate,
@@ -897,9 +1054,8 @@ pub fn execute(
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
-                flag(&mandate, reference, *action, name, context, &mut trail)
+            let result = open_for_agent(token, context, invalid).and_then(|presented| {
+                flag(&presented, reference, *action, name, context, &mut trail)
             });
             let entry = audit::Entry {
                 time,
@@ -932,9 +1088,8 @@ pub fn execute(
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
-                move_message(&mandate, reference, target, context, &mut trail)
+            let result = open_for_agent(token, context, invalid).and_then(|presented| {
+                move_message(&presented, reference, target, context, &mut trail)
             });
             // The reference, and on success the new reference the server
             // reported: never a subject or address.
@@ -972,18 +1127,19 @@ pub fn execute(
             subject,
             body,
             reply_to,
+            account,
         } => {
             let time = rfc3339_utc(now_secs());
             let mut trail = Trail::default();
             let token = env.get(TOKEN_VAR).map(String::as_str);
-            let result = open_mandate(token, context).and_then(|mandate| {
-                trail.mandate = Some(mandate.id.clone());
+            let result = open_for_agent(token, context, invalid).and_then(|presented| {
                 draft(
-                    &mandate,
+                    &presented,
                     to,
                     subject.as_deref(),
                     body,
                     reply_to.as_ref(),
+                    account.as_deref(),
                     context,
                     &mut trail,
                 )
@@ -1031,7 +1187,34 @@ pub fn execute(
         }
         Command::MandateList => mandate_list(context).map(Outcome::Mandates),
         Command::MandateDelete { id } => mandate_delete(id, context).map(Outcome::Deleted),
+        Command::Whoami => {
+            whoami(env.get(TOKEN_VAR).map(String::as_str), context).map(Outcome::Whoami)
+        }
     }
+}
+
+/// The opened Mandates of the presented tokens, from their authenticated
+/// records, with the positions of the invalid ones. Needs no Grant, touches
+/// no mail and writes no audit entry.
+fn whoami(token: Option<&str>, context: &Context<'_>) -> Result<WhoamiResult, CoreError> {
+    let presented = open_presented(token, context)?;
+    let mandates = presented
+        .mandates
+        .iter()
+        .map(|mandate| {
+            let listing = Listing::of(mandate);
+            WhoamiMandate {
+                id: listing.id,
+                name: listing.name,
+                accounts: listing.accounts,
+                grants: listing.grants,
+            }
+        })
+        .collect();
+    Ok(WhoamiResult {
+        mandates,
+        invalid_tokens: presented.invalid,
+    })
 }
 
 /// Lists what the store holds from each record's clear metadata. No token
@@ -1163,28 +1346,161 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn open_mandate(token: Option<&str>, context: &Context<'_>) -> Result<Mandate, CoreError> {
-    let token = match token {
-        None | Some("") => return Err(CoreError::MissingToken),
-        Some(text) => AgentToken::parse(text).map_err(|_| CoreError::InvalidToken)?,
+/// Whether `login` is acceptable as a target Account named by the Agent:
+/// non-empty and without CR, LF or NUL.
+pub fn is_valid_account(login: &str) -> bool {
+    !login.is_empty() && !login.contains(['\r', '\n', '\0'])
+}
+
+/// The presented tokens, opened. Holds no token text.
+struct Presented {
+    /// The opened Mandates, in token order.
+    mandates: Vec<Mandate>,
+    /// Positions in [`TOKEN_VAR`] of the invalid tokens, ascending.
+    invalid: Vec<usize>,
+}
+
+/// Opens every presented token in `raw`: the fields split on `,`, trimmed
+/// of ASCII whitespace, empty fields skipped, repeated tokens counted once.
+/// Fails with `missing_token` when no field holds a token, and with
+/// `store_unavailable` when the store cannot be read. Any other failure to
+/// open a token only records its 1-based field position.
+fn open_presented(raw: Option<&str>, context: &Context<'_>) -> Result<Presented, CoreError> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut presented = Presented {
+        mandates: Vec::new(),
+        invalid: Vec::new(),
     };
-    let record = context
+    for (index, field) in raw.unwrap_or_default().split(',').enumerate() {
+        let text = field.trim_matches(|c: char| c.is_ascii_whitespace());
+        if text.is_empty() || seen.contains(&text) {
+            continue;
+        }
+        seen.push(text);
+        match open_token(text, context)? {
+            Some(mandate) => presented.mandates.push(mandate),
+            None => presented.invalid.push(index + 1),
+        }
+    }
+    if seen.is_empty() {
+        return Err(CoreError::MissingToken);
+    }
+    Ok(presented)
+}
+
+/// The Mandate `text` opens, or `None` if it is malformed, unknown or its
+/// record does not open.
+fn open_token(text: &str, context: &Context<'_>) -> Result<Option<Mandate>, CoreError> {
+    let Ok(token) = AgentToken::parse(text) else {
+        return Ok(None);
+    };
+    let Some(record) = context
         .store
         .get(&token.store_key())
         .map_err(|_| CoreError::StoreUnavailable)?
-        .ok_or(CoreError::InvalidToken)?;
-    seal::open(&token, &record).map_err(|_| CoreError::InvalidToken)
+    else {
+        return Ok(None);
+    };
+    Ok(seal::open(&token, &record).ok())
+}
+
+/// The presented tokens for an Agent command: at least one must open, or
+/// the call fails with `invalid_token`. The positions of the invalid ones
+/// go to `invalid` only when another token opened.
+fn open_for_agent(
+    raw: Option<&str>,
+    context: &Context<'_>,
+    invalid: &mut Vec<usize>,
+) -> Result<Presented, CoreError> {
+    let presented = open_presented(raw, context)?;
+    if presented.mandates.is_empty() {
+        return Err(CoreError::InvalidToken);
+    }
+    invalid.clone_from(&presented.invalid);
+    Ok(presented)
+}
+
+impl Presented {
+    /// The logins of the Accounts the opened Mandates cover, deduplicated,
+    /// by token position, then by Account order inside each Mandate.
+    fn reachable(&self) -> Vec<String> {
+        let mut logins: Vec<String> = Vec::new();
+        for account in self.mandates.iter().flat_map(|m| &m.accounts) {
+            if !logins.contains(&account.login) {
+                logins.push(account.login.clone());
+            }
+        }
+        logins
+    }
+
+    /// The target Account of a command that takes `--account`: the named
+    /// login, or with none the only reachable Account. Never merges or
+    /// guesses between Accounts.
+    fn target(&self, named: Option<&str>) -> Result<String, CoreError> {
+        match named {
+            Some(login) if is_valid_account(login) => Ok(login.to_string()),
+            // An unacceptable login is treated as no choice: the CLI
+            // refuses it while parsing; other adapters may reach this.
+            Some(_) => Err(CoreError::AccountRequired {
+                accounts: self.reachable(),
+            }),
+            None => {
+                let reachable = self.reachable();
+                match reachable.as_slice() {
+                    [only] => Ok(only.clone()),
+                    _ => Err(CoreError::AccountRequired {
+                        accounts: reachable,
+                    }),
+                }
+            }
+        }
+    }
+
+    /// The selected Mandate for `login` and its Account with exactly this
+    /// login, recorded in `trail`; `None` when no opened Mandate covers it.
+    /// Fails with `ambiguous_mandate` when several do, before any Grant is
+    /// looked at: Grants never combine across Mandates.
+    fn select(
+        &self,
+        login: &str,
+        trail: &mut Trail,
+    ) -> Result<Option<(&Mandate, &Account)>, CoreError> {
+        let covering: Vec<(&Mandate, &Account)> = self
+            .mandates
+            .iter()
+            .filter_map(|m| m.account(login).map(|a| (m, a)))
+            .collect();
+        match covering.as_slice() {
+            [] => Ok(None),
+            [(mandate, account)] => {
+                trail.mandate = Some(mandate.id.clone());
+                Ok(Some((mandate, account)))
+            }
+            several => Err(CoreError::AmbiguousMandate {
+                account: login.to_string(),
+                mandates: several.iter().map(|(m, _)| m.id.clone()).collect(),
+            }),
+        }
+    }
 }
 
 fn list(
-    mandate: &Mandate,
+    presented: &Presented,
+    named: Option<&str>,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<MailboxList, CoreError> {
-    let account = single_account(mandate)?;
-    let login = account.login.clone();
+    let login = presented.target(named)?;
     trail.account = Some(login.clone());
-    // Deny by default, before any connection is made.
+    // Deny by default, before any connection is made: an Account no opened
+    // Mandate covers is denied, and only the selected Mandate's Grants count.
+    let Some((mandate, account)) = presented.select(&login, trail)? else {
+        return Err(CoreError::Denied {
+            operation: Operation::List,
+            account: login,
+            mailbox: None,
+        });
+    };
     if mandate
         .policy
         .grants_for(Operation::List, &login)
@@ -1211,17 +1527,6 @@ fn list(
         account: login,
         mailboxes,
     })
-}
-
-/// The Mandate's only Account. One Account per command until `--account`
-/// arrives (ticket 13); never merge Accounts silently.
-fn single_account(mandate: &Mandate) -> Result<&Account, CoreError> {
-    match mandate.accounts.as_slice() {
-        [account] => Ok(account),
-        accounts => Err(CoreError::AccountRequired {
-            accounts: accounts.iter().map(|a| a.login.clone()).collect(),
-        }),
-    }
 }
 
 /// The structured error for a connector failure of `operation` on
@@ -1276,12 +1581,16 @@ fn connector_error(
 }
 
 fn read(
-    mandate: &Mandate,
+    presented: &Presented,
     reference: &MessageRef,
     full: bool,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<ReadResult, CoreError> {
+    // Selected first, so the audit line names the selected Mandate
+    // whatever fails next; an ambiguity or an uncovered Account is reported
+    // below, still before any Grant check or connection.
+    let selection = presented.select(&reference.account, trail);
     // Checked again here, not only by the CLI parser: no CR, LF or NUL may
     // reach the server, and the UID must be a real one.
     if !read::is_valid_reference(reference) {
@@ -1293,18 +1602,14 @@ fn read(
     let mailbox = reference.mailbox.as_str();
     trail.account = Some(login.to_string());
     // Deny by default, before any connection is made. The Account is the
-    // Mandate's Account with exactly this login, so a reference naming an
-    // uncovered Account never uses another Account's Credential.
+    // selected Mandate's Account with exactly this login, so a reference
+    // naming an uncovered Account never uses another Account's Credential.
     let denied = || CoreError::Denied {
         operation: Operation::Read,
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let account = mandate
-        .accounts
-        .iter()
-        .find(|a| a.login == login)
-        .ok_or_else(denied)?;
+    let (mandate, account) = selection?.ok_or_else(denied)?;
     if !mandate
         .policy
         .allows_mailbox(Operation::Read, login, mailbox)
@@ -1345,13 +1650,17 @@ fn read(
 }
 
 fn flag(
-    mandate: &Mandate,
+    presented: &Presented,
     reference: &MessageRef,
     action: FlagAction,
     name: &str,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<FlagResult, CoreError> {
+    // Selected first, so the audit line names the selected Mandate
+    // whatever fails next; an ambiguity or an uncovered Account is reported
+    // below, still before any Grant check or connection.
+    let selection = presented.select(&reference.account, trail);
     // Checked again here, not only by the CLI parser: no CR, LF or NUL may
     // reach the server, and the UID must be a real one.
     if !read::is_valid_reference(reference) {
@@ -1366,18 +1675,14 @@ fn flag(
     // is refused before any connection, and never sent or echoed.
     let flag = Flag::parse(name).ok_or(CoreError::UnsupportedFlag)?;
     // Deny by default, before any connection is made. The Account is the
-    // Mandate's Account with exactly this login, so a reference naming an
-    // uncovered Account never uses another Account's Credential.
+    // selected Mandate's Account with exactly this login, so a reference
+    // naming an uncovered Account never uses another Account's Credential.
     let denied = || CoreError::Denied {
         operation: Operation::Flag,
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let account = mandate
-        .accounts
-        .iter()
-        .find(|a| a.login == login)
-        .ok_or_else(denied)?;
+    let (mandate, account) = selection?.ok_or_else(denied)?;
     if !mandate
         .policy
         .allows_mailbox(Operation::Flag, login, mailbox)
@@ -1404,12 +1709,16 @@ fn flag(
 }
 
 fn move_message(
-    mandate: &Mandate,
+    presented: &Presented,
     reference: &MessageRef,
     target: &SearchText,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<MoveResult, CoreError> {
+    // Selected first, so the audit line names the selected Mandate
+    // whatever fails next; an ambiguity or an uncovered Account is reported
+    // below, still before any Grant check or connection.
+    let selection = presented.select(&reference.account, trail);
     // Checked again here, not only by the CLI parser: no CR, LF or NUL may
     // reach the server, and the UID must be a real one.
     if !read::is_valid_reference(reference) {
@@ -1429,18 +1738,14 @@ fn move_message(
     }
     // Deny by default, before any connection is made: `move` must be
     // granted on both the source and the target. The Account is the
-    // Mandate's Account with exactly this login, so a reference naming an
-    // uncovered Account never uses another Account's Credential.
+    // selected Mandate's Account with exactly this login, so a reference
+    // naming an uncovered Account never uses another Account's Credential.
     let denied = |mailbox: &str| CoreError::Denied {
         operation: Operation::Move,
         account: login.to_string(),
         mailbox: Some(mailbox.to_string()),
     };
-    let account = mandate
-        .accounts
-        .iter()
-        .find(|a| a.login == login)
-        .ok_or_else(|| denied(mailbox))?;
+    let (mandate, account) = selection?.ok_or_else(|| denied(mailbox))?;
     for name in [mailbox, target] {
         if !mandate.policy.allows_mailbox(Operation::Move, login, name) {
             return Err(denied(name));
@@ -1483,15 +1788,30 @@ fn move_message(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draft(
-    mandate: &Mandate,
+    presented: &Presented,
     to: &[String],
     subject: Option<&str>,
     body: &str,
     reply_to: Option<&MessageRef>,
+    named: Option<&str>,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<DraftResult, CoreError> {
+    // Resolved and selected first, so the audit line names the selected
+    // Mandate whatever fails next; its errors are reported below, still
+    // before any Grant check or connection.
+    let selection = match reply_to {
+        Some(reference) => Ok((
+            reference.account.clone(),
+            presented.select(&reference.account, trail),
+        )),
+        None => presented.target(named).map(|login| {
+            let selected = presented.select(&login, trail);
+            (login, selected)
+        }),
+    };
     // Checked again here, not only by the CLI parser: these are the
     // header-injection surface. The values are never echoed.
     if to.is_empty() || !to.iter().all(|a| draft::is_valid_address(a)) {
@@ -1519,15 +1839,15 @@ fn draft(
             let login = reference.account.as_str();
             trail.account = Some(login.to_string());
             // A reply reads the original: `read` on its mailbox, of the
-            // Mandate's Account with exactly this login, so a reference
-            // naming an uncovered Account never uses another Account's
-            // Credential.
+            // selected Mandate's Account with exactly this login, so a
+            // reference naming an uncovered Account never uses another
+            // Account's Credential.
             let read_denied = || CoreError::Denied {
                 operation: Operation::Read,
                 account: login.to_string(),
                 mailbox: Some(reference.mailbox.clone()),
             };
-            let account = mandate.account(login).ok_or_else(read_denied)?;
+            let (mandate, account) = selection?.1?.ok_or_else(read_denied)?;
             require_draft_grant(mandate, login)?;
             if !mandate
                 .policy
@@ -1538,9 +1858,16 @@ fn draft(
             account
         }
         None => {
-            let account = single_account(mandate)?;
-            trail.account = Some(account.login.clone());
-            require_draft_grant(mandate, &account.login)?;
+            let (login, selected) = selection?;
+            trail.account = Some(login.clone());
+            let Some((mandate, account)) = selected? else {
+                return Err(CoreError::Denied {
+                    operation: Operation::Draft,
+                    account: login,
+                    mailbox: None,
+                });
+            };
+            require_draft_grant(mandate, &login)?;
             account
         }
     };
@@ -1634,18 +1961,27 @@ fn require_draft_grant(mandate: &Mandate, login: &str) -> Result<(), CoreError> 
 }
 
 fn search(
-    mandate: &Mandate,
+    presented: &Presented,
     query: &Query,
+    named: Option<&str>,
     context: &Context<'_>,
     trail: &mut Trail,
 ) -> Result<SearchResult, CoreError> {
-    let account = single_account(mandate)?;
-    let login = account.login.clone();
+    let login = presented.target(named)?;
     trail.account = Some(login.clone());
+    let mailbox = query.mailbox.as_str();
+    // An Account no opened Mandate covers is denied before any connection,
+    // and only the selected Mandate's Grants count.
+    let Some((mandate, account)) = presented.select(&login, trail)? else {
+        return Err(CoreError::Denied {
+            operation: Operation::Search,
+            account: login,
+            mailbox: Some(mailbox.to_string()),
+        });
+    };
     // The query's values were checked when it was built (see
     // `crate::search`); the mailbox is the Agent's decoded name, compared
     // exactly. Deny by default, before any connection is made.
-    let mailbox = query.mailbox.as_str();
     if !mandate
         .policy
         .allows_mailbox(Operation::Search, &login, mailbox)
@@ -1842,6 +2178,10 @@ mod tests {
             CoreError::StoreUnavailable,
             CoreError::AccountRequired {
                 accounts: vec![account.clone(), "other@example.test".to_string()],
+            },
+            CoreError::AmbiguousMandate {
+                account: account.clone(),
+                mandates: vec!["aaaa1111".to_string(), "bbbb2222".to_string()],
             },
             CoreError::InteractiveTerminalRequired,
             CoreError::SandboxDetected,
