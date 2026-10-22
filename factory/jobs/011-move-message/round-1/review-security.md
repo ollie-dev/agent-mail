@@ -1,0 +1,14 @@
+VERDICT: PASS
+
+## Findings
+- [nit] src/core.rs:1272: the core rejects CR, LF and NUL in the target (through `SearchText`), but only the CLI parser rejects an empty target. When the MCP adapter calls the core directly with `move` granted on `*`, an empty target gets past the Policy check and goes to the server as `""`. The server refuses it and the call fails as `mailbox_not_found`, so nothing is harmed. Still, rejecting an empty target in `move_message` (as `is_valid_reference` does for the mailbox) would keep the core's validation the same for every adapter.
+- [nit] src/imap.rs:631: every `NO` to `UID MOVE` or `UID COPY` (over quota, no permission, and so on) becomes `TargetNotFound`, which reaches the Agent as `mailbox_not_found` for the target. The spec asks for this mapping, and it fails closed with nothing moved. The error just says less than it could. A later change could keep `mailbox_not_found` for `[TRYCREATE]` only.
+
+## Checked, no issue
+- Credentials: IMAP errors are mapped with `map_err(|_| ...)`, so server text never reaches the output. The audit entry holds only references, mailbox names and the target. AC7 asserts that the log never contains the Credential, the Agent Token, its hash, subjects or addresses. The commit 97145c3 adds no secrets, and the fixtures reuse the existing fake Credential.
+- Access policy: the default is deny. The checks run in this order before any connection: reference re-validated in the core, then the same-mailbox check, then the Account matched by exact login (an uncovered Account is denied and never uses another Account's Credential), then `move` checked on both the source and the target with exact matching or `*`. `trail.allowed` is set only after both checks pass. AC2 and AC3 assert there is no connection.
+- Injection: `utf7::encode` sends only printable ASCII as-is and base64-encodes everything else, including control characters. `quoted` escapes `"` and `\`. Because the encoding is injective, a target cannot alias a different decoded name. The source goes through async-imap's `select`, as in the existing read and flag paths. UIDs are `u32` and are formatted, not interpolated from strings.
+- Expunge safety: capabilities are read with `CAPABILITY` after login. Without MOVE or UIDPLUS the call refuses before `SELECT`. The fallback uses `UID EXPUNGE <uid>` only. `CLOSE` and plain `EXPUNGE` are never sent, and the session ends with LOGOUT only. AC4 uses the human's pre-existing `\Deleted` message to catch a plain expunge.
+- Stale or missing UID: UIDVALIDITY is checked after `SELECT` and before any fetch. The existence check fetches only `(UID FLAGS)`.
+- COPYUID parsing: a code is accepted only when it names exactly the one source UID, and ranges are never expanded. The values a hostile server could put there are only `u32`s inside the returned reference.
+- No new dependencies (Cargo.toml and Cargo.lock are unchanged). `cargo test` passes in the worktree.
