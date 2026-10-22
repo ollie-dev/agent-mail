@@ -653,7 +653,7 @@ fn ac7_no_command_edits_or_deletes_a_draft() {
     assert_eq!(
         names,
         [
-            "list", "search", "read", "flag", "move", "draft", "mandate", "help"
+            "list", "search", "read", "flag", "move", "draft", "whoami", "mandate", "help"
         ]
     );
 
@@ -673,6 +673,7 @@ fn ac7_no_command_edits_or_deletes_a_draft() {
             "--subject <TEXT>",
             "--body <TEXT>",
             "--reply-to <REF>",
+            "--account <LOGIN>",
             "--text",
             "-h, --help"
         ]
@@ -841,6 +842,7 @@ fn header_injection_values_are_refused_by_the_cli_and_the_core() {
                 subject: Some("Hi".to_string()),
                 body: "x".to_string(),
                 reply_to: None,
+                account: None,
             },
             "to",
             "Carol",
@@ -851,6 +853,7 @@ fn header_injection_values_are_refused_by_the_cli_and_the_core() {
                 subject: Some("Hi".to_string()),
                 body: "x".to_string(),
                 reply_to: None,
+                account: None,
             },
             "to",
             "Bcc",
@@ -861,6 +864,7 @@ fn header_injection_values_are_refused_by_the_cli_and_the_core() {
                 subject: Some("Hi\r\nBcc: x@y.z".to_string()),
                 body: "x".to_string(),
                 reply_to: None,
+                account: None,
             },
             "subject",
             "Bcc",
@@ -871,6 +875,7 @@ fn header_injection_values_are_refused_by_the_cli_and_the_core() {
                 subject: None,
                 body: "x".to_string(),
                 reply_to: None,
+                account: None,
             },
             "subject",
             "\"subject\":\"",
@@ -881,6 +886,7 @@ fn header_injection_values_are_refused_by_the_cli_and_the_core() {
                 subject: Some("Hi".to_string()),
                 body: "secret\0body".to_string(),
                 reply_to: None,
+                account: None,
             },
             "body",
             "secret",
