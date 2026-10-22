@@ -26,16 +26,28 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 pub use crate::core::{Context, TOKEN_VAR};
-use crate::core::{CoreError, MandateListing, Outcome};
+use crate::core::{CoreError, MandateListing, Outcome, Warning, WhoamiResult};
 use crate::flag::FlagAction;
+use crate::mandate::Grant;
 use crate::read::ReadResult;
+use crate::seal::ListedAccount;
 use crate::search::MessageRef;
 use crate::search::{Date, Limit, Query, SearchResult, SearchText};
 use crate::terminal::escape_controls;
 
 /// Command-line interface of the `agent-mail` binary.
 #[derive(Debug, Parser)]
-#[command(name = "agent-mail", version, about, arg_required_else_help = true)]
+#[command(
+    name = "agent-mail",
+    version,
+    about,
+    arg_required_else_help = true,
+    after_help = "Agent commands read one or more agent tokens from AGENT_MAIL_TOKEN, comma-separated. \
+Each command works on one account: name it with --account on list, search and draft (it may be left \
+out when the tokens reach only one account); read, flag, move and draft --reply-to take it from the \
+message reference. The one Mandate covering that account is used; grants never combine across \
+Mandates. Run `agent-mail whoami` to see what the tokens allow."
+)]
 pub struct Cli {
     /// Print human-readable text instead of JSON (for `search`, put it before the subcommand)
     #[arg(long)]
@@ -50,15 +62,19 @@ pub struct Cli {
 pub enum CliCommand {
     /// List the mailboxes this agent may access
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Prints JSON on stdout by
-    /// default; errors go to stderr as JSON with a stable `code`.
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// Prints JSON on stdout by default; errors go to stderr as JSON with a
+    /// stable `code`.
     List {
+        #[command(flatten)]
+        account: AccountChoice,
         #[command(flatten)]
         output: TextOutput,
     },
     /// Search one mailbox this agent may search, newest first
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Criteria combine with
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN
+    /// and works on the account given with --account. Criteria combine with
     /// AND; string criteria are case-insensitive substring matches. With no
     /// criterion every message matches. Prints one JSON object on stdout:
     /// account, mailbox, total (how many matched), more (whether more
@@ -70,7 +86,8 @@ pub enum CliCommand {
     Search(SearchArgs),
     /// Read one message by the reference `search` printed, without marking it seen
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `read` grant on
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
+    /// the account is the reference's. Needs a `read` grant on
     /// the reference's account and mailbox. Prints one JSON object on
     /// stdout: ref, account, mailbox, date, from, to, cc, subject,
     /// message_id, body (the plain-text part, or the HTML part converted to
@@ -82,7 +99,8 @@ pub enum CliCommand {
     Read(ReadArgs),
     /// Mark one message read or unread, or starred or unstarred, by the reference `search` printed
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `flag` grant on
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
+    /// the account is the reference's. Needs a `flag` grant on
     /// the reference's account and mailbox. Give exactly one of --set or
     /// --clear. Only two flags can be changed: `seen` (or `\Seen`), the
     /// message is read, and `flagged` (or `\Flagged`), the message is
@@ -96,7 +114,8 @@ pub enum CliCommand {
     Flag(FlagArgs),
     /// Move one message, by the reference `search` printed, to another mailbox of the same account
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `move` grant on
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
+    /// the account is the reference's. Needs a `move` grant on
     /// both mailboxes of the reference's account: the source the reference
     /// names and the target given with --to, a mailbox name as `agent-mail
     /// list` prints it. Prints one JSON object on stdout: ref, account,
@@ -111,7 +130,9 @@ pub enum CliCommand {
     Move(MoveArgs),
     /// Create a draft in the account's Drafts mailbox for the human to review and send, optionally as a reply
     ///
-    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `draft` grant on
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// The account is the one given with --account, or a reply's
+    /// reference's. Needs a `draft` grant on
     /// the account; a reply (--reply-to) also needs a `read` grant on the
     /// original's mailbox. --to is repeatable and takes bare addresses
     /// (local@domain, no display names). Give --subject for a new message,
@@ -128,6 +149,18 @@ pub enum CliCommand {
     /// agent-mail afterwards; the human reviews and sends them in their own
     /// mail client.
     Draft(DraftArgs),
+    /// Show what the presented agent tokens allow: each Mandate's ID, name, accounts and grants
+    ///
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN
+    /// and prints one JSON object on stdout: mandates, in token order, each
+    /// with id, name, accounts (login, host, port, tls) and grants
+    /// (operation, account, mailboxes), and invalid_tokens, the positions in
+    /// AGENT_MAIL_TOKEN of tokens that are not valid. Needs no grant, makes
+    /// no connection and never shows a credential or token.
+    Whoami {
+        #[command(flatten)]
+        output: TextOutput,
+    },
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -145,6 +178,27 @@ pub struct TextOutput {
     /// Print human-readable text instead of JSON
     #[arg(long)]
     pub text: bool,
+}
+
+/// The `--account` option of `list` and `search`.
+#[derive(Debug, Args)]
+pub struct AccountChoice {
+    /// The account to work on, by its login
+    ///
+    /// May be left out when the presented tokens reach only one account;
+    /// with several, the call fails with `account_required` and lists them.
+    #[arg(long, value_name = "LOGIN", value_parser = account_login)]
+    pub account: Option<String>,
+}
+
+fn account_login(value: &str) -> Result<String, crate::search::InvalidValue> {
+    if crate::core::is_valid_account(value) {
+        Ok(value.to_string())
+    } else {
+        Err(crate::search::InvalidValue(
+            "must not be empty or hold a line break or NUL",
+        ))
+    }
 }
 
 /// Options of `read`.
@@ -219,6 +273,13 @@ pub struct DraftArgs {
     /// Reply to this message, by its reference exactly as `agent-mail search` prints it in `ref`
     #[arg(long, value_name = "REF", value_parser = reference)]
     pub reply_to: Option<MessageRef>,
+    /// The account to work on, by its login; not allowed with --reply-to
+    ///
+    /// May be left out when the presented tokens reach only one account;
+    /// with several, the call fails with `account_required` and lists them.
+    /// A reply always works on the reference's account.
+    #[arg(long, value_name = "LOGIN", conflicts_with = "reply_to", value_parser = account_login)]
+    pub account: Option<String>,
     #[command(flatten)]
     pub output: TextOutput,
 }
@@ -265,6 +326,8 @@ fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
 /// Options of `search`.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
+    #[command(flatten)]
+    pub account: AccountChoice,
     /// Mailbox to search, as `agent-mail list` names it
     #[arg(long, value_name = "NAME", default_value = "INBOX", value_parser = search_text)]
     pub mailbox: SearchText,
@@ -417,11 +480,19 @@ where
     };
     let mut text = cli.text;
     let command = match cli.command {
-        CliCommand::List { output } => {
+        CliCommand::List { account, output } => {
             text |= output.text;
-            crate::core::Command::List
+            crate::core::Command::List {
+                account: account.account,
+            }
         }
-        CliCommand::Search(args) => crate::core::Command::Search(args.into()),
+        CliCommand::Search(mut args) => {
+            let account = args.account.account.take();
+            crate::core::Command::Search {
+                query: args.into(),
+                account,
+            }
+        }
         CliCommand::Read(args) => {
             text |= args.output.text;
             crate::core::Command::Read {
@@ -457,7 +528,12 @@ where
                 subject: args.subject,
                 body: args.body,
                 reply_to: args.reply_to,
+                account: args.account,
             }
+        }
+        CliCommand::Whoami { output } => {
+            text |= output.text;
+            crate::core::Command::Whoami
         }
         CliCommand::Mandate {
             text: mandate_text,
@@ -471,17 +547,25 @@ where
             }
         }
     };
-    match crate::core::execute(env, &command, context) {
+    let report = crate::core::execute_reporting(env, &command, context);
+    // The invalid-token warning comes first, before any error.
+    let mut stderr = Warning::invalid_tokens(&report.invalid_tokens)
+        .map(|warning| render_warning(&warning, text))
+        .unwrap_or_default();
+    match report.result {
         Ok(outcome) => RunOutput {
             stdout: render_outcome(&outcome, text),
-            stderr: String::new(),
+            stderr,
             code: 0,
         },
-        Err(error) => RunOutput {
-            stdout: String::new(),
-            stderr: render_error(&error, text),
-            code: 1,
-        },
+        Err(error) => {
+            stderr.push_str(&render_error(&error, text));
+            RunOutput {
+                stdout: String::new(),
+                stderr,
+                code: 1,
+            }
+        }
     }
 }
 
@@ -536,7 +620,66 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
             ),
         },
         Outcome::Deleted(deleted) => json_line(&serde_json::json!({ "deleted": deleted })),
+        Outcome::Whoami(result) if text => render_whoami(result),
+        Outcome::Whoami(result) => json_line(result),
     }
+}
+
+fn render_whoami(result: &WhoamiResult) -> String {
+    let mut out = String::new();
+    for m in &result.mandates {
+        out.push_str(&format!(
+            "{}  {}\n",
+            escape_controls(&m.id),
+            escape_controls(&m.name)
+        ));
+        push_accounts_and_grants(&mut out, &m.accounts, &m.grants);
+    }
+    for position in &result.invalid_tokens {
+        out.push_str(&format!(
+            "token {position} of AGENT_MAIL_TOKEN is not valid and was ignored\n"
+        ));
+    }
+    out
+}
+
+/// The `  account ...` and `  grant ...` lines of a Mandate, escaped.
+fn push_accounts_and_grants(out: &mut String, accounts: &[ListedAccount], grants: &[Grant]) {
+    for a in accounts {
+        out.push_str(&format!(
+            "  account {} ({}:{}, {})\n",
+            escape_controls(&a.login),
+            escape_controls(&a.host),
+            a.port,
+            a.tls.as_str()
+        ));
+    }
+    for g in grants {
+        let mailboxes: Vec<String> = g
+            .mailboxes
+            .iter()
+            .map(|p| escape_controls(&String::from(p.clone())))
+            .collect();
+        out.push_str(&format!(
+            "  grant {} on {}: {}\n",
+            g.operation.as_str(),
+            escape_controls(&g.account),
+            mailboxes.join(", ")
+        ));
+    }
+}
+
+fn render_warning(warning: &Warning, text: bool) -> String {
+    if text {
+        return format!("warning: {}: {}\n", warning.code, warning.message);
+    }
+    // Serialised from the struct, so the keys keep the order `code`,
+    // `positions`, `message`.
+    #[derive(serde::Serialize)]
+    struct Wrapped<'a> {
+        warning: &'a Warning,
+    }
+    json_line(&Wrapped { warning })
 }
 
 fn json_line(value: &impl serde::Serialize) -> String {
@@ -616,28 +759,7 @@ fn render_listing(listing: &MandateListing) -> String {
             escape_controls(&m.name),
             escape_controls(&m.created)
         ));
-        for a in &m.accounts {
-            out.push_str(&format!(
-                "  account {} ({}:{}, {})\n",
-                escape_controls(&a.login),
-                escape_controls(&a.host),
-                a.port,
-                a.tls.as_str()
-            ));
-        }
-        for g in &m.grants {
-            let mailboxes: Vec<String> = g
-                .mailboxes
-                .iter()
-                .map(|p| escape_controls(&String::from(p.clone())))
-                .collect();
-            out.push_str(&format!(
-                "  grant {} on {}: {}\n",
-                g.operation.as_str(),
-                escape_controls(&g.account),
-                mailboxes.join(", ")
-            ));
-        }
+        push_accounts_and_grants(&mut out, &m.accounts, &m.grants);
     }
     match listing.unreadable {
         0 => {}
@@ -655,10 +777,8 @@ fn render_error(error: &CoreError, text: bool) -> String {
         // The message may echo untrusted input, such as a Mandate ID.
         return format!("error: {}: {}\n", body.code, escape_controls(&body.message));
     }
-    let mut out = serde_json::to_string(&serde_json::json!({ "error": body }))
-        .expect("errors always serialise");
-    out.push('\n');
-    out
+    // Through `json!`, so the keys are sorted, as in every error object.
+    json_line(&serde_json::json!({ "error": body }))
 }
 
 #[cfg(test)]
