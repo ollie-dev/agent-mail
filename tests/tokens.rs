@@ -794,3 +794,83 @@ fn ac1_core_refuses_unacceptable_account_values_from_other_adapters() {
     }
     assert_eq!(env.server.connections(), 0);
 }
+
+#[test]
+fn ac4_uncovered_account_denial_points_to_whoami_not_to_a_grant() {
+    let env = Env::new();
+    let tw = env.add(
+        "aaaa1111",
+        &[LOGIN],
+        vec![grant(Operation::Search, &["INBOX"])],
+    );
+    let other = inbox_ref(OTHER_LOGIN);
+    for (args, operation) in [
+        (&["list", "--account", OTHER_LOGIN][..], "list"),
+        (&["search", "--account", OTHER_LOGIN], "search"),
+        (&["read", &other], "read"),
+        (&["flag", &other, "--set", "seen"], "flag"),
+        (&["move", &other, "--to", "Archive"], "move"),
+        (
+            &[
+                "draft",
+                "--account",
+                OTHER_LOGIN,
+                "--to",
+                "carol@example.com",
+                "--subject",
+                "S",
+                "--body",
+                "B",
+            ],
+            "draft",
+        ),
+        (
+            &[
+                "draft",
+                "--reply-to",
+                &other,
+                "--to",
+                "carol@example.com",
+                "--body",
+                "B",
+            ],
+            "read",
+        ),
+    ] {
+        let out = env.run(args, Some(&tw));
+        assert_eq!(out.code, 1, "{args:?}: {out:?}");
+        let error = stderr_error(&out);
+        assert_eq!(error["code"], "denied", "{args:?}");
+        assert_eq!(error["operation"], operation, "{args:?}");
+        assert_eq!(error["account"], OTHER_LOGIN, "{args:?}");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("no presented Mandate covers account other@example.test"),
+            "{args:?}: {message}"
+        );
+        assert!(message.contains("agent-mail whoami"), "{args:?}: {message}");
+        assert!(!message.contains("grant it"), "{args:?}: {message}");
+        assert!(env.last_audit().get("mandate").is_none(), "{args:?}");
+
+        let text = env.run(&[&["--text"][..], args].concat(), Some(&tw));
+        assert!(
+            text.stderr
+                .starts_with("error: denied: no presented Mandate covers"),
+            "{args:?}: {}",
+            text.stderr
+        );
+    }
+    assert_eq!(env.server.connections(), 0);
+
+    // A missing Grant on a covered Account keeps its wording.
+    for args in [
+        &["list", "--account", LOGIN][..],
+        &["search", "--account", LOGIN, "--mailbox", "Archive"],
+    ] {
+        let out = env.run(args, Some(&tw));
+        assert_eq!(out.code, 1, "{args:?}: {out:?}");
+        let message = stderr_error(&out)["message"].as_str().unwrap().to_string();
+        assert!(message.contains("ask the human to grant it"), "{message}");
+        assert!(!message.contains("no presented Mandate"), "{message}");
+    }
+}
