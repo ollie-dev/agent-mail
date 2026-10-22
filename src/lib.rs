@@ -116,7 +116,7 @@ pub enum CliCommand {
     /// original's mailbox. --to is repeatable and takes bare addresses
     /// (local@domain, no display names). Give --subject for a new message,
     /// or --reply-to with a reference exactly as `agent-mail search` prints
-    /// it: the draft then threads with the original (In-Reply-To and
+    /// it, but not both: the draft then threads with the original (In-Reply-To and
     /// References) and its subject is the original's with `Re: ` in front,
     /// added only once. The draft goes to the mailbox the server marks with
     /// the \Drafts special-use attribute, whatever its name, with the
