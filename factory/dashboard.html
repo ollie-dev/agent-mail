@@ -70,7 +70,7 @@
          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* board */
-  #board { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 12px;
+  #board { display: grid; grid-template-columns: repeat(6, minmax(200px, 1fr)); gap: 12px;
            padding: 16px 24px 32px; overflow-x: auto; }
   .col { min-width: 0; }
   .col-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 8px; font-weight: 600; font-size: 13px; }
@@ -97,6 +97,9 @@
           background: var(--pending-bg); color: var(--pending); border: 1px solid transparent; }
   .chip.PASS { background: var(--pass-bg); color: var(--pass); }
   .chip.CHANGES { background: var(--changes-bg); color: var(--changes); }
+  .chip.VERIFIED { background: var(--pass-bg); color: var(--pass); }
+  .chip.NOT-FIXED { background: var(--human-bg); color: var(--human); }
+  .round.nit .r { color: var(--accent); }
   .chip.pending { border-style: dashed; border-color: var(--pending); animation: pulse 1.6s ease-in-out infinite; }
   .chip:hover { filter: brightness(.95); }
   @keyframes pulse { 50% { opacity: .45; } }
@@ -116,9 +119,9 @@
   .tab.on { border-color: var(--accent); color: var(--accent); }
   .tab.missing { color: var(--pending); border-style: dashed; }
   .tab .v { width: 7px; height: 7px; border-radius: 50%; background: var(--pending); }
-  .tab .v.PASS, .tab .v.APPROVE { background: var(--pass); }
+  .tab .v.PASS, .tab .v.APPROVE, .tab .v.VERIFIED { background: var(--pass); }
   .tab .v.CHANGES { background: var(--changes); }
-  .tab .v.ESCALATE { background: var(--human); }
+  .tab .v.ESCALATE, .tab .v.NOT-FIXED { background: var(--human); }
   .d-body { padding: 18px 22px 40px; overflow: auto; flex: 1; }
 
   .md h1 { font-size: 19px; } .md h2 { font-size: 15px; margin-top: 22px; } .md h3 { font-size: 14px; }
@@ -131,15 +134,15 @@
   .md a { color: var(--accent); }
   .verdict { display: inline-block; font-weight: 700; font-size: 12px; letter-spacing: .04em; padding: 4px 10px;
              border-radius: 999px; margin-bottom: 4px; }
-  .verdict.PASS, .verdict.APPROVE { background: var(--pass-bg); color: var(--pass); }
+  .verdict.PASS, .verdict.APPROVE, .verdict.VERIFIED { background: var(--pass-bg); color: var(--pass); }
   .verdict.CHANGES { background: var(--changes-bg); color: var(--changes); }
-  .verdict.ESCALATE { background: var(--human-bg); color: var(--human); }
+  .verdict.ESCALATE, .verdict.NOT-FIXED { background: var(--human-bg); color: var(--human); }
   .notyet { color: var(--muted); }
 
   @media (max-width: 700px) {
     #backlog { margin-left: 16px; margin-right: 16px; }
     header, #human { padding-left: 16px; padding-right: 16px; margin-left: 0; margin-right: 0; }
-    #board { padding: 12px 16px 24px; grid-template-columns: repeat(5, 78vw); }
+    #board { padding: 12px 16px 24px; grid-template-columns: repeat(6, 78vw); }
   }
 </style>
 </head>
@@ -160,10 +163,12 @@ const STAGES = [
   ['spec', 'Spec', 'spec-writer'],
   ['build', 'Build', 'builder'],
   ['review', 'Review', '4 reviewers'],
+  ['nit', 'Nit pass', 'builder + verify'],
   ['approval', 'Approver', 'approver'],
   ['merged', 'Merged', 'main'],
 ];
 const REVIEWERS = [['security', 'SEC'], ['ux', 'UX'], ['ui', 'UI'], ['code', 'CODE']];
+const LABEL = Object.fromEntries(REVIEWERS);
 const POLL_MS = 2000;
 
 let board = { jobs: [] };
@@ -199,7 +204,16 @@ function chipsHtml(job) {
         const v = r[key] || 'pending';
         return `<span class="chip ${esc(v)}" title="${key}: ${esc(v)}" data-job="${esc(job.id)}" data-path="round-${n}/review-${key}.md">${label}</span>`;
       }).join('') + '</div>';
-  }).join('') + '</div>';
+  }).join('') + nitsHtml(job) + '</div>';
+}
+
+// one row per nit pass: the reviewers that raised [fix-now] findings and their verify verdicts
+function nitsHtml(job) {
+  return (job.nits || []).map(n =>
+    `<div class="round nit" title="nit pass ${n.attempt} for round ${n.round}${n.commit ? ' · ' + esc(n.commit) : ''}"><span class="r">N${n.attempt}</span>` +
+    Object.entries(n.verify || {}).map(([key, v]) =>
+      `<span class="chip ${esc(v)}" title="${esc(key)} verify: ${esc(v)}" data-job="${esc(job.id)}" data-path="round-${n.round}/verify-${esc(key)}-${n.attempt}.md">${esc(LABEL[key] || key)}</span>`
+    ).join('') + '</div>').join('');
 }
 
 function cardHtml(job) {
@@ -238,6 +252,8 @@ function filesOf(job) {
   const files = [{ group: '', label: 'Spec', path: 'spec.md' }, { group: '', label: 'Build', path: 'build.md' }];
   roundsOf(job).forEach((r, i) => REVIEWERS.forEach(([key, label]) =>
     files.push({ group: `R${i + 1}`, label, path: `round-${i + 1}/review-${key}.md`, verdict: r[key] || 'pending' })));
+  (job.nits || []).forEach(n => Object.entries(n.verify || {}).forEach(([key, v]) =>
+    files.push({ group: `N${n.attempt}`, label: LABEL[key] || key, path: `round-${n.round}/verify-${key}-${n.attempt}.md`, verdict: v })));
   files.push({ group: '', label: 'Decision', path: 'decision.md', verdict: decisionOf(job) });
   files.push({ group: '', label: 'Human notes', path: 'human-notes.md' });
   return files;
@@ -349,7 +365,7 @@ function markdown(src) {
   const out = [];
   let i = 0;
   const first = (lines[0] || '').trim();
-  const m = first.match(/^(?:VERDICT:\s*)?(PASS|CHANGES|APPROVE|ESCALATE)$/);
+  const m = first.match(/^(?:VERDICT:\s*)?(PASS|CHANGES|APPROVE|ESCALATE|VERIFIED|NOT-FIXED)$/);
   if (m) { out.push(`<div class="verdict ${m[1]}">${esc(first)}</div>`); i = 1; }
   while (i < lines.length) {
     const line = lines[i];
