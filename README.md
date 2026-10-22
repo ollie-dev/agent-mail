@@ -50,9 +50,34 @@ With `--text` (`agent-mail --text read <REF>` or `agent-mail read <REF> --text`)
 
 If the mailbox was renumbered since the search (its UIDVALIDITY changed), the read fails with `stale_reference` and nothing is fetched: search again for a fresh reference. A UID that no longer exists fails with `message_not_found`. A reference that is not in the form `search` prints is a usage error (exit code 2).
 
+## Flag
+
+`agent-mail flag <REF> --set <FLAG>` or `agent-mail flag <REF> --clear <FLAG>` marks one message read or unread, or starred or unstarred, given the `ref` that `agent-mail search` printed for it. The Mandate needs a `flag` Grant on the reference's account and mailbox; otherwise the call is denied before any connection is made.
+
+```
+agent-mail flag <REF> (--set <FLAG> | --clear <FLAG>)
+```
+
+Exactly one of `--set` or `--clear` is required. Only two flags can be changed, named without regard to case and with or without the backslash:
+
+- `seen` or `\Seen`: the message is read. `--set seen` marks it read, `--clear seen` unread.
+- `flagged` or `\Flagged`: the message is starred. `--set flagged` stars it, `--clear flagged` unstars it.
+
+Any other flag, such as `\Deleted`, `\Answered`, `\Draft` or a keyword like `$Junk`, fails with `unsupported_flag` before any connection is made; the error does not repeat the rejected name. Only the canonical `\Seen` or `\Flagged` is ever sent to the server.
+
+The JSON result has these keys, in this order: `ref`, `account`, `mailbox`, and `flags`, every flag of the message after the change, as the server reports them, in server order. For example:
+
+```json
+{"ref":"agent@example.test/Triage/1700000007/1","account":"agent@example.test","mailbox":"Triage","flags":["\\Seen"]}
+```
+
+Setting a flag that is already set, or clearing one that is not, succeeds and reports the unchanged flags, so repeating a call is harmless. With `--text` (`agent-mail --text flag ...` or after the subcommand) the output is one line, `<ref>: <flags>`, or `<ref>: no flags`.
+
+The mailbox is opened read-write with `SELECT`, and the session ends with `LOGOUT` only: agent-mail never sends `CLOSE` (which would expunge messages marked `\Deleted`) or `EXPUNGE`, and never fetches a message body. If the mailbox was renumbered since the search (its UIDVALIDITY changed), nothing is changed and the call fails with `stale_reference`: search again for a fresh reference. A UID that no longer exists fails with `message_not_found`, also without any change. A reference that is not in the form `search` prints, or a call with neither or both of `--set` and `--clear`, is a usage error (exit code 2).
+
 ## Audit log
 
-Every `agent-mail list`, `agent-mail search` and `agent-mail read` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
+Every `agent-mail list`, `agent-mail search`, `agent-mail read` and `agent-mail flag` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
 
 - macOS: `~/Library/Application Support/agent-mail/audit.log` (the home directory comes from the user database, not from `$HOME`)
 - Other Unix: `$XDG_DATA_HOME/agent-mail/audit.log`, or `~/.local/share/agent-mail/audit.log` when `XDG_DATA_HOME` is unset
@@ -63,12 +88,13 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 
 - `time`: when the call was made, RFC 3339 UTC to the second, e.g. `2026-10-21T09:30:15Z`.
 - `mandate`: the Mandate's short ID; left out when the agent's token opened no Mandate.
-- `operation`: the operation: `list`, `search` or `read`.
+- `operation`: the operation: `list`, `search`, `read` or `flag`.
 - `account`: the account's login; left out when no single account was chosen.
-- `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read`, the mailbox the message reference names (not used by `list`).
-- `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read`, the one reference the agent asked for, also when the read was denied or failed (not used by `list`).
-- `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list` or `read`, left out when the search failed). How many matched in total is not logged.
+- `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read` and `flag`, the mailbox the message reference names (not used by `list`).
+- `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed (not used by `list`).
+- `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search` or `read`.
+- `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read` or `flag`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference` or `message_not_found`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found` or `unsupported_flag`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
 The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.

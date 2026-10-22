@@ -194,6 +194,39 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             uidvalidity: READ_UIDVALIDITY,
             messages: read_messages(),
         },
+        FakeMailbox {
+            name: "Triage",
+            uidvalidity: TRIAGE_UIDVALIDITY,
+            messages: triage_messages(),
+        },
+    ]
+}
+
+/// UIDVALIDITY of the fixture `Triage`.
+pub const TRIAGE_UIDVALIDITY: u32 = 1_700_000_007;
+
+/// The `Triage` mailbox's two simple messages: UID 1 with no flags, UID 2
+/// with `\Seen \Flagged \Answered`.
+fn triage_messages() -> Vec<FakeMessage> {
+    let message = |uid, from, subject: &str, list: &[&str]| FakeMessage {
+        uid,
+        from_name: None,
+        from,
+        to: LOGIN,
+        subject: subject.to_string(),
+        body: "triage body",
+        internal_date: "07-Oct-2026 09:00:00 +0000",
+        flags: flags(list),
+        source: None,
+    };
+    vec![
+        message(1, "alice@example.com", "Triage one", &[]),
+        message(
+            2,
+            "bob@example.com",
+            "Triage two",
+            &["\\Seen", "\\Flagged", "\\Answered"],
+        ),
     ]
 }
 
@@ -355,6 +388,8 @@ struct State {
     mailboxes: Vec<FakeMailbox>,
     searches: Vec<String>,
     fetch_uid_counts: Vec<usize>,
+    fetches: Vec<String>,
+    stores: Vec<String>,
 }
 
 /// An in-process fake IMAP server on a real TCP port.
@@ -403,6 +438,17 @@ impl FakeImap {
     /// The arguments of every `UID SEARCH`, in order.
     pub fn searches(&self) -> Vec<String> {
         self.state.lock().unwrap().searches.clone()
+    }
+
+    /// The arguments of every `UID FETCH`, in order, e.g. `1 (UID FLAGS)`.
+    pub fn fetches(&self) -> Vec<String> {
+        self.state.lock().unwrap().fetches.clone()
+    }
+
+    /// The arguments of every `STORE` and `UID STORE`, in order, e.g.
+    /// `1 +FLAGS (\Seen)`.
+    pub fn stores(&self) -> Vec<String> {
+        self.state.lock().unwrap().stores.clone()
     }
 
     /// For each `UID FETCH`, how many UIDs its set covered.
@@ -603,6 +649,7 @@ fn session(
             }
             "UID FETCH" => {
                 let mut state = state.lock().unwrap();
+                state.fetches.push(args.to_string());
                 let reply = match opened {
                     None => format!("{tag} BAD no mailbox open\r\n"),
                     Some((index, _)) => {
@@ -624,8 +671,27 @@ fn session(
                 drop(state);
                 send(stream, &reply)?;
             }
-            "STORE" | "UID STORE" | "EXPUNGE" | "UID EXPUNGE" | "COPY" | "UID COPY" | "MOVE"
-            | "UID MOVE" => {
+            "STORE" | "UID STORE" => {
+                let mut state = state.lock().unwrap();
+                state.stores.push(args.to_string());
+                let reply = match opened {
+                    None => format!("{tag} BAD no mailbox open\r\n"),
+                    Some((_, true)) => format!("{tag} NO mailbox is read-only\r\n"),
+                    Some((index, false)) => {
+                        let by_uid = verb == "UID STORE";
+                        match store(&mut state.mailboxes[index], args, by_uid) {
+                            Some(mut reply) => {
+                                reply.push_str(&format!("{tag} OK {verb} done\r\n"));
+                                reply
+                            }
+                            None => format!("{tag} BAD bad store arguments\r\n"),
+                        }
+                    }
+                };
+                drop(state);
+                send(stream, &reply)?;
+            }
+            "EXPUNGE" | "UID EXPUNGE" | "COPY" | "UID COPY" | "MOVE" | "UID MOVE" => {
                 // Recorded above; this fake never changes state for them.
                 send(stream, &format!("{tag} NO not supported by the fake\r\n"))?;
             }
@@ -638,6 +704,53 @@ fn session(
             }
         }
     }
+}
+
+/// Applies `STORE` arguments (`<set> [+|-]FLAGS[.SILENT] (<flags>)`) to
+/// `mailbox`; `set` holds UIDs if `by_uid`, else sequence numbers. Returns
+/// the untagged responses: unless `.SILENT`, one `FETCH` with `UID` and
+/// `FLAGS` per message whose flags changed. `None` if malformed.
+fn store(mailbox: &mut FakeMailbox, args: &str, by_uid: bool) -> Option<String> {
+    let mut parts = args.splitn(3, ' ');
+    let set = parts.next()?;
+    let item = parts.next()?.to_ascii_uppercase();
+    let list = parts.next()?.trim();
+    let list = list.strip_prefix('(')?.strip_suffix(')')?;
+    let given: Vec<String> = list.split_whitespace().map(str::to_string).collect();
+    let (item, silent) = match item.strip_suffix(".SILENT") {
+        Some(item) => (item.to_string(), true),
+        None => (item, false),
+    };
+    let mut reply = String::new();
+    for (seq, message) in mailbox.messages.iter_mut().enumerate() {
+        let id = if by_uid { message.uid } else { seq as u32 + 1 };
+        if !in_uid_set(set, id) {
+            continue;
+        }
+        let before = message.flags.clone();
+        let has = |flags: &[String], f: &str| flags.iter().any(|x| x.eq_ignore_ascii_case(f));
+        match item.as_str() {
+            "+FLAGS" => {
+                for flag in &given {
+                    if !has(&message.flags, flag) {
+                        message.flags.push(flag.clone());
+                    }
+                }
+            }
+            "-FLAGS" => message.flags.retain(|f| !has(&given, f)),
+            "FLAGS" => message.flags = given.clone(),
+            _ => return None,
+        }
+        if !silent && message.flags != before {
+            reply.push_str(&format!(
+                "* {} FETCH (UID {} FLAGS ({}))\r\n",
+                seq + 1,
+                message.uid,
+                message.flags.join(" ")
+            ));
+        }
+    }
+    Some(reply)
 }
 
 /// Parses an IMAP `date` (`05-Oct-2026` or `5-Oct-2026`) as
