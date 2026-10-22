@@ -7,6 +7,7 @@ pub mod audit;
 pub mod core;
 pub mod create;
 pub mod export;
+pub mod flag;
 pub mod imap;
 pub mod mandate;
 pub mod read;
@@ -24,6 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 pub use crate::core::{Context, TOKEN_VAR};
 use crate::core::{CoreError, MandateListing, Outcome};
+use crate::flag::FlagAction;
 use crate::read::ReadResult;
 use crate::search::MessageRef;
 use crate::search::{Date, Limit, Query, SearchResult, SearchText};
@@ -76,6 +78,20 @@ pub enum CliCommand {
     /// If the mailbox was renumbered since the search, the read fails with
     /// `stale_reference`: search again for a fresh reference.
     Read(ReadArgs),
+    /// Mark one message read or unread, or starred or unstarred, by the reference `search` printed
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `flag` grant on
+    /// the reference's account and mailbox. Give exactly one of --set or
+    /// --clear. Only two flags can be changed: `seen` (or `\Seen`), the
+    /// message is read, and `flagged` (or `\Flagged`), the message is
+    /// starred; names are case-insensitive, and any other flag fails with
+    /// `unsupported_flag`. Prints one JSON object on stdout: ref, account,
+    /// mailbox and flags (every flag of the message after the change).
+    /// Setting a flag that is already set, or clearing one that is not, is
+    /// harmless. If the mailbox was renumbered since the search, nothing is
+    /// changed and the call fails with `stale_reference`: search again for a
+    /// fresh reference.
+    Flag(FlagArgs),
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -106,6 +122,30 @@ pub struct ReadArgs {
     pub full: bool,
     #[command(flatten)]
     pub output: TextOutput,
+}
+
+/// Options of `flag`.
+#[derive(Debug, Args)]
+pub struct FlagArgs {
+    /// The message reference, exactly as `agent-mail search` prints it in `ref`: <account>/<mailbox>/<uidvalidity>/<uid>
+    #[arg(value_name = "REF", value_parser = reference)]
+    pub reference: MessageRef,
+    #[command(flatten)]
+    pub change: FlagChange,
+    #[command(flatten)]
+    pub output: TextOutput,
+}
+
+/// The change `flag` makes: exactly one of `--set` or `--clear`.
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+pub struct FlagChange {
+    /// Set FLAG: `seen` marks the message read, `flagged` stars it
+    #[arg(long, value_name = "FLAG")]
+    pub set: Option<String>,
+    /// Clear FLAG: `seen` marks the message unread, `flagged` unstars it
+    #[arg(long, value_name = "FLAG")]
+    pub clear: Option<String>,
 }
 
 fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
@@ -256,6 +296,20 @@ where
                 full: args.full,
             }
         }
+        CliCommand::Flag(args) => {
+            text |= args.output.text;
+            let (action, flag) = match (args.change.set, args.change.clear) {
+                (Some(flag), None) => (FlagAction::Set, flag),
+                (None, Some(flag)) => (FlagAction::Clear, flag),
+                // The argument group requires exactly one.
+                _ => unreachable!("clap requires exactly one of --set or --clear"),
+            };
+            crate::core::Command::Flag {
+                reference: args.reference,
+                action,
+                flag,
+            }
+        }
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -300,6 +354,20 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
         Outcome::Messages(result) => json_line(result),
         Outcome::Message(message) if text => render_message(message),
         Outcome::Message(message) => json_line(message),
+        Outcome::Flagged(result) if text => {
+            let flags = if result.flags.is_empty() {
+                "no flags".to_string()
+            } else {
+                result
+                    .flags
+                    .iter()
+                    .map(|f| escape_controls(f))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("{}: {flags}\n", escape_controls(&result.reference))
+        }
+        Outcome::Flagged(result) => json_line(result),
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),
@@ -522,6 +590,47 @@ mod tests {
              Attachments:\n  evil\\u{1b}[2J.pdf\\u{a} (application/pdf, 3 bytes)\n"
         );
         assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn flag_text_output_is_one_escaped_line() {
+        let outcome = Outcome::Flagged(crate::flag::FlagResult {
+            reference: "agent@example.test/Triage/1700000007/1".to_string(),
+            account: "agent@example.test".to_string(),
+            mailbox: "Triage".to_string(),
+            flags: vec!["\\Seen".to_string(), "$Evil\n\u{1b}[2J".to_string()],
+        });
+        assert_eq!(
+            render_outcome(&outcome, true),
+            "agent@example.test/Triage/1700000007/1: \\Seen $Evil\\u{a}\\u{1b}[2J\n"
+        );
+    }
+
+    #[test]
+    fn flag_requires_a_reference_and_exactly_one_action() {
+        for args in [
+            &["flag", "not-a-ref", "--set", "seen"][..],
+            &[
+                "flag",
+                "agent@example.test/Triage/1700000007/0",
+                "--set",
+                "seen",
+            ],
+            &["flag", "agent@example.test/Triage/1700000007/1"],
+            &[
+                "flag",
+                "agent@example.test/Triage/1700000007/1",
+                "--set",
+                "seen",
+                "--clear",
+                "seen",
+            ],
+            &["flag", "--set", "seen"],
+        ] {
+            let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+            let err = Cli::try_parse_from(argv).expect_err(&format!("{args:?} parsed"));
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
     }
 
     #[test]
