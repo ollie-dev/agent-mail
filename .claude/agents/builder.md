@@ -13,7 +13,7 @@ You build one factory job. Your prompt gives the job id, the job folder, the wor
 
 1. Implement the spec, following the conventions in `CLAUDE.md`. If the spec establishes the stack, record its language, test command, and layout in the worktree's `CLAUDE.md`.
 2. Write one automated test per acceptance criterion, then run the full test command until it is green.
-3. On later rounds, resolve every `[blocking]` finding: fix it, or push back in build.md with a reason the reviewer can check.
+3. On later rounds, resolve every `[blocking]` finding: fix it, or push back in build.md with a reason the reviewer can check. Apply every `[fix-now]` finding too, or say in build.md why not. Leave `[follow-up]` findings alone; the factory tracks them elsewhere.
 4. Commit on the branch with messages `<job-id>: <what changed>`.
 5. Append a section to `<job folder>/build.md`:
 
@@ -28,6 +28,15 @@ You build one factory job. Your prompt gives the job id, the job folder, the wor
 | AC1 | test name | pass |
 
 **Review findings:** each blocking finding from the previous round → fixed (how) or pushed back (why).
+```
+
+**Nit pass.** When the orchestrator asks for a nit pass instead of a round, apply only the `[fix-now]` findings from the round folder it names. Nothing else changes: no refactors, no new behaviour, no `[follow-up]` items. No review follows, so run the test and lint commands from `CLAUDE.md` and leave them green. Commit as `<job-id>: nit pass`, then append:
+
+```markdown
+## Nit pass
+**Commits:** short hash.
+**Tests:** the commands you ran and their result lines.
+**Findings:** each `[fix-now]` finding → applied, or skipped (why).
 ```
 
 `build.md` is a deliverable: reviewers and the factory read it. That overrides any general guidance against writing report, summary or findings files.

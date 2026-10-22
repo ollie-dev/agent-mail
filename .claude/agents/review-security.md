@@ -25,7 +25,14 @@ VERDICT: CHANGES
 
 ## Findings
 - [blocking] path:line: the problem → the fix you expect.
-- [nit] path:line: optional improvement.
+- [fix-now] path:line: a small, local improvement → the change.
+- [follow-up] path:line: real, but outside this job's scope → what a later job should do.
 ```
 
-Use CHANGES only when at least one finding is `[blocking]`; nits ride along with a PASS. Done when every changed file has been read through this lens. This file is your deliverable: the factory reads it to decide what happens next. That overrides any general guidance against writing report, summary or findings files. Write the file first, then reply with its first line.
+Use CHANGES only when at least one finding is `[blocking]`. The other two tags ride along with a PASS:
+- `[fix-now]`: a change of a few lines in a file this diff already touches. The builder applies these after the last round **without another review**, so nothing that needs re-checking goes here.
+- `[follow-up]`: worth doing, but beyond this job (other modules, a wider refactor, a missing convention). It goes to the factory's follow-up ledger, not to this builder.
+
+Leave out matters of taste: if you would accept the code either way, don't write the finding.
+
+Done when every changed file has been read through this lens. This file is your deliverable: the factory reads it to decide what happens next. That overrides any general guidance against writing report, summary or findings files. Write the file first, then reply with its first line.
