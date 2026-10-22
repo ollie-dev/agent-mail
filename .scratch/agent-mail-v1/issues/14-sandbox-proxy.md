@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With `HTTPS_PROXY` pointing at an in-process CONNECT proxy, `list` reaches the fake IMAP server through the proxy (the proxy observes the tunnel)
 - [ ] With `ALL_PROXY` pointing at an in-process SOCKS5 proxy, the same works
