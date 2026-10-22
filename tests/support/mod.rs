@@ -2,6 +2,8 @@
 //! the CLI adapter in-process. All values here are fake.
 #![allow(dead_code)]
 
+pub mod proxy;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

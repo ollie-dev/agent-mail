@@ -20,6 +20,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::flag::{Flag as MailFlag, FlagAction, store_item};
 use crate::mandate::{Account, TlsMode};
+use crate::proxy::{self, ProxySetting, TunnelError};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -44,12 +45,14 @@ impl std::fmt::Debug for TlsTrust {
     }
 }
 
-/// How the connector reaches servers: the TLS trust and, in test builds only,
-/// host rewrites that send a preset host such as `imap.gmail.com` to a fake
-/// server. TLS still verifies the Account's own host name.
+/// How the connector reaches servers: the TLS trust, the proxy setting
+/// and, in test builds only, host rewrites that send a preset host such as
+/// `imap.gmail.com` to a fake server. TLS still verifies the Account's own
+/// host name. `Debug` never shows the proxy's address or credentials.
 #[derive(Clone, Default, Debug)]
 pub struct Network {
     trust: TlsTrust,
+    proxy: ProxySetting,
     #[cfg(any(test, feature = "test-support"))]
     routes: Vec<Route>,
 }
@@ -81,7 +84,39 @@ impl Network {
     pub fn trusting_only(roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> Self {
         Self {
             trust: TlsTrust::OnlyRoots(roots),
-            routes: Vec::new(),
+            ..Self::default()
+        }
+    }
+
+    /// The same network, with the proxy setting `env` selects (see
+    /// [`ProxySetting::from_env`]). With a proxy, every connection is
+    /// tunnelled through it and verified against the built-in roots.
+    pub fn with_proxy_from_env(self, env: &std::collections::HashMap<String, String>) -> Self {
+        Self {
+            proxy: ProxySetting::from_env(env),
+            ..self
+        }
+    }
+
+    /// The certificates this network trusts: the platform verifier for
+    /// direct connections, the built-in roots through a proxy, or (test
+    /// builds only) the roots the test supplied, which win over both.
+    fn chosen_trust(&self) -> Result<ChosenTrust, ImapError> {
+        match (&self.trust, &self.proxy) {
+            #[cfg(any(test, feature = "test-support"))]
+            (TlsTrust::OnlyRoots(roots), _) => {
+                let mut store = rustls::RootCertStore::empty();
+                for root in roots {
+                    store
+                        .add(root.clone())
+                        .map_err(|_| ImapError::Certificate)?;
+                }
+                Ok(ChosenTrust::Roots(store))
+            }
+            (TlsTrust::Platform, ProxySetting::Direct) => Ok(ChosenTrust::Platform),
+            (TlsTrust::Platform, _) => Ok(ChosenTrust::BuiltIn(rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            })),
         }
     }
 
@@ -110,9 +145,35 @@ impl Network {
     }
 }
 
+/// The verifier a connection uses.
+#[derive(Debug)]
+enum ChosenTrust {
+    /// The operating system's verifier.
+    Platform,
+    /// The built-in webpki roots (proxy mode).
+    BuiltIn(rustls::RootCertStore),
+    /// Only the roots a test supplied. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    Roots(rustls::RootCertStore),
+}
+
 /// Why talking to the IMAP server failed. Never carries a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImapError {
+    /// The proxy answered and refused a tunnel to the Account's
+    /// `host:port`. Nothing reached the server.
+    ProxyRefused {
+        /// The Account's host, as sent to the proxy.
+        host: String,
+        /// The Account's port.
+        port: u16,
+    },
+    /// The proxy variable named here does not hold a usable proxy URL.
+    /// Nothing was connected to. Its value is never carried.
+    InvalidProxy {
+        /// The variable, e.g. `HTTPS_PROXY`.
+        variable: &'static str,
+    },
     /// The server offered no TLS: no handshake, or no STARTTLS.
     TlsRequired,
     /// The server's certificate was not trusted.
@@ -159,26 +220,19 @@ pub fn list_mailboxes(account: &Account, network: &Network) -> Result<Vec<String
     })
 }
 
-fn tls_connector(trust: &TlsTrust) -> Result<TlsConnector, ImapError> {
+fn tls_connector(network: &Network) -> Result<TlsConnector, ImapError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|_| ImapError::Certificate)?;
-    let config = match trust {
-        TlsTrust::Platform => builder
+    let config = match network.chosen_trust()? {
+        ChosenTrust::Platform => builder
             .with_platform_verifier()
             .map_err(|_| ImapError::Certificate)?
             .with_no_client_auth(),
+        ChosenTrust::BuiltIn(store) => builder.with_root_certificates(store).with_no_client_auth(),
         #[cfg(any(test, feature = "test-support"))]
-        TlsTrust::OnlyRoots(roots) => {
-            let mut store = rustls::RootCertStore::empty();
-            for root in roots {
-                store
-                    .add(root.clone())
-                    .map_err(|_| ImapError::Certificate)?;
-            }
-            builder.with_root_certificates(store).with_no_client_auth()
-        }
+        ChosenTrust::Roots(store) => builder.with_root_certificates(store).with_no_client_auth(),
     };
     Ok(TlsConnector::from(Arc::new(config)))
 }
@@ -188,13 +242,32 @@ type TlsSession = Session<tokio_rustls::client::TlsStream<TcpStream>>;
 /// Connects with TLS (implicit, or a mandatory STARTTLS upgrade) and logs
 /// in. The Credential is sent only over the established TLS session.
 async fn login(account: &Account, network: &Network) -> Result<TlsSession, ImapError> {
-    let connector = tls_connector(&network.trust)?;
+    if let ProxySetting::Invalid(variable) = network.proxy {
+        return Err(ImapError::InvalidProxy { variable });
+    }
+    let connector = tls_connector(network)?;
     let server_name =
         ServerName::try_from(account.host.clone()).map_err(|_| ImapError::Connection)?;
     let (host, port) = network.target(&account.host, account.port);
-    let tcp = TcpStream::connect((host.as_str(), port))
-        .await
-        .map_err(|_| ImapError::Connection)?;
+    let tcp = match &network.proxy {
+        // The host goes to the proxy unresolved: the sandbox has no DNS.
+        ProxySetting::Through(proxy) => {
+            proxy::tunnel(proxy, &host, port)
+                .await
+                .map_err(|error| match error {
+                    TunnelError::Refused => ImapError::ProxyRefused {
+                        host: account.host.clone(),
+                        port: account.port,
+                    },
+                    TunnelError::Connection => ImapError::Connection,
+                })?
+        }
+        ProxySetting::Direct | ProxySetting::Invalid(_) => {
+            TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(|_| ImapError::Connection)?
+        }
+    };
 
     let tls = match account.tls {
         TlsMode::Implicit => {
@@ -1037,4 +1110,75 @@ where
         }
     }
     Ok(starttls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn proxied() -> Network {
+        let env = HashMap::from([(
+            "HTTPS_PROXY".to_string(),
+            "http://127.0.0.1:3128".to_string(),
+        )]);
+        Network::platform().with_proxy_from_env(&env)
+    }
+
+    #[test]
+    fn proxy_mode_trusts_the_built_in_roots() {
+        match proxied().chosen_trust().unwrap() {
+            ChosenTrust::BuiltIn(store) => {
+                assert_eq!(store.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+                assert!(!store.is_empty());
+            }
+            other => panic!("expected the built-in roots, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_mode_keeps_the_platform_verifier() {
+        assert!(matches!(
+            Network::platform().chosen_trust().unwrap(),
+            ChosenTrust::Platform
+        ));
+        let empty = HashMap::from([("HTTPS_PROXY".to_string(), String::new())]);
+        assert!(matches!(
+            Network::platform()
+                .with_proxy_from_env(&empty)
+                .chosen_trust()
+                .unwrap(),
+            ChosenTrust::Platform
+        ));
+    }
+
+    #[test]
+    fn test_roots_win_over_the_built_in_roots() {
+        let network = Network {
+            trust: TlsTrust::OnlyRoots(Vec::new()),
+            ..proxied()
+        };
+        assert!(matches!(
+            network.chosen_trust().unwrap(),
+            ChosenTrust::Roots(store) if store.is_empty()
+        ));
+    }
+
+    #[test]
+    fn debug_output_hides_the_proxy() {
+        let env = HashMap::from([(
+            "ALL_PROXY".to_string(),
+            "socks5://proxyuser:pr%40xy-secret@127.0.0.1:1080".to_string(),
+        )]);
+        let shown = format!("{:?}", Network::platform().with_proxy_from_env(&env));
+        for secret in [
+            "proxyuser",
+            "pr@xy-secret",
+            "pr%40xy-secret",
+            "127.0.0.1",
+            "1080",
+        ] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+    }
 }

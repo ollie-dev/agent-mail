@@ -12,6 +12,7 @@ pub mod flag;
 pub mod imap;
 pub mod mandate;
 pub mod move_message;
+pub mod proxy;
 pub mod read;
 pub mod seal;
 pub mod search;
