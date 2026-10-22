@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+use crate::flag::{Flag as MailFlag, FlagAction, store_item};
 use crate::mandate::{Account, TlsMode};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,10 +122,11 @@ pub enum ImapError {
     Login,
     /// The server sent something unexpected.
     Protocol,
-    /// The server refused to open the mailbox (`EXAMINE` answered `NO`).
+    /// The server refused to open the mailbox (`EXAMINE` or `SELECT`
+    /// answered `NO`).
     MailboxNotFound,
     /// The mailbox's UIDVALIDITY differs from the reference's, so its UID
-    /// may now name another message. Nothing was fetched.
+    /// may now name another message. Nothing was fetched or changed.
     StaleReference,
     /// No message has the UID (the server returned no FETCH for it).
     MessageNotFound,
@@ -407,6 +409,96 @@ async fn read_in(
         .find(|f| f.uid == Some(uid))
         .ok_or(ImapError::MessageNotFound)?;
     fetch.body().map(<[u8]>::to_vec).ok_or(ImapError::Protocol)
+}
+
+/// Logs in, opens `mailbox` (decoded UTF-8, sent as modified UTF-7)
+/// read-write with `SELECT`, checks its UIDVALIDITY against `uidvalidity`,
+/// confirms message `uid` exists with `UID FETCH <uid> (UID FLAGS)`, sets or
+/// clears `flag` with `UID STORE`, and logs out. Returns the message's flags
+/// after the change, in server order. Only the canonical `\Seen` or
+/// `\Flagged` is sent. Never sends `CLOSE` (which would expunge messages
+/// marked `\Deleted`), `EXPUNGE` or any body fetch.
+pub fn flag(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+    action: FlagAction,
+    flag: MailFlag,
+) -> Result<Vec<String>, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(TIMEOUT, async {
+            let mut session = login(account, network).await?;
+            let result = flag_in(&mut session, mailbox, uidvalidity, uid, action, flag).await;
+            // LOGOUT only: never CLOSE, which silently expunges.
+            let _ = session.logout().await;
+            result
+        })
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+async fn flag_in(
+    session: &mut TlsSession,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+    action: FlagAction,
+    flag: MailFlag,
+) -> Result<Vec<String>, ImapError> {
+    let opened = session
+        .select(crate::utf7::encode(mailbox))
+        .await
+        .map_err(|e| match e {
+            async_imap::error::Error::No(_) => ImapError::MailboxNotFound,
+            _ => ImapError::Protocol,
+        })?;
+    // Before any fetch or store: a renumbered mailbox must never have the
+    // wrong message changed.
+    if opened.uid_validity.ok_or(ImapError::Protocol)? != uidvalidity {
+        return Err(ImapError::StaleReference);
+    }
+    // A missing UID must not be reported as a successful change.
+    if flags_of(session, uid).await?.is_none() {
+        return Err(ImapError::MessageNotFound);
+    }
+    let stored: Vec<Fetch> = session
+        .uid_store(uid.to_string(), store_item(action, flag))
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    if let Some(fetch) = stored.iter().find(|f| f.uid == Some(uid)) {
+        return Ok(fetch.flags().map(|f| flag_name(&f)).collect());
+    }
+    // The server sent no FETCH for the message (for example because nothing
+    // changed): ask for its flags.
+    flags_of(session, uid)
+        .await?
+        .ok_or(ImapError::MessageNotFound)
+}
+
+/// The flags of message `uid` in the open mailbox, `None` if it has none.
+async fn flags_of(session: &mut TlsSession, uid: u32) -> Result<Option<Vec<String>>, ImapError> {
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid.to_string(), "(UID FLAGS)")
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    // Any unsolicited fetch for another UID is ignored.
+    Ok(fetches
+        .iter()
+        .find(|f| f.uid == Some(uid))
+        .map(|f| f.flags().map(|flag| flag_name(&flag)).collect()))
 }
 
 /// Opens `mailbox` read-only.
