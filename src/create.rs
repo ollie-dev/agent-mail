@@ -485,7 +485,8 @@ fn failure_reason(error: &ImapError) -> &'static str {
         | ImapError::StaleReference
         | ImapError::MessageNotFound
         | ImapError::MoveUnsupported
-        | ImapError::TargetNotFound => {
+        | ImapError::TargetNotFound
+        | ImapError::DraftsNotFound => {
             "the server answered unexpectedly; check the server settings"
         }
     }

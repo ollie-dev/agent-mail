@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::audit::{self, AuditLog, Decision};
+use crate::draft::{self, DraftResult};
 use crate::flag::{self, Flag, FlagAction, FlagResult};
 use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Account, Grant, Mandate, Operation};
@@ -125,6 +126,22 @@ pub enum Command {
         /// quoted modified UTF-7 string.
         target: SearchText,
     },
+    /// Create a draft in the Account's `\Drafts` mailbox, optionally as a
+    /// reply.
+    Draft {
+        /// The recipients, each a bare `local@domain`. Untrusted input;
+        /// checked again here with [`draft::is_valid_address`].
+        to: Vec<String>,
+        /// The subject; required without `reply_to` and refused with it.
+        /// Untrusted input; checked again with [`draft::is_valid_subject`].
+        subject: Option<String>,
+        /// The body. Untrusted input; checked again with
+        /// [`draft::is_valid_body`].
+        body: String,
+        /// The original message of a reply, as `search` returned it.
+        /// Untrusted input; checked again with [`read::is_valid_reference`].
+        reply_to: Option<MessageRef>,
+    },
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -207,6 +224,8 @@ pub enum Outcome {
     Flagged(FlagResult),
     /// Result of `move`.
     Moved(MoveResult),
+    /// Result of `draft`.
+    Drafted(DraftResult),
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
@@ -272,6 +291,19 @@ pub enum CoreError {
     InvalidReference {
         /// The operation that was attempted (`read`, `flag` or `move`).
         operation: Operation,
+    },
+    /// No mailbox of the Account is marked with the `\Drafts` special-use
+    /// attribute. No draft was created.
+    DraftsNotFound {
+        /// Login name of the Account.
+        account: String,
+    },
+    /// A `draft` value is not acceptable. The CLI refuses such values while
+    /// parsing; other adapters may reach this. The value is never echoed or
+    /// logged.
+    InvalidDraft {
+        /// The field: `to`, `subject` or `body`.
+        field: &'static str,
     },
     /// `flag` named a flag other than `\Seen` or `\Flagged`. The rejected
     /// name is never echoed or logged.
@@ -388,6 +420,8 @@ impl CoreError {
             Self::MessageNotFound { .. } => "message_not_found",
             Self::InvalidReference { .. } => "invalid_reference",
             Self::UnsupportedFlag => "unsupported_flag",
+            Self::DraftsNotFound { .. } => "drafts_not_found",
+            Self::InvalidDraft { .. } => "invalid_draft",
             Self::SameMailbox { .. } => "same_mailbox",
             Self::MoveUnsupported { .. } => "move_unsupported",
             Self::TlsRequired { .. } => "tls_required",
@@ -459,6 +493,7 @@ impl CoreError {
             let nothing_done = match operation {
                 Operation::Read => "the message was not read",
                 Operation::Move => "nothing was moved",
+                Operation::Draft => "no draft was created",
                 _ => "no flag was changed",
             };
             let message = if matches!(self, Self::StaleReference { .. }) {
@@ -643,6 +678,22 @@ impl CoreError {
                 "the message reference is malformed; run `agent-mail search` and pass a `ref` exactly as it prints it"
                     .to_string(),
             ),
+            Self::DraftsNotFound { account } => (
+                Some(Operation::Draft.as_str()),
+                Some(account.clone()),
+                format!(
+                    "no mailbox of account {account} is marked as the Drafts mailbox (the \\Drafts special-use attribute), so no draft was created; ask the human to create a Drafts folder, or mark one as the Drafts folder, in their mail client"
+                ),
+            ),
+            Self::InvalidDraft { field } => (
+                Some(Operation::Draft.as_str()),
+                None,
+                match *field {
+                    "to" => "a --to value is not a bare address local@domain (printable ASCII, no spaces, display names or brackets, at most 254 characters), so no draft was created; check the recipients against `agent-mail draft --help` and retry".to_string(),
+                    "subject" => "the subject is missing, empty, holds a line break or NUL, or was given together with a reply reference, so no draft was created; check the subject against `agent-mail draft --help` and retry".to_string(),
+                    _ => "the body holds a NUL character, so no draft was created; check the body and retry".to_string(),
+                },
+            ),
             Self::UnsupportedFlag => (
                 Some(Operation::Flag.as_str()),
                 None,
@@ -724,6 +775,7 @@ pub fn execute(
                 mailbox: None,
                 target: None,
                 messages: None,
+                recipients: None,
                 change: None,
                 results: None,
                 outcome: if trail.allowed {
@@ -759,6 +811,7 @@ pub fn execute(
                 // References and a count only: never subjects, addresses
                 // or `total`.
                 messages: found.map(|r| r.messages.iter().map(|m| m.reference.clone()).collect()),
+                recipients: None,
                 change: None,
                 results: found.map(|r| r.messages.len()),
                 outcome: if trail.allowed {
@@ -793,6 +846,7 @@ pub fn execute(
                 // The reference only: never a subject, address, body or
                 // attachment name.
                 messages: Some(vec![reference.format()]),
+                recipients: None,
                 change: None,
                 results: None,
                 outcome: if trail.allowed {
@@ -831,6 +885,7 @@ pub fn execute(
                 // The reference and the change only: never a subject or
                 // address. An unsupported flag name is never logged.
                 messages: Some(vec![reference.format()]),
+                recipients: None,
                 change: Flag::parse(name).map(|f| flag::change(*action, f)),
                 results: None,
                 outcome: if trail.allowed {
@@ -869,6 +924,7 @@ pub fn execute(
                 mailbox: Some(reference.mailbox.clone()),
                 target: Some(target.as_str().to_string()),
                 messages: Some(messages),
+                recipients: None,
                 change: None,
                 results: None,
                 outcome: if trail.allowed {
@@ -884,6 +940,65 @@ pub fn execute(
                 .append(&entry)
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Moved)
+        }
+        Command::Draft {
+            to,
+            subject,
+            body,
+            reply_to,
+        } => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                draft(
+                    &mandate,
+                    to,
+                    subject.as_deref(),
+                    body,
+                    reply_to.as_ref(),
+                    context,
+                    &mut trail,
+                )
+            });
+            // References only: the original's, then the new draft's when
+            // the server reported it. Never a subject, body or header.
+            let mut messages: Vec<String> = reply_to.iter().map(MessageRef::format).collect();
+            if let Some(new_ref) = result.as_ref().ok().and_then(|r| r.reference.clone()) {
+                messages.push(new_ref);
+            }
+            // The recipients the Agent gave, unless one is invalid: a
+            // rejected value is never logged.
+            let recipients = if to.iter().all(|a| draft::is_valid_address(a)) {
+                to.clone()
+            } else {
+                Vec::new()
+            };
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::Draft.as_str(),
+                account: trail.account,
+                mailbox: trail.mailbox,
+                target: None,
+                messages: (!messages.is_empty()).then_some(messages),
+                recipients: Some(recipients),
+                change: None,
+                results: None,
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Drafted)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -1011,6 +1126,9 @@ struct Trail {
     account: Option<String>,
     /// Whether the Policy granted the operation.
     allowed: bool,
+    /// The mailbox found during the call, decoded UTF-8: the Drafts
+    /// mailbox of a `draft`.
+    mailbox: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -1118,6 +1236,7 @@ fn connector_error(
             },
             None => CoreError::Protocol { account },
         },
+        ImapError::DraftsNotFound => CoreError::DraftsNotFound { account },
         // Only a move reports these, and it maps them itself.
         ImapError::MoveUnsupported | ImapError::TargetNotFound => CoreError::Protocol { account },
     }
@@ -1331,6 +1450,156 @@ fn move_message(
     })
 }
 
+fn draft(
+    mandate: &Mandate,
+    to: &[String],
+    subject: Option<&str>,
+    body: &str,
+    reply_to: Option<&MessageRef>,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<DraftResult, CoreError> {
+    // Checked again here, not only by the CLI parser: these are the
+    // header-injection surface. The values are never echoed.
+    if to.is_empty() || !to.iter().all(|a| draft::is_valid_address(a)) {
+        return Err(CoreError::InvalidDraft { field: "to" });
+    }
+    let subject_ok = match (subject, reply_to) {
+        (Some(subject), None) => draft::is_valid_subject(subject),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if !subject_ok {
+        return Err(CoreError::InvalidDraft { field: "subject" });
+    }
+    if !draft::is_valid_body(body) {
+        return Err(CoreError::InvalidDraft { field: "body" });
+    }
+    // Deny by default, before any connection is made.
+    let account = match reply_to {
+        Some(reference) => {
+            if !read::is_valid_reference(reference) {
+                return Err(CoreError::InvalidReference {
+                    operation: Operation::Draft,
+                });
+            }
+            let login = reference.account.as_str();
+            trail.account = Some(login.to_string());
+            // A reply reads the original: `read` on its mailbox, of the
+            // Mandate's Account with exactly this login, so a reference
+            // naming an uncovered Account never uses another Account's
+            // Credential.
+            let read_denied = || CoreError::Denied {
+                operation: Operation::Read,
+                account: login.to_string(),
+                mailbox: Some(reference.mailbox.clone()),
+            };
+            let account = mandate.account(login).ok_or_else(read_denied)?;
+            require_draft_grant(mandate, login)?;
+            if !mandate
+                .policy
+                .allows_mailbox(Operation::Read, login, &reference.mailbox)
+            {
+                return Err(read_denied());
+            }
+            account
+        }
+        None => {
+            let account = single_account(mandate)?;
+            trail.account = Some(account.login.clone());
+            require_draft_grant(mandate, &account.login)?;
+            account
+        }
+    };
+    trail.allowed = true;
+    let login = account.login.as_str();
+    let message_id = draft::new_message_id(login);
+    let date = draft::rfc5322_date(now_secs());
+    let mut sent_subject = subject.unwrap_or_default().to_string();
+    let mut raw_drafts = None;
+    let original = reply_to.map(|r| imap::ReplyTo {
+        mailbox: &r.mailbox,
+        uidvalidity: r.uidvalidity,
+        uid: r.uid,
+    });
+    let appended = imap::draft(
+        account,
+        &context.network,
+        original,
+        &mut raw_drafts,
+        |headers| {
+            let (in_reply_to, references) = match headers {
+                Some(raw) => {
+                    let (in_reply_to, references, reply_subject) =
+                        draft::reply_headers(&draft::parse_original(raw));
+                    sent_subject = reply_subject;
+                    (in_reply_to, references)
+                }
+                None => (None, Vec::new()),
+            };
+            draft::Draft {
+                login,
+                to,
+                subject: &sent_subject,
+                body,
+                message_id: &message_id,
+                date: &date,
+                in_reply_to: in_reply_to.as_deref(),
+                references: &references,
+            }
+            .build()
+        },
+    );
+    // Malformed modified UTF-7 falls back to the raw name, losslessly.
+    let mailbox = raw_drafts.map(|raw| utf7::decode(&raw).unwrap_or(raw));
+    trail.mailbox.clone_from(&mailbox);
+    let appended = appended.map_err(|e| {
+        connector_error(
+            e,
+            Operation::Draft,
+            login,
+            reply_to.map(|r| r.mailbox.as_str()),
+        )
+    })?;
+    let mailbox = mailbox.ok_or_else(|| CoreError::Protocol {
+        account: login.to_string(),
+    })?;
+    Ok(DraftResult {
+        reference: appended.map(|(uidvalidity, uid)| {
+            MessageRef {
+                account: login.to_string(),
+                mailbox: mailbox.clone(),
+                uidvalidity,
+                uid,
+            }
+            .format()
+        }),
+        account: login.to_string(),
+        mailbox,
+        to: to.to_vec(),
+        subject: sent_subject,
+        original: reply_to.map(MessageRef::format),
+    })
+}
+
+/// Fails with `denied` for `draft` unless a `draft` Grant covers the
+/// Account. `draft` Grants take no mailboxes.
+fn require_draft_grant(mandate: &Mandate, login: &str) -> Result<(), CoreError> {
+    if mandate
+        .policy
+        .grants_for(Operation::Draft, login)
+        .next()
+        .is_none()
+    {
+        return Err(CoreError::Denied {
+            operation: Operation::Draft,
+            account: login.to_string(),
+            mailbox: None,
+        });
+    }
+    Ok(())
+}
+
 fn search(
     mandate: &Mandate,
     query: &Query,
@@ -1493,6 +1762,30 @@ mod tests {
                 account: account.clone(),
                 mailbox: "Filing".to_string(),
             },
+            CoreError::Denied {
+                operation: Operation::Draft,
+                account: account.clone(),
+                mailbox: None,
+            },
+            CoreError::StaleReference {
+                operation: Operation::Draft,
+                account: account.clone(),
+                mailbox: "Thread".to_string(),
+            },
+            CoreError::MessageNotFound {
+                operation: Operation::Draft,
+                account: account.clone(),
+                mailbox: "Thread".to_string(),
+            },
+            CoreError::InvalidReference {
+                operation: Operation::Draft,
+            },
+            CoreError::DraftsNotFound {
+                account: account.clone(),
+            },
+            CoreError::InvalidDraft { field: "to" },
+            CoreError::InvalidDraft { field: "subject" },
+            CoreError::InvalidDraft { field: "body" },
             CoreError::TlsRequired {
                 account: account.clone(),
             },

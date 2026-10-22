@@ -204,6 +204,57 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             uidvalidity: FILING_UIDVALIDITY,
             messages: filing_messages(),
         },
+        FakeMailbox {
+            name: "Thread",
+            uidvalidity: THREAD_UIDVALIDITY,
+            messages: thread_messages(),
+        },
+        empty("Drafts", DRAFTS_UIDVALIDITY),
+    ]
+}
+
+/// UIDVALIDITY of the fixture `Thread`.
+pub const THREAD_UIDVALIDITY: u32 = 1_700_000_009;
+/// UIDVALIDITY of the fixture `Drafts` (empty, not in `SERVER_MAILBOXES`).
+pub const DRAFTS_UIDVALIDITY: u32 = 1_700_000_010;
+
+/// The `Thread` mailbox's two messages, as full MIME sources, no flags:
+/// UID 1 `Re: Budget` with a Message-ID and References folded over two
+/// lines, UID 2 `RE: Agenda` with neither.
+fn thread_messages() -> Vec<FakeMessage> {
+    let message = |uid, from: &'static str, subject: &str, source: &str| FakeMessage {
+        uid,
+        from_name: None,
+        from,
+        to: LOGIN,
+        subject: subject.to_string(),
+        body: "",
+        internal_date: "09-Oct-2026 09:00:00 +0000",
+        flags: Vec::new(),
+        source: Some(source.to_string()),
+    };
+    let one = "From: alice@example.com\r\n\
+               To: agent@example.test\r\n\
+               Subject: Re: Budget\r\n\
+               Date: Fri, 09 Oct 2026 09:00:00 +0000\r\n\
+               Message-ID: <thread-2@example.com>\r\n\
+               In-Reply-To: <thread-1@example.com>\r\n\
+               References: <thread-0@example.com>\r\n <thread-1@example.com>\r\n\
+               MIME-Version: 1.0\r\n\
+               Content-Type: text/plain; charset=utf-8\r\n\
+               \r\n\
+               The budget is attached.\r\n";
+    let two = "From: bob@example.com\r\n\
+               To: agent@example.test\r\n\
+               Subject: RE: Agenda\r\n\
+               Date: Fri, 09 Oct 2026 10:00:00 +0000\r\n\
+               MIME-Version: 1.0\r\n\
+               Content-Type: text/plain; charset=utf-8\r\n\
+               \r\n\
+               Agenda for Monday.\r\n";
+    vec![
+        message(1, "alice@example.com", "Re: Budget", one),
+        message(2, "bob@example.com", "RE: Agenda", two),
     ]
 }
 
@@ -421,6 +472,12 @@ struct State {
     stores: Vec<String>,
     /// Extra capability atoms advertised, e.g. `MOVE` and `UIDPLUS`.
     capabilities: Vec<String>,
+    /// Raw names `LIST` returns after `SERVER_MAILBOXES`.
+    extra_listed: Vec<String>,
+    /// The raw name `LIST` marks `\Drafts`, if any.
+    drafts: Option<String>,
+    /// Every accepted `APPEND`: raw mailbox, flags, raw message.
+    appended: Vec<(String, Vec<String>, String)>,
 }
 
 impl State {
@@ -449,12 +506,26 @@ impl FakeImap {
     /// Like [`FakeImap::start`], also advertising `capabilities` (e.g.
     /// `MOVE`, `UIDPLUS`), before and after login alike.
     pub fn start_with_capabilities(mode: Mode, capabilities: &[&str]) -> Self {
+        Self::start_with_list(mode, capabilities, &[], None)
+    }
+
+    /// Like [`FakeImap::start_with_capabilities`]; `LIST` also returns the
+    /// raw names `extra_listed` after `SERVER_MAILBOXES`, and marks the raw
+    /// name `drafts` with `(\HasNoChildren \Drafts)`, as Gmail does.
+    pub fn start_with_list(
+        mode: Mode,
+        capabilities: &[&str],
+        extra_listed: &[&str],
+        drafts: Option<&str>,
+    ) -> Self {
         let (ca, tls) = tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let port = listener.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(State {
             mailboxes: fixture_mailboxes(),
             capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
+            extra_listed: extra_listed.iter().map(|c| (*c).to_string()).collect(),
+            drafts: drafts.map(str::to_string),
             ..State::default()
         }));
         let connections = Arc::new(AtomicUsize::new(0));
@@ -533,6 +604,12 @@ impl FakeImap {
             .collect();
         messages.sort_by_key(|(uid, _, _)| *uid);
         messages
+    }
+
+    /// Every accepted `APPEND`, in order: the raw mailbox name, the flags
+    /// and the raw message.
+    pub fn appended(&self) -> Vec<(String, Vec<String>, String)> {
+        self.state.lock().unwrap().appended.clone()
     }
 
     /// Number of TCP connections accepted.
@@ -661,9 +738,20 @@ fn session(
             }
             "LIST" => {
                 let mut reply = String::new();
-                for name in SERVER_MAILBOXES {
-                    reply.push_str(&format!("* LIST (\\HasNoChildren) \"/\" \"{name}\"\r\n"));
+                let state = state.lock().unwrap();
+                let names = SERVER_MAILBOXES
+                    .iter()
+                    .map(|n| n.to_string())
+                    .chain(state.extra_listed.iter().cloned());
+                for name in names {
+                    let attributes = if state.drafts.as_deref() == Some(name.as_str()) {
+                        "\\HasNoChildren \\Drafts"
+                    } else {
+                        "\\HasNoChildren"
+                    };
+                    reply.push_str(&format!("* LIST ({attributes}) \"/\" \"{name}\"\r\n"));
                 }
+                drop(state);
                 reply.push_str(&format!("{tag} OK LIST done\r\n"));
                 send(stream, &reply)?;
             }
@@ -800,6 +888,10 @@ fn session(
                 drop(state);
                 send(stream, &reply)?;
             }
+            "APPEND" => {
+                let reply = append(stream, state, args, &tag)?;
+                send(stream, &reply)?;
+            }
             "LOGOUT" => {
                 send(stream, &format!("* BYE bye\r\n{tag} OK LOGOUT done\r\n"))?;
                 return None;
@@ -809,6 +901,75 @@ fn session(
             }
         }
     }
+}
+
+/// Handles `APPEND <mailbox> (<flags>) {n}` with a synchronising literal:
+/// answers `+ ready`, reads `n` bytes and the rest of the line, and stores
+/// the message in the named mailbox with UID = last UID + 1 and the given
+/// flags. Returns the tagged reply: `OK [APPENDUID <uidvalidity> <uid>]`
+/// with `UIDPLUS`, plain `OK` without, `NO [TRYCREATE]` for a missing
+/// mailbox.
+fn append(
+    stream: &mut (impl Read + Write),
+    state: &Mutex<State>,
+    args: &str,
+    tag: &str,
+) -> Option<String> {
+    let name = imap_strings(args).into_iter().next().unwrap_or_default();
+    let flags: Vec<String> = match (args.find('('), args.find(')')) {
+        (Some(open), Some(close)) if open < close => args[open + 1..close]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let size: usize = args
+        .rsplit_once('{')
+        .and_then(|(_, rest)| rest.strip_suffix('}'))
+        .and_then(|n| n.parse().ok())?;
+    send(stream, "+ ready\r\n")?;
+    let mut bytes = vec![0u8; size];
+    stream.read_exact(&mut bytes).ok()?;
+    let _rest = read_line(stream)?;
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    let mut state = state.lock().unwrap();
+    let Some(index) = state.mailboxes.iter().position(|m| m.name == name) else {
+        return Some(format!("{tag} NO [TRYCREATE] no such mailbox\r\n"));
+    };
+    let subject = raw_header(&raw, "Subject").unwrap_or_default();
+    let mailbox = &mut state.mailboxes[index];
+    let uid = mailbox.messages.last().map_or(1, |m| m.uid + 1);
+    let uidvalidity = mailbox.uidvalidity;
+    mailbox.messages.push(FakeMessage {
+        uid,
+        from_name: None,
+        from: "",
+        to: "",
+        subject,
+        body: "",
+        internal_date: "22-Oct-2026 09:00:00 +0000",
+        flags: flags.clone(),
+        source: Some(raw.clone()),
+    });
+    let code = if state.advertises("UIDPLUS") {
+        format!("[APPENDUID {uidvalidity} {uid}] ")
+    } else {
+        String::new()
+    };
+    state.appended.push((name, flags, raw));
+    Some(format!("{tag} OK {code}APPEND done\r\n"))
+}
+
+/// The value of the first header `name` in `raw`, unfolded (CRLF before
+/// whitespace removed), surrounding whitespace trimmed.
+pub fn raw_header(raw: &str, name: &str) -> Option<String> {
+    let head = raw.split("\r\n\r\n").next().unwrap_or(raw);
+    let unfolded = head.replace("\r\n ", " ").replace("\r\n\t", "\t");
+    unfolded.split("\r\n").find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
 }
 
 /// Copies (or moves) the messages of the open mailbox `index` that `args`
