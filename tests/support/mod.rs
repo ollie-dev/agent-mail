@@ -199,6 +199,35 @@ pub fn fixture_mailboxes() -> Vec<FakeMailbox> {
             uidvalidity: TRIAGE_UIDVALIDITY,
             messages: triage_messages(),
         },
+        FakeMailbox {
+            name: "Filing",
+            uidvalidity: FILING_UIDVALIDITY,
+            messages: filing_messages(),
+        },
+    ]
+}
+
+/// UIDVALIDITY of the fixture `Filing`.
+pub const FILING_UIDVALIDITY: u32 = 1_700_000_008;
+
+/// The `Filing` mailbox's three simple messages: UID 1 with no flags, UID 2
+/// marked `\Deleted` by the human but not yet expunged, UID 3 `\Seen`.
+fn filing_messages() -> Vec<FakeMessage> {
+    let message = |uid, from, subject: &str, list: &[&str]| FakeMessage {
+        uid,
+        from_name: None,
+        from,
+        to: LOGIN,
+        subject: subject.to_string(),
+        body: "filing body",
+        internal_date: "08-Oct-2026 09:00:00 +0000",
+        flags: flags(list),
+        source: None,
+    };
+    vec![
+        message(1, "alice@example.com", "Filing one", &[]),
+        message(2, "bob@example.com", "Filing two", &["\\Deleted"]),
+        message(3, "carol@example.com", "Filing three", &["\\Seen"]),
     ]
 }
 
@@ -390,6 +419,16 @@ struct State {
     fetch_uid_counts: Vec<usize>,
     fetches: Vec<String>,
     stores: Vec<String>,
+    /// Extra capability atoms advertised, e.g. `MOVE` and `UIDPLUS`.
+    capabilities: Vec<String>,
+}
+
+impl State {
+    fn advertises(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(capability))
+    }
 }
 
 /// An in-process fake IMAP server on a real TCP port.
@@ -401,13 +440,21 @@ pub struct FakeImap {
 }
 
 impl FakeImap {
-    /// Starts a server in `mode` on an ephemeral localhost port.
+    /// Starts a server in `mode` on an ephemeral localhost port. It
+    /// advertises neither `MOVE` nor `UIDPLUS`.
     pub fn start(mode: Mode) -> Self {
+        Self::start_with_capabilities(mode, &[])
+    }
+
+    /// Like [`FakeImap::start`], also advertising `capabilities` (e.g.
+    /// `MOVE`, `UIDPLUS`), before and after login alike.
+    pub fn start_with_capabilities(mode: Mode, capabilities: &[&str]) -> Self {
         let (ca, tls) = tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let port = listener.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(State {
             mailboxes: fixture_mailboxes(),
+            capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
             ..State::default()
         }));
         let connections = Arc::new(AtomicUsize::new(0));
@@ -468,6 +515,24 @@ impl FakeImap {
                     .map(|msg| (m.name.to_string(), msg.uid, msg.flags.clone()))
             })
             .collect()
+    }
+
+    /// UID, subject and flags of every message in mailbox `name` (raw
+    /// name), in UID order. Empty if there is no such mailbox.
+    pub fn messages_in(&self, name: &str) -> Vec<(u32, String, Vec<String>)> {
+        let state = self.state.lock().unwrap();
+        let mut messages: Vec<(u32, String, Vec<String>)> = state
+            .mailboxes
+            .iter()
+            .filter(|m| m.name == name)
+            .flat_map(|m| {
+                m.messages
+                    .iter()
+                    .map(|msg| (msg.uid, msg.subject.clone(), msg.flags.clone()))
+            })
+            .collect();
+        messages.sort_by_key(|(uid, _, _)| *uid);
+        messages
     }
 
     /// Number of TCP connections accepted.
@@ -570,11 +635,15 @@ fn session(
         state.lock().unwrap().commands.push(verb.clone());
         match verb.as_str() {
             "CAPABILITY" => {
-                let caps = if !secure && mode == Mode::Starttls {
-                    "IMAP4rev1 STARTTLS LOGINDISABLED"
+                let mut caps = if !secure && mode == Mode::Starttls {
+                    "IMAP4rev1 STARTTLS LOGINDISABLED".to_string()
                 } else {
-                    "IMAP4rev1 AUTH=PLAIN"
+                    "IMAP4rev1 AUTH=PLAIN".to_string()
                 };
+                for extra in &state.lock().unwrap().capabilities {
+                    caps.push(' ');
+                    caps.push_str(extra);
+                }
                 send(
                     stream,
                     &format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY done\r\n"),
@@ -691,9 +760,45 @@ fn session(
                 drop(state);
                 send(stream, &reply)?;
             }
-            "EXPUNGE" | "UID EXPUNGE" | "COPY" | "UID COPY" | "MOVE" | "UID MOVE" => {
-                // Recorded above; this fake never changes state for them.
-                send(stream, &format!("{tag} NO not supported by the fake\r\n"))?;
+            "COPY" | "UID COPY" | "MOVE" | "UID MOVE" => {
+                let mut state = state.lock().unwrap();
+                let moving = verb.ends_with("MOVE");
+                let reply = if moving && !state.advertises("MOVE") {
+                    format!("{tag} BAD MOVE not advertised\r\n")
+                } else {
+                    match opened {
+                        None => format!("{tag} BAD no mailbox open\r\n"),
+                        Some((_, true)) if moving => {
+                            format!("{tag} NO mailbox is read-only\r\n")
+                        }
+                        Some((index, _)) => {
+                            let by_uid = verb.starts_with("UID");
+                            copy_or_move(&mut state, index, args, by_uid, moving, &tag)
+                        }
+                    }
+                };
+                drop(state);
+                send(stream, &reply)?;
+            }
+            "EXPUNGE" | "UID EXPUNGE" => {
+                let mut state = state.lock().unwrap();
+                let by_uid = verb == "UID EXPUNGE";
+                let reply = if by_uid && !state.advertises("UIDPLUS") {
+                    format!("{tag} BAD UID EXPUNGE needs UIDPLUS\r\n")
+                } else {
+                    match opened {
+                        None => format!("{tag} BAD no mailbox open\r\n"),
+                        Some((_, true)) => format!("{tag} NO mailbox is read-only\r\n"),
+                        Some((index, false)) => {
+                            let set = by_uid.then_some(args.trim());
+                            let mut reply = expunge(&mut state.mailboxes[index], set);
+                            reply.push_str(&format!("{tag} OK {verb} done\r\n"));
+                            reply
+                        }
+                    }
+                };
+                drop(state);
+                send(stream, &reply)?;
             }
             "LOGOUT" => {
                 send(stream, &format!("* BYE bye\r\n{tag} OK LOGOUT done\r\n"))?;
@@ -704,6 +809,96 @@ fn session(
             }
         }
     }
+}
+
+/// Copies (or moves) the messages of the open mailbox `index` that `args`
+/// (`<set> <mailbox>`) names to the target mailbox. Each copy keeps its
+/// flags and gets UID = the target's last UID + 1. With `UIDPLUS`, reports
+/// `COPYUID`: untagged before the `EXPUNGE` responses for a move, in the
+/// tagged `OK` for a copy. A missing target answers `NO [TRYCREATE]`.
+fn copy_or_move(
+    state: &mut State,
+    index: usize,
+    args: &str,
+    by_uid: bool,
+    moving: bool,
+    tag: &str,
+) -> String {
+    let Some((set, rest)) = args.split_once(' ') else {
+        return format!("{tag} BAD bad arguments\r\n");
+    };
+    let Some(name) = imap_strings(rest).into_iter().next() else {
+        return format!("{tag} BAD bad arguments\r\n");
+    };
+    let Some(target) = state.mailboxes.iter().position(|m| m.name == name) else {
+        return format!("{tag} NO [TRYCREATE] no such mailbox\r\n");
+    };
+    let chosen: Vec<(usize, FakeMessage)> = state.mailboxes[index]
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(seq, m)| {
+            let id = if by_uid { m.uid } else { *seq as u32 + 1 };
+            in_uid_set(set, id)
+        })
+        .map(|(seq, m)| (seq, m.clone()))
+        .collect();
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    for (_, message) in &chosen {
+        let destination = &mut state.mailboxes[target];
+        let uid = destination.messages.last().map_or(1, |m| m.uid + 1);
+        old.push(message.uid.to_string());
+        new.push(uid.to_string());
+        destination.messages.push(FakeMessage {
+            uid,
+            ..message.clone()
+        });
+    }
+    let copyuid = (state.advertises("UIDPLUS") && !chosen.is_empty()).then(|| {
+        format!(
+            "[COPYUID {} {} {}] ",
+            state.mailboxes[target].uidvalidity,
+            old.join(","),
+            new.join(",")
+        )
+    });
+    let verb = if moving { "MOVE" } else { "COPY" };
+    if !moving {
+        return format!("{tag} OK {}{verb} done\r\n", copyuid.unwrap_or_default());
+    }
+    let mut reply = String::new();
+    if let Some(code) = copyuid {
+        reply.push_str(&format!("* OK {code}moved\r\n"));
+    }
+    // Highest sequence number first, so each stays valid as it is sent.
+    for (seq, _) in chosen.iter().rev() {
+        state.mailboxes[index].messages.remove(*seq);
+        reply.push_str(&format!("* {} EXPUNGE\r\n", seq + 1));
+    }
+    reply.push_str(&format!("{tag} OK {verb} done\r\n"));
+    reply
+}
+
+/// Removes the `\Deleted` messages of `mailbox`, all of them, or with
+/// `uid_set` only those in it. Returns one `EXPUNGE` response per message.
+fn expunge(mailbox: &mut FakeMailbox, uid_set: Option<&str>) -> String {
+    let mut reply = String::new();
+    let mut seq = 0;
+    mailbox.messages.retain(|m| {
+        seq += 1;
+        let deleted = m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Deleted"));
+        let named = uid_set.is_none_or(|set| in_uid_set(set, m.uid));
+        if deleted && named {
+            // Later messages move down by one with each removal.
+            reply.push_str(&format!("* {seq} EXPUNGE\r\n"));
+            seq -= 1;
+            false
+        } else {
+            true
+        }
+    });
+    reply
 }
 
 /// Applies `STORE` arguments (`<set> [+|-]FLAGS[.SILENT] (<flags>)`) to
