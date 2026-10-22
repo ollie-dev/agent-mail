@@ -313,33 +313,34 @@ fn assert_denied(grants: Vec<Grant>, reference: &str, account: &str) {
     assert_eq!(s.triage_flags(1), before);
     let lines = s.audit();
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(
-        entry(&lines[0]),
-        json!({
-            "mandate": "aaaa1111",
-            "operation": "flag",
-            "account": account,
-            "mailbox": "Triage",
-            "messages": [reference],
-            "change": "+\\Seen",
-            "outcome": "denied",
-            "reason": "denied"
-        })
-    );
-    assert_eq!(
-        keys_in_order(&lines[0]),
-        [
-            "time",
-            "mandate",
-            "operation",
-            "account",
-            "mailbox",
-            "messages",
-            "change",
-            "outcome",
-            "reason"
-        ]
-    );
+    // An Account the Mandate does not cover selects no Mandate, so the
+    // line names none.
+    let covered = account == LOGIN;
+    let mut expected = json!({
+        "operation": "flag",
+        "account": account,
+        "mailbox": "Triage",
+        "messages": [reference],
+        "change": "+\\Seen",
+        "outcome": "denied",
+        "reason": "denied"
+    });
+    let mut keys = vec![
+        "time",
+        "operation",
+        "account",
+        "mailbox",
+        "messages",
+        "change",
+        "outcome",
+        "reason",
+    ];
+    if covered {
+        expected["mandate"] = json!("aaaa1111");
+        keys.insert(1, "mandate");
+    }
+    assert_eq!(entry(&lines[0]), expected);
+    assert_eq!(keys_in_order(&lines[0]), keys);
 }
 
 #[test]

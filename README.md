@@ -1,14 +1,50 @@
 # Agent Mail - Connects you agents securely to your E-Mails
 Agent Mail is a simple and secure way to configure access to your email for your agents. It securely stores your credentials hidden from your agents and allows you to configure what agents can access and do.
 
-## Search
+## Several Mandates and whoami
 
-`agent-mail search` finds messages in one mailbox the agent's Mandate grants `search` on. It only reads: the mailbox is opened read-only, and no flag (not even `\Seen`) changes.
+An agent can hold several Mandates at once, for example one for a work account and one for a private account. `AGENT_MAIL_TOKEN` takes one or more agent tokens, comma-separated; spaces around each token and empty fields are ignored, and a token given twice counts once:
 
 ```
-agent-mail search [--mailbox NAME] [--from S] [--to S] [--subject S] [--text S]
+AGENT_MAIL_TOKEN="amt_...work...,amt_...private..."
+```
+
+**Choosing the account.** Every command works on one account. On `list`, `search` and `draft`, name it with `--account <LOGIN>`, the account's login exactly as it appears in Grants and output (for example `agent-mail list --account agent@example.test`). It may be left out when the presented tokens reach only one account. `read`, `flag`, `move` and `draft --reply-to` take the account from the message reference, so a reference from `search` can be followed without naming the account again; they do not accept `--account`, and `draft` refuses `--account` together with `--reply-to`. An empty `--account`, or one holding a line break or NUL, is a usage error (exit code 2).
+
+**One Mandate per call.** agent-mail uses the one presented Mandate that covers the account. Every Grant check, the mailboxes `list` shows, the credential used and the audit line's `mandate` come from that Mandate only: Grants never combine across Mandates, so a Grant in one Mandate never allows anything on an account covered only by another. An account no presented Mandate covers is denied before any connection.
+
+**`account_required`.** When the tokens reach several accounts and the command names none, the call fails before any connection with `account_required`; its `accounts` list holds the reachable logins to choose from. Run the command again with `--account` and one of them:
+
+```json
+{"error":{"accounts":["agent@example.test","other@example.test"],"code":"account_required","message":"..."}}
+```
+
+**`ambiguous_mandate`.** When two presented Mandates cover the same account, agent-mail never picks one: any command on that account fails before any Grant check or connection with `ambiguous_mandate`, naming the `account` and the short IDs of the Mandates in `mandates`, in token order. This happens even when only one of them grants the operation. Present only one of those tokens in `AGENT_MAIL_TOKEN`, or ask the human to delete one of the Mandates with `agent-mail mandate delete <ID>`. Commands on other accounts are unaffected.
+
+**Invalid tokens.** A token that is malformed, unknown, or whose stored record does not open is ignored, and the valid tokens still work. The call's result is unchanged, and stderr gets one warning line before any error, giving the 1-based position of each ignored token in `AGENT_MAIL_TOKEN` (empty fields count), never the token itself:
+
+```json
+{"warning":{"code":"invalid_token","positions":[1],"message":"the token at position 1 of AGENT_MAIL_TOKEN is not valid and was ignored; check it, or ask the human for a new token"}}
+```
+
+With `--text` it is `warning: invalid_token: <message>`. If no token is valid, the call fails with `invalid_token`; if no token is given at all, with `missing_token`.
+
+**`whoami`.** `agent-mail whoami` shows what the presented tokens allow, so an agent can check before it tries. It needs no Grant, makes no connection and writes no audit line. It prints one JSON object: `mandates`, in token order, each with `id`, `name`, `accounts` (`login`, `host`, `port`, `tls`) and `grants` (`operation`, `account`, `mailboxes`), taken from the opened Mandate, and `invalid_tokens`, the positions of the tokens that are not valid. Two Mandates covering one account are both shown. It never shows a credential, a token or a token hash.
+
+```json
+{"mandates":[{"id":"aaaa1111","name":"work-inbox","accounts":[{"login":"agent@example.test","host":"imap.example.test","port":993,"tls":"implicit"}],"grants":[{"operation":"list","account":"agent@example.test","mailboxes":["INBOX","Archive"]}]}],"invalid_tokens":[]}
+```
+
+With `--text` (`agent-mail --text whoami` or `agent-mail whoami --text`) each Mandate is a line `<id>  <name>`, followed by `  account <login> (<host>:<port>, <tls>)` and `  grant <operation> on <account>: <mailboxes>` lines, and each invalid token a line `token <position> of AGENT_MAIL_TOKEN is not valid and was ignored`.
+
+## Search
+
+`agent-mail search` finds messages in one mailbox the agent's Mandate grants `search` on, in the account given with `--account` (see [Several Mandates and whoami](#several-mandates-and-whoami)). It only reads: the mailbox is opened read-only, and no flag (not even `\Seen`) changes.
+
+```
+agent-mail search [--account LOGIN] [--mailbox NAME] [--from S] [--to S] [--subject S] [--text S]
                   [--since YYYY-MM-DD] [--before YYYY-MM-DD] [--unseen] [--flagged] [--limit N]
-agent-mail search [--mailbox NAME] --gmail QUERY [--limit N]
+agent-mail search [--account LOGIN] [--mailbox NAME] --gmail QUERY [--limit N]
 ```
 
 - `--mailbox`: the mailbox name as `agent-mail list` prints it. Default `INBOX`.
@@ -110,11 +146,11 @@ agent-mail never sends `CLOSE` or a plain `EXPUNGE` and never fetches a message 
 `agent-mail draft` prepares a message for you to review and send: it is appended, with the `\Draft` flag, to your account's Drafts mailbox, and you send it (or not) from your own mail client. agent-mail never sends mail.
 
 ```
-agent-mail draft --to <ADDR> [--to <ADDR>...] --subject <TEXT> --body <TEXT>
+agent-mail draft [--account <LOGIN>] --to <ADDR> [--to <ADDR>...] --subject <TEXT> --body <TEXT>
 agent-mail draft --to <ADDR> [--to <ADDR>...] --reply-to <REF> --body <TEXT>
 ```
 
-The Mandate needs a `draft` Grant on the account; `draft` Grants take no mailbox list. Without `--reply-to` the account is the Mandate's only account (a Mandate covering several accounts fails with `account_required`). If the Grant is missing, the call is denied before any connection is made.
+The Mandate needs a `draft` Grant on the account; `draft` Grants take no mailbox list. Without `--reply-to` the account is the one given with `--account`, which may be left out when the presented tokens reach only one account; with several and no `--account`, the call fails with `account_required` and lists them (see [Several Mandates and whoami](#several-mandates-and-whoami)). With `--reply-to` the account is the reference's, and `--account` is not allowed. If the Grant is missing, the call is denied before any connection is made.
 
 - `--to` is required and repeatable; recipients keep their order. Each value is a bare address `local@domain`: exactly one `@` with something on each side, printable ASCII only, no spaces and none of `<>()[]\,;:"`, at most 254 characters. Display names (`Carol <carol@example.com>`) are not accepted.
 - `--subject` is required without `--reply-to`, and cannot be combined with it. It may hold any text except line breaks and NUL, and must not be empty.
@@ -152,9 +188,9 @@ The directory is created on the first call with mode `0700` and the file with mo
 Each line is one JSON object with these keys, in this order, absent keys left out:
 
 - `time`: when the call was made, RFC 3339 UTC to the second, e.g. `2026-10-21T09:30:15Z`.
-- `mandate`: the Mandate's short ID; left out when the agent's token opened no Mandate.
+- `mandate`: the short ID of the Mandate selected for the call; left out when no presented token opened a Mandate, when no account was chosen, when no presented Mandate covers the account, or when several do (`ambiguous_mandate`).
 - `operation`: the operation: `list`, `search`, `read`, `flag`, `move` or `draft`.
-- `account`: the account's login; left out when no single account was chosen.
+- `account`: the account's login; left out when no single account was chosen (`account_required`).
 - `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read`, `flag` and `move`, the mailbox the message reference names, which for `move` is the source; for `draft`, the Drafts mailbox, once it was found (left out when the call was denied or failed before that) (not used by `list`).
 - `target`: for `move`, the target mailbox as the agent named it, also when the call was denied or failed. Not used by `list`, `search`, `read`, `flag` or `draft`.
 - `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed; for `move`, the reference the agent asked for, followed on success by the message's new reference in the target when the server reported one; for `draft`, in reply mode the original's reference (also when the call was denied or failed), followed on success by the new draft's reference when the server reported one, and left out when that leaves none (not used by `list`).
@@ -162,7 +198,7 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 - `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
 - `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `account_required`, `ambiguous_mandate`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
 The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
 

@@ -1636,3 +1636,37 @@ pub fn audit_lines(log: &std::path::Path) -> Vec<String> {
     );
     text.lines().map(str::to_string).collect()
 }
+
+/// A Mandate with short ID `id` and name `name`, covering `logins` on the
+/// fake server at `port` (implicit TLS) with the given Grants.
+pub fn mandate_with_id(
+    id: &str,
+    name: &str,
+    logins: &[&str],
+    port: u16,
+    grants: Vec<Grant>,
+) -> Mandate {
+    Mandate {
+        name: name.to_string(),
+        id: id.to_string(),
+        created: 1_792_483_200,
+        accounts: logins
+            .iter()
+            .map(|login| account(login, port, TlsMode::Implicit))
+            .collect(),
+        policy: Policy { grants },
+    }
+}
+
+/// Runs `agent-mail <args>` in-process with the raw string `tokens` in
+/// `AGENT_MAIL_TOKEN` (or the variable unset for `None`), trusting only
+/// `server`'s CA and appending audit entries to `log`.
+pub fn run_raw_tokens(
+    args: &[&str],
+    tokens: Option<&str>,
+    store: &dyn MandateStore,
+    server: &FakeImap,
+    log: &std::path::Path,
+) -> RunOutput {
+    run_logged(args, tokens, store, &server.ca, log)
+}

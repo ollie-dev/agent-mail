@@ -283,10 +283,11 @@ fn assert_denied(grants: Vec<Grant>, reference: &str, account: &str, mailbox: &s
     assert_eq!(s.snapshot(), before);
     let lines = s.audit();
     assert_eq!(lines.len(), 1, "{lines:?}");
+    let mut without_mandate = entry(&lines[0]);
+    without_mandate.as_object_mut().unwrap().remove("mandate");
     assert_eq!(
-        entry(&lines[0]),
+        without_mandate,
         json!({
-            "mandate": "aaaa1111",
             "operation": "move",
             "account": account,
             "mailbox": "INBOX",
@@ -297,10 +298,12 @@ fn assert_denied(grants: Vec<Grant>, reference: &str, account: &str, mailbox: &s
         })
     );
     assert_eq!(
-        keys_in_order(&lines[0]),
+        keys_in_order(&lines[0])
+            .into_iter()
+            .filter(|k| k != "mandate")
+            .collect::<Vec<_>>(),
         [
             "time",
-            "mandate",
             "operation",
             "account",
             "mailbox",
@@ -309,6 +312,13 @@ fn assert_denied(grants: Vec<Grant>, reference: &str, account: &str, mailbox: &s
             "outcome",
             "reason"
         ]
+    );
+    // An Account the Mandate does not cover selects no Mandate, so the
+    // line names none.
+    let expected_mandate = (account == LOGIN).then_some("aaaa1111");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&lines[0]).unwrap()["mandate"].as_str(),
+        expected_mandate
     );
 }
 
