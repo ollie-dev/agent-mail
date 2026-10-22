@@ -101,9 +101,44 @@ How the message is moved depends on what the server advertises after login:
 
 agent-mail never sends `CLOSE` or a plain `EXPUNGE` and never fetches a message body. If the mailbox was renumbered since the search (its UIDVALIDITY changed), nothing is moved and the call fails with `stale_reference`: search again for a fresh reference. A UID that no longer exists fails with `message_not_found`, and a target mailbox the server refuses (for example one that does not exist) fails with `mailbox_not_found` naming the target; in both cases nothing is moved. agent-mail does not create mailboxes.
 
+## Draft
+
+`agent-mail draft` prepares a message for you to review and send: it is appended, with the `\Draft` flag, to your account's Drafts mailbox, and you send it (or not) from your own mail client. agent-mail never sends mail.
+
+```
+agent-mail draft --to <ADDR> [--to <ADDR>...] --subject <TEXT> --body <TEXT>
+agent-mail draft --to <ADDR> [--to <ADDR>...] --reply-to <REF> --body <TEXT>
+```
+
+The Mandate needs a `draft` Grant on the account; `draft` Grants take no mailbox list. Without `--reply-to` the account is the Mandate's only account (a Mandate covering several accounts fails with `account_required`). If the Grant is missing, the call is denied before any connection is made.
+
+- `--to` is required and repeatable; recipients keep their order. Each value is a bare address `local@domain`: exactly one `@` with something on each side, printable ASCII only, no spaces and none of `<>()[]\,;:"`, at most 254 characters. Display names (`Carol <carol@example.com>`) are not accepted.
+- `--subject` is required without `--reply-to`, and cannot be combined with it. It may hold any text except line breaks and NUL, and must not be empty.
+- `--body` is required. It may hold any text except NUL, including line breaks.
+
+Anything else is a usage error (exit code 2): nothing is connected to and nothing is logged.
+
+**How the Drafts mailbox is found.** agent-mail lists your mailboxes and uses the first one, in server order, that the server marks with the `\Drafts` special-use attribute (RFC 6154), whatever its name, so localised names such as `[Gmail]/Entwürfe` work. The name never comes from the agent, so an agent cannot write into another mailbox. If no mailbox is marked, the call fails with `drafts_not_found` and nothing is created: create a Drafts folder, or mark one as the Drafts folder, in your mail client.
+
+**Reply mode.** With `--reply-to <REF>`, given the `ref` that `agent-mail search` printed for the original message, the draft threads with it: `In-Reply-To` is the original's Message-ID, `References` is the original's References followed by its Message-ID, and the subject is the original's with `Re: ` in front, unless it already starts with `Re:` (in any case). The account is the Mandate's account whose login matches the reference, and the Mandate also needs a `read` Grant on the original's mailbox; without it the call is denied (with `operation` `read` and the mailbox) before any connection. The original is opened read-only and its headers are fetched with a peek, so it is not marked as read. Message ids from the original that hold anything but printable ASCII without spaces or angle brackets are left out; an original without a Message-ID gets a reply subject but neither header. If the mailbox was renumbered since the search, the call fails with `stale_reference`, and a UID that no longer exists fails with `message_not_found`; in both cases no draft is created.
+
+The draft is a plain-text UTF-8 message with `From` (your login), `To`, `Subject` (RFC 2047-encoded when not ASCII), `Date` and a random `Message-ID`; its body is quoted-printable encoded, so no line is too long.
+
+The JSON result has these keys, in this order: `ref` (the new draft's reference, built from the `APPENDUID` response (RFC 4315); `null` when the server reports none), `account`, `mailbox` (the Drafts mailbox), `to`, `subject` (as sent, which in reply mode is the reply subject), and `original` (the `--reply-to` reference, or `null`). For example:
+
+```json
+{"ref":"agent@example.test/Drafts/1700000010/1","account":"agent@example.test","mailbox":"Drafts","to":["carol@example.com"],"subject":"Status","original":null}
+```
+
+With `--text` (`agent-mail --text draft ...` or after the subcommand) the output is one line, `draft created: <ref>`, or `draft created in <mailbox> (new reference not reported)`.
+
+Errors besides those above: `denied`, `drafts_not_found`, `invalid_draft` (a value the command line would have refused, reached through another adapter; the message names the field but never echoes the value), `stale_reference`, `message_not_found`, `invalid_reference`, and the connection errors every command shares.
+
+Drafts cannot be edited, replaced or deleted with agent-mail: there is no command for it, and `draft` never selects a mailbox read-write or sends `STORE`, `COPY`, `MOVE` or `EXPUNGE`. Change or discard a draft in your own mail client.
+
 ## Audit log
 
-Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail flag` and `agent-mail move` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
+Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail flag`, `agent-mail move` and `agent-mail draft` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
 
 - macOS: `~/Library/Application Support/agent-mail/audit.log` (the home directory comes from the user database, not from `$HOME`)
 - Other Unix: `$XDG_DATA_HOME/agent-mail/audit.log`, or `~/.local/share/agent-mail/audit.log` when `XDG_DATA_HOME` is unset
@@ -114,14 +149,15 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 
 - `time`: when the call was made, RFC 3339 UTC to the second, e.g. `2026-10-21T09:30:15Z`.
 - `mandate`: the Mandate's short ID; left out when the agent's token opened no Mandate.
-- `operation`: the operation: `list`, `search`, `read`, `flag` or `move`.
+- `operation`: the operation: `list`, `search`, `read`, `flag`, `move` or `draft`.
 - `account`: the account's login; left out when no single account was chosen.
-- `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read`, `flag` and `move`, the mailbox the message reference names, which for `move` is the source (not used by `list`).
-- `target`: for `move`, the target mailbox as the agent named it, also when the call was denied or failed. Not used by `list`, `search`, `read` or `flag`.
-- `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed; for `move`, the reference the agent asked for, followed on success by the message's new reference in the target when the server reported one (not used by `list`).
-- `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read` or `move`.
-- `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag` or `move`, left out when the search failed). How many matched in total is not logged.
+- `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read`, `flag` and `move`, the mailbox the message reference names, which for `move` is the source; for `draft`, the Drafts mailbox, once it was found (left out when the call was denied or failed before that) (not used by `list`).
+- `target`: for `move`, the target mailbox as the agent named it, also when the call was denied or failed. Not used by `list`, `search`, `read`, `flag` or `draft`.
+- `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed; for `move`, the reference the agent asked for, followed on success by the message's new reference in the target when the server reported one; for `draft`, in reply mode the original's reference (also when the call was denied or failed), followed on success by the new draft's reference when the server reported one, and left out when that leaves none (not used by `list`).
+- `recipients`: for `draft`, the recipients the agent gave, in order, on every `draft` entry including denials; an empty list when one of them was not a valid address, so a rejected value is never logged. Not used by `list`, `search`, `read`, `flag` or `move`.
+- `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
+- `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox` or `move_unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found` or `invalid_draft`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
-The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
+The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
