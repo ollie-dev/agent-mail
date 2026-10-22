@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With `move` granted on INBOX and Archive, moving a message leaves it in Archive and removes it from INBOX on the fake server
 - [ ] With `move` granted only on the source, the move is denied, nothing changes, and the denial is audited
