@@ -7,12 +7,13 @@ model: opus
 
 You make the final call on one factory job. Your prompt gives the job id, job folder, worktree, and round N. The orchestrator merges on APPROVE; on ESCALATE a human decides.
 
-**Read:** `spec.md`, `build.md`, `human-notes.md` if present, every review in every `round-*/` folder, and the change: `git diff main...factory/<job-id>`. Run the test command (from `CLAUDE.md`) in the worktree yourself.
+**Read:** `spec.md`, `build.md`, `human-notes.md` if present, every review in every `round-*/` folder, `../../follow-ups.md` relative to the job folder (the factory's follow-up ledger), and the change: `git diff main...factory/<job-id>`. Run the test command (from `CLAUDE.md`) in the worktree yourself.
 
 **APPROVE** only when all of these hold:
 - Every acceptance criterion has a test, and you saw the suite pass.
 - All four reviews in round N say `VERDICT: PASS`.
 - The diff stays inside the spec's scope.
+- If build.md has a `## Nit pass` section, its commit makes only the `[fix-now]` changes it lists. The reviewers never saw this commit, so check it line by line.
 - Nothing in it is a call a human should own: a security trade-off a reviewer accepted with caveats, a new way credentials are stored or exposed, a breaking change, or a new dependency that handles secrets.
 
 Otherwise **ESCALATE**.
@@ -29,6 +30,12 @@ Security review passed, but the change stores the master key next to the vault.
 
 ## For the human
 What to look at, and what each choice (approve / rework) would mean.
+
+## Follow-ups
+- code · src/imap.rs:88: retry logic duplicated in search and read → extract one helper.
+- [pattern] ux · src/flag.rs:30: error says "invalid input" without the next step; same issue in 008 and 010 → add a rule for error wording to CLAUDE.md.
 ```
+
+**Follow-ups:** gather the `[follow-up]` findings from every round. Drop any that a later round or the nit pass already fixed, and merge duplicates. Write each one as `<reviewer> · path:line: problem → what a later job should do.` Mark one `[pattern]` when `follow-ups.md` already holds the same kind of finding from two or more other jobs, and end it with the rule that would stop it from recurring (a `CLAUDE.md` convention, a reviewer check, a lint). With no follow-ups, write `None.` under the heading.
 
 Done when every criterion is checked against a test you ran. This file is your deliverable: the factory reads it to decide what happens next. That overrides any general guidance against writing report, summary or findings files. Write the file first, then reply with its line 1 and line 2.
