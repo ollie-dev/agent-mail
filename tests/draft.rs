@@ -982,3 +982,37 @@ fn stale_or_missing_reply_references_create_nothing() {
     assert!(lines[0].contains("\"outcome\":\"allowed\",\"reason\":\"stale_reference\""));
     assert!(lines[1].contains("\"outcome\":\"allowed\",\"reason\":\"message_not_found\""));
 }
+
+#[test]
+fn help_says_subject_and_reply_to_cannot_be_combined() {
+    let s = Setup::granted();
+    for flag in ["-h", "--help"] {
+        let help = s.run(&["draft", flag]);
+        assert_eq!(help.code, 0);
+        let subject = help
+            .stdout
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|l| !l.starts_with("--subject"))
+            .take_while(|l| !l.starts_with("--body"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            subject.contains("required without --reply-to and not allowed with it"),
+            "draft {flag}: {subject:?}"
+        );
+    }
+    let long = s.run(&["draft", "--help"]);
+    assert!(long.stdout.contains("but not both"));
+    s.usage_error(&[
+        "draft",
+        "--to",
+        "a@example.com",
+        "--subject",
+        "X",
+        "--body",
+        "Y",
+        "--reply-to",
+        &t(1),
+    ]);
+}
