@@ -1036,14 +1036,52 @@ fn ac6_readme_and_help_document_gmail_search_and_the_live_test() {
         assert!(readme.contains(needle), "README lacks {needle}");
     }
 
+    let audit = readme_section("Audit log");
+    let reason = audit
+        .lines()
+        .find(|l| l.starts_with("- `reason`"))
+        .expect("README audit section has a `reason` bullet");
+    assert!(
+        reason.contains("`unsupported`"),
+        "README `reason` bullet lacks `unsupported`"
+    );
+
     let s = Setup::granted();
     let out = s.run(&["search", "--help"]);
     assert_eq!(out.code, 0);
-    for needle in ["--gmail <QUERY>", "X-GM-EXT-1", "cannot be combined"] {
+    for needle in [
+        "--gmail <QUERY>",
+        "X-GM-EXT-1",
+        "`unsupported`",
+        "Cannot be combined with --from, --to, --subject, --text, --since, --before, --unseen or --flagged",
+        "works with --mailbox and --limit",
+    ] {
         assert!(
             out.stdout.contains(needle),
             "help lacks {needle}: {}",
             out.stdout
+        );
+    }
+
+    // `-h` shows one short line per option; the detail is in `--help`.
+    let short = s.run(&["search", "-h"]);
+    assert_eq!(short.code, 0);
+    let gmail = short
+        .stdout
+        .lines()
+        .find(|l| l.contains("--gmail"))
+        .expect("-h lists --gmail");
+    assert!(
+        gmail.chars().count() < 100,
+        "-h --gmail line is {} characters: {gmail}",
+        gmail.chars().count()
+    );
+    assert!(!short.stdout.contains("X-GM-EXT-1"), "{}", short.stdout);
+    for line in short.stdout.lines() {
+        assert!(
+            line.chars().count() < 100,
+            "-h line is {} characters: {line}",
+            line.chars().count()
         );
     }
     assert_eq!(s.server.connections(), 0);
