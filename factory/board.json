@@ -259,6 +259,24 @@
       "reason": "",
       "updated": "2026-10-22T05:48:24Z",
       "builder": "a19396dac8a9a4569"
+    },
+    {
+      "id": "012-create-drafts",
+      "title": "Create drafts",
+      "feature": "Ticket 11: Create drafts, including replies (.scratch/agent-mail-v1/issues/11-draft.md)",
+      "branch": "factory/012-create-drafts",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "reason": "",
+      "updated": "2026-10-22T06:50:20Z",
+      "builder": "a230257b44f4a9bf1"
     }
   ]
 }

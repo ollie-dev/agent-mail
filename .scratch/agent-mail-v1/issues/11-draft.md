@@ -4,7 +4,7 @@
 
 **Blocked by:** 08
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Creating a draft with to, subject and body appends one message with the `\Draft` flag to the mailbox marked `\Drafts` on the fake server
 - [ ] With the Drafts mailbox named `[Gmail]/Entwürfe` and marked `\Drafts`, the draft lands there
