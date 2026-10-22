@@ -176,6 +176,41 @@ Errors besides those above: `denied`, `drafts_not_found`, `invalid_draft` (a val
 
 Drafts cannot be edited, replaced or deleted with agent-mail: there is no command for it, and `draft` never selects a mailbox read-write or sends `STORE`, `COPY`, `MOVE` or `EXPUNGE`. Change or discard a draft in your own mail client.
 
+## Sandbox and proxies
+
+Inside the Claude Code sandbox there is no direct network: agent-mail reaches
+the mail server through the proxy named in the environment, and nothing
+changes in how an Agent calls it. The first non-empty one of `HTTPS_PROXY`,
+`https_proxy`, `ALL_PROXY` and `all_proxy` is used (`HTTP_PROXY` and
+`NO_PROXY` are ignored):
+
+- `http://host:port` (or no scheme; default port 80) tunnels with HTTP
+  CONNECT; `socks5://host:port` or `socks5h://host:port` (default port 1080)
+  uses SOCKS5. Credentials in the URL (`user:password@`, percent-encoded) are
+  sent as `Proxy-Authorization: Basic` or SOCKS5 username/password, and never
+  appear in output or the audit log.
+- The mail server's host name is sent to the proxy unresolved.
+- TLS still runs end to end to the mail server (implicit TLS or mandatory
+  STARTTLS), so the proxy sees only ciphertext. Because the system
+  certificate verifier is unavailable in the sandbox, proxy mode verifies
+  against built-in root certificates (webpki-roots). Without a proxy,
+  agent-mail connects directly and uses the system verifier.
+- The live login check of `mandate create` also goes through a proxy set in
+  the human's shell.
+
+Two error codes are specific to proxies:
+
+- `proxy_refused`: the proxy refused the tunnel (an HTTP 4xx answer such as
+  `403`, a SOCKS5 "not allowed by ruleset" reply or rejected proxy
+  credentials). The error carries `account` and `host`; ask the human to
+  allow that host in the sandbox's allowed domains.
+- `invalid_proxy`: the proxy variable is not a usable `http://` or
+  `socks5://` URL. The message names the variable but never echoes its
+  value; nothing is connected to.
+
+A proxy that cannot be reached or answers malformed data gives
+`connection_failed`, as a direct connection would.
+
 ## Audit log
 
 Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail flag`, `agent-mail move` and `agent-mail draft` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
