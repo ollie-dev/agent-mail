@@ -47,6 +47,10 @@ pub struct Entry {
     /// Message references involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<String>>,
+    /// The flag change attempted, e.g. `+\Seen` or `-\Flagged`, for
+    /// `flag` calls whose flag name was supported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
     /// Number of results returned, if the operation returns results.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<usize>,
@@ -349,6 +353,7 @@ mod tests {
             account: None,
             mailbox: None,
             messages: None,
+            change: None,
             results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),
@@ -454,6 +459,7 @@ mod tests {
             account: Some("a\r\nb@example.test".to_string()),
             mailbox: Some("Evil\n{\"outcome\":\"allowed\"}".to_string()),
             messages: Some(vec!["1\n2".to_string()]),
+            change: None,
             results: Some(2),
             outcome: Decision::Denied,
             reason: Some("denied"),
@@ -480,6 +486,7 @@ mod tests {
             account: None,
             mailbox: None,
             messages: None,
+            change: None,
             results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),

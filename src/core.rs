@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::audit::{self, AuditLog, Decision};
+use crate::flag::{self, Flag, FlagAction, FlagResult};
 use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Account, Grant, Mandate, Operation};
 use crate::read::{self, ReadResult};
@@ -101,6 +102,17 @@ pub enum Command {
         /// Return the whole body, untruncated.
         full: bool,
     },
+    /// Set or clear `\Seen` or `\Flagged` on one message by its reference.
+    Flag {
+        /// The message, as `search` returned it. Untrusted input; checked
+        /// again here with [`read::is_valid_reference`].
+        reference: MessageRef,
+        /// Whether the flag is set or cleared.
+        action: FlagAction,
+        /// The flag name as the Agent gave it. Untrusted input; parsed here
+        /// with [`Flag::parse`] and never sent to the server.
+        flag: String,
+    },
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -179,6 +191,8 @@ pub enum Outcome {
     Messages(SearchResult),
     /// Result of `read`.
     Message(ReadResult),
+    /// Result of `flag`.
+    Flagged(FlagResult),
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
@@ -205,8 +219,10 @@ pub enum CoreError {
         mailbox: Option<String>,
     },
     /// The reference's UIDVALIDITY no longer matches the mailbox, so its
-    /// UID may name another message. Nothing was read.
+    /// UID may name another message. Nothing was read or changed.
     StaleReference {
+        /// The operation that was attempted (`read` or `flag`).
+        operation: Operation,
         /// Login name of the Account.
         account: String,
         /// The mailbox, decoded UTF-8.
@@ -214,6 +230,8 @@ pub enum CoreError {
     },
     /// The mailbox has no message with the reference's UID.
     MessageNotFound {
+        /// The operation that was attempted (`read` or `flag`).
+        operation: Operation,
         /// Login name of the Account.
         account: String,
         /// The mailbox, decoded UTF-8.
@@ -221,7 +239,13 @@ pub enum CoreError {
     },
     /// A message reference is malformed or holds CR, LF or NUL. The CLI
     /// refuses such references while parsing; other adapters may reach this.
-    InvalidReference,
+    InvalidReference {
+        /// The operation that was attempted (`read` or `flag`).
+        operation: Operation,
+    },
+    /// `flag` named a flag other than `\Seen` or `\Flagged`. The rejected
+    /// name is never echoed or logged.
+    UnsupportedFlag,
     /// The server refused to open the mailbox.
     MailboxNotFound {
         /// Login name of the Account.
@@ -332,7 +356,8 @@ impl CoreError {
             Self::MailboxNotFound { .. } => "mailbox_not_found",
             Self::StaleReference { .. } => "stale_reference",
             Self::MessageNotFound { .. } => "message_not_found",
-            Self::InvalidReference => "invalid_reference",
+            Self::InvalidReference { .. } => "invalid_reference",
+            Self::UnsupportedFlag => "unsupported_flag",
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
@@ -388,21 +413,33 @@ impl CoreError {
                 ),
             };
         }
-        if let Self::StaleReference { account, mailbox }
-        | Self::MessageNotFound { account, mailbox } = self
+        if let Self::StaleReference {
+            operation,
+            account,
+            mailbox,
+        }
+        | Self::MessageNotFound {
+            operation,
+            account,
+            mailbox,
+        } = self
         {
+            let nothing_done = match operation {
+                Operation::Read => "the message was not read",
+                _ => "no flag was changed",
+            };
             let message = if matches!(self, Self::StaleReference { .. }) {
                 format!(
-                    "mailbox {mailbox} of account {account} was renumbered since this reference was made (its UIDVALIDITY changed), so the message was not read; run `agent-mail search` on mailbox {mailbox} again for a fresh reference"
+                    "mailbox {mailbox} of account {account} was renumbered since this reference was made (its UIDVALIDITY changed), so {nothing_done}; run `agent-mail search` on mailbox {mailbox} again for a fresh reference"
                 )
             } else {
                 format!(
-                    "mailbox {mailbox} of account {account} has no message with this reference's UID, perhaps because it was moved or deleted; run `agent-mail search` on mailbox {mailbox} again for a current reference"
+                    "mailbox {mailbox} of account {account} has no message with this reference's UID, perhaps because it was moved or deleted, so {nothing_done}; run `agent-mail search` on mailbox {mailbox} again for a current reference"
                 )
             };
             return ErrorBody {
                 code: self.code(),
-                operation: Some(Operation::Read.as_str()),
+                operation: Some(operation.as_str()),
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
@@ -543,10 +580,16 @@ impl CoreError {
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
             ),
-            Self::InvalidReference => (
-                Some(Operation::Read.as_str()),
+            Self::InvalidReference { operation } => (
+                Some(operation.as_str()),
                 None,
                 "the message reference is malformed; run `agent-mail search` and pass a `ref` exactly as it prints it"
+                    .to_string(),
+            ),
+            Self::UnsupportedFlag => (
+                Some(Operation::Flag.as_str()),
+                None,
+                "only the flags `seen` (read) and `flagged` (starred) can be set or cleared, so nothing was changed; run `agent-mail flag <REF> --set seen` or `--clear seen`, or the same with `flagged`"
                     .to_string(),
             ),
             Self::AccountRequired { .. }
@@ -621,6 +664,7 @@ pub fn execute(
                 account: trail.account,
                 mailbox: None,
                 messages: None,
+                change: None,
                 results: None,
                 outcome: if trail.allowed {
                     Decision::Allowed
@@ -654,6 +698,7 @@ pub fn execute(
                 // References and a count only: never subjects, addresses
                 // or `total`.
                 messages: found.map(|r| r.messages.iter().map(|m| m.reference.clone()).collect()),
+                change: None,
                 results: found.map(|r| r.messages.len()),
                 outcome: if trail.allowed {
                     Decision::Allowed
@@ -686,6 +731,7 @@ pub fn execute(
                 // The reference only: never a subject, address, body or
                 // attachment name.
                 messages: Some(vec![reference.format()]),
+                change: None,
                 results: None,
                 outcome: if trail.allowed {
                     Decision::Allowed
@@ -700,6 +746,43 @@ pub fn execute(
                 .append(&entry)
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Message)
+        }
+        Command::Flag {
+            reference,
+            action,
+            flag: name,
+        } => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                flag(&mandate, reference, *action, name, context, &mut trail)
+            });
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::Flag.as_str(),
+                account: trail.account,
+                mailbox: Some(reference.mailbox.clone()),
+                // The reference and the change only: never a subject or
+                // address. An unsupported flag name is never logged.
+                messages: Some(vec![reference.format()]),
+                change: Flag::parse(name).map(|f| flag::change(*action, f)),
+                results: None,
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Flagged)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -871,7 +954,7 @@ fn list(
     }
     trail.allowed = true;
     let raw = imap::list_mailboxes(account, &context.network)
-        .map_err(|e| connector_error(e, &login, None))?;
+        .map_err(|e| connector_error(e, Operation::List, &login, None))?;
     let mailboxes = raw
         .into_iter()
         // Malformed modified UTF-7 falls back to the raw name, losslessly.
@@ -896,9 +979,14 @@ fn single_account(mandate: &Mandate) -> Result<&Account, CoreError> {
     }
 }
 
-/// The structured error for a connector failure on `account`, and on
-/// `mailbox` for operations on one mailbox.
-fn connector_error(error: ImapError, account: &str, mailbox: Option<&str>) -> CoreError {
+/// The structured error for a connector failure of `operation` on
+/// `account`, and on `mailbox` for operations on one mailbox.
+fn connector_error(
+    error: ImapError,
+    operation: Operation,
+    account: &str,
+    mailbox: Option<&str>,
+) -> CoreError {
     let account = account.to_string();
     match error {
         ImapError::TlsRequired => CoreError::TlsRequired { account },
@@ -915,6 +1003,7 @@ fn connector_error(error: ImapError, account: &str, mailbox: Option<&str>) -> Co
         },
         ImapError::StaleReference => match mailbox {
             Some(mailbox) => CoreError::StaleReference {
+                operation,
                 account,
                 mailbox: mailbox.to_string(),
             },
@@ -922,6 +1011,7 @@ fn connector_error(error: ImapError, account: &str, mailbox: Option<&str>) -> Co
         },
         ImapError::MessageNotFound => match mailbox {
             Some(mailbox) => CoreError::MessageNotFound {
+                operation,
                 account,
                 mailbox: mailbox.to_string(),
             },
@@ -940,7 +1030,9 @@ fn read(
     // Checked again here, not only by the CLI parser: no CR, LF or NUL may
     // reach the server, and the UID must be a real one.
     if !read::is_valid_reference(reference) {
-        return Err(CoreError::InvalidReference);
+        return Err(CoreError::InvalidReference {
+            operation: Operation::Read,
+        });
     }
     let login = reference.account.as_str();
     let mailbox = reference.mailbox.as_str();
@@ -972,7 +1064,7 @@ fn read(
         reference.uidvalidity,
         reference.uid,
     )
-    .map_err(|e| connector_error(e, login, Some(mailbox)))?;
+    .map_err(|e| connector_error(e, Operation::Read, login, Some(mailbox)))?;
     let parsed = read::parse_message(&raw).ok_or_else(|| CoreError::Protocol {
         account: login.to_string(),
     })?;
@@ -994,6 +1086,65 @@ fn read(
         body,
         truncated,
         attachments: parsed.attachments,
+    })
+}
+
+fn flag(
+    mandate: &Mandate,
+    reference: &MessageRef,
+    action: FlagAction,
+    name: &str,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<FlagResult, CoreError> {
+    // Checked again here, not only by the CLI parser: no CR, LF or NUL may
+    // reach the server, and the UID must be a real one.
+    if !read::is_valid_reference(reference) {
+        return Err(CoreError::InvalidReference {
+            operation: Operation::Flag,
+        });
+    }
+    let login = reference.account.as_str();
+    let mailbox = reference.mailbox.as_str();
+    trail.account = Some(login.to_string());
+    // The Agent's flag name maps to one of two fixed values; anything else
+    // is refused before any connection, and never sent or echoed.
+    let flag = Flag::parse(name).ok_or(CoreError::UnsupportedFlag)?;
+    // Deny by default, before any connection is made. The Account is the
+    // Mandate's Account with exactly this login, so a reference naming an
+    // uncovered Account never uses another Account's Credential.
+    let denied = || CoreError::Denied {
+        operation: Operation::Flag,
+        account: login.to_string(),
+        mailbox: Some(mailbox.to_string()),
+    };
+    let account = mandate
+        .accounts
+        .iter()
+        .find(|a| a.login == login)
+        .ok_or_else(denied)?;
+    if !mandate
+        .policy
+        .allows_mailbox(Operation::Flag, login, mailbox)
+    {
+        return Err(denied());
+    }
+    trail.allowed = true;
+    let flags = imap::flag(
+        account,
+        &context.network,
+        mailbox,
+        reference.uidvalidity,
+        reference.uid,
+        action,
+        flag,
+    )
+    .map_err(|e| connector_error(e, Operation::Flag, login, Some(mailbox)))?;
+    Ok(FlagResult {
+        reference: reference.format(),
+        account: login.to_string(),
+        mailbox: mailbox.to_string(),
+        flags,
     })
 }
 
@@ -1029,7 +1180,7 @@ fn search(
         &query.imap_criteria(),
         limit,
     )
-    .map_err(|e| connector_error(e, &login, Some(mailbox)))?;
+    .map_err(|e| connector_error(e, Operation::Search, &login, Some(mailbox)))?;
     let messages: Vec<MessageSummary> = found
         .messages
         .into_iter()
@@ -1102,14 +1253,37 @@ mod tests {
                 mailbox: Some("Read".to_string()),
             },
             CoreError::StaleReference {
+                operation: Operation::Read,
                 account: account.clone(),
                 mailbox: "Read".to_string(),
             },
             CoreError::MessageNotFound {
+                operation: Operation::Read,
                 account: account.clone(),
                 mailbox: "Read".to_string(),
             },
-            CoreError::InvalidReference,
+            CoreError::Denied {
+                operation: Operation::Flag,
+                account: account.clone(),
+                mailbox: Some("Triage".to_string()),
+            },
+            CoreError::StaleReference {
+                operation: Operation::Flag,
+                account: account.clone(),
+                mailbox: "Triage".to_string(),
+            },
+            CoreError::MessageNotFound {
+                operation: Operation::Flag,
+                account: account.clone(),
+                mailbox: "Triage".to_string(),
+            },
+            CoreError::InvalidReference {
+                operation: Operation::Read,
+            },
+            CoreError::InvalidReference {
+                operation: Operation::Flag,
+            },
+            CoreError::UnsupportedFlag,
             CoreError::TlsRequired {
                 account: account.clone(),
             },
