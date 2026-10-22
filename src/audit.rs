@@ -50,6 +50,10 @@ pub struct Entry {
     /// Message references involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<String>>,
+    /// The recipients the Agent gave, for `draft` calls. Addresses only,
+    /// never a subject or body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipients: Option<Vec<String>>,
     /// The flag change attempted, e.g. `+\Seen` or `-\Flagged`, for
     /// `flag` calls whose flag name was supported.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,6 +361,7 @@ mod tests {
             mailbox: None,
             target: None,
             messages: None,
+            recipients: None,
             change: None,
             results: None,
             outcome: Decision::Denied,
@@ -464,6 +469,7 @@ mod tests {
             mailbox: Some("Evil\n{\"outcome\":\"allowed\"}".to_string()),
             target: None,
             messages: Some(vec!["1\n2".to_string()]),
+            recipients: None,
             change: None,
             results: Some(2),
             outcome: Decision::Denied,
@@ -492,6 +498,7 @@ mod tests {
             mailbox: None,
             target: None,
             messages: None,
+            recipients: None,
             change: None,
             results: None,
             outcome: Decision::Denied,
