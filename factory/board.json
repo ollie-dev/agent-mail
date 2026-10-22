@@ -334,6 +334,25 @@
       "reason": "",
       "updated": "2026-10-22T21:11:37Z",
       "builder": "acdaf4a0a9e3a7e8b"
+    },
+    {
+      "id": "015-sandbox-proxy",
+      "title": "Sandbox proxy",
+      "feature": "Ticket 14: Work inside the Claude Code sandbox via its proxy (.scratch/agent-mail-v1/issues/14-sandbox-proxy.md)",
+      "branch": "factory/015-sandbox-proxy",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-22T21:50:58Z",
+      "builder": "a61b73031630f2bc9"
     }
   ]
 }
