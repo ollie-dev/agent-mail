@@ -10,6 +10,7 @@ pub mod export;
 pub mod flag;
 pub mod imap;
 pub mod mandate;
+pub mod move_message;
 pub mod read;
 pub mod seal;
 pub mod search;
@@ -92,6 +93,21 @@ pub enum CliCommand {
     /// changed and the call fails with `stale_reference`: search again for a
     /// fresh reference.
     Flag(FlagArgs),
+    /// Move one message, by the reference `search` printed, to another mailbox of the same account
+    ///
+    /// Reads the agent token from AGENT_MAIL_TOKEN. Needs a `move` grant on
+    /// both mailboxes of the reference's account: the source the reference
+    /// names and the target given with --to, a mailbox name as `agent-mail
+    /// list` prints it. Prints one JSON object on stdout: ref, account,
+    /// mailbox (the source), target, and new_ref, the message's reference
+    /// in the target, which may be null when the server does not report
+    /// it (then search the target for it). Uses the server's MOVE, or else
+    /// copies the message, marks it deleted and expunges that one message
+    /// only (UIDPLUS). A server with neither fails with `move_unsupported`
+    /// and nothing is moved. If the mailbox was renumbered since the
+    /// search, nothing is moved and the call fails with `stale_reference`:
+    /// search again for a fresh reference.
+    Move(MoveArgs),
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -146,6 +162,26 @@ pub struct FlagChange {
     /// Clear FLAG: `seen` marks the message unread, `flagged` unstars it
     #[arg(long, value_name = "FLAG")]
     pub clear: Option<String>,
+}
+
+/// Options of `move`.
+#[derive(Debug, Args)]
+pub struct MoveArgs {
+    /// The message reference, exactly as `agent-mail search` prints it in `ref`: <account>/<mailbox>/<uidvalidity>/<uid>
+    #[arg(value_name = "REF", value_parser = reference)]
+    pub reference: MessageRef,
+    /// The target mailbox, by its name as `agent-mail list` prints it; `move` must be granted on it too
+    #[arg(long, value_name = "MAILBOX", required = true, value_parser = mailbox_name)]
+    pub to: SearchText,
+    #[command(flatten)]
+    pub output: TextOutput,
+}
+
+fn mailbox_name(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+    if value.is_empty() {
+        return Err(crate::search::InvalidValue("must not be empty"));
+    }
+    SearchText::new(value)
 }
 
 fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
@@ -310,6 +346,13 @@ where
                 flag,
             }
         }
+        CliCommand::Move(args) => {
+            text |= args.output.text;
+            crate::core::Command::Move {
+                reference: args.reference,
+                target: args.to,
+            }
+        }
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -368,6 +411,8 @@ fn render_outcome(outcome: &Outcome, text: bool) -> String {
             format!("{}: {flags}\n", escape_controls(&result.reference))
         }
         Outcome::Flagged(result) => json_line(result),
+        Outcome::Moved(result) if text => format!("{}\n", result.text_line()),
+        Outcome::Moved(result) => json_line(result),
         Outcome::MandateCreated => String::new(),
         Outcome::Mandates(listing) if text => render_listing(listing),
         Outcome::Mandates(listing) => json_line(listing),
@@ -626,6 +671,44 @@ mod tests {
                 "seen",
             ],
             &["flag", "--set", "seen"],
+        ] {
+            let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+            let err = Cli::try_parse_from(argv).expect_err(&format!("{args:?} parsed"));
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn move_requires_a_reference_and_a_valid_target() {
+        for args in [
+            &["move", "not-a-ref", "--to", "Archive"][..],
+            &[
+                "move",
+                "agent@example.test/INBOX/1700000001/0",
+                "--to",
+                "Archive",
+            ],
+            &["move", "agent@example.test/INBOX/1700000001/2"],
+            &["move", "agent@example.test/INBOX/1700000001/2", "--to", ""],
+            &[
+                "move",
+                "agent@example.test/INBOX/1700000001/2",
+                "--to",
+                "Ar\nchive",
+            ],
+            &[
+                "move",
+                "agent@example.test/INBOX/1700000001/2",
+                "--to",
+                "Ar\rchive",
+            ],
+            &[
+                "move",
+                "agent@example.test/INBOX/1700000001/2",
+                "--to",
+                "Ar\0chive",
+            ],
+            &["move", "--to", "Archive"],
         ] {
             let argv = std::iter::once("agent-mail").chain(args.iter().copied());
             let err = Cli::try_parse_from(argv).expect_err(&format!("{args:?} parsed"));
