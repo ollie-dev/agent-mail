@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Marking a message read sets `\Seen` on the fake server; marking it unread clears it
 - [ ] Starring sets `\Flagged`; unstarring clears it
