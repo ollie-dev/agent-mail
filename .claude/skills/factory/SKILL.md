@@ -133,7 +133,7 @@ The dashboard renders this file, so update it after every event (spawn, verdict,
    - `APPROVE`: **Merge**.
    - `ESCALATE`: stage `needs-human`, `reason` = line 2 of `decision.md`. Tell the user, and name `/factory approve <id>` and `/factory rework <id> <note>`.
 
-**Agent failure:** if an agent returns and its file is missing or its first line is not one of its allowed tokens (for a verify file: `VERIFIED` or `NOT-FIXED`), spawn it once more with the same prompt plus this line: `Your previous run did not write <file>. Writing it is your deliverable; write it before you reply.` If it fails again, stage `needs-human` with `reason` saying which agent failed.
+**Agent failure:** if an agent returns and its file is missing or its first line is not one of its allowed tokens (for a verify file: `VERIFIED` or `NOT-FIXED`), spawn it once more with the same prompt plus this line: `Your previous run did not write <file>. Writing it is your deliverable; write it before you reply.` A `review-*.md` without a `## Checked` section, or whose Checked section names no file read and no command run, is a failure too: move it aside as `review-<name>.skim-<n>.md` and spawn the reviewer once more with the same prompt plus this line: `Your previous run wrote <file> without a ## Checked section showing what you read and ran. Redo the review: read the full diff and include ## Checked.` If it fails again, stage `needs-human` with `reason` saying which agent failed.
 
 ## Merge
 
