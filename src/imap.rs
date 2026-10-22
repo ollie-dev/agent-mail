@@ -5,7 +5,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_imap::imap_proto::{Capability, Response, Status};
+use async_imap::imap_proto::rfc4315::UidSetMember;
+use async_imap::imap_proto::{Capability, Response, ResponseCode, Status};
 use async_imap::types::UnsolicitedResponse;
 use async_imap::types::{Fetch, Flag};
 use async_imap::{Client, Session};
@@ -130,6 +131,12 @@ pub enum ImapError {
     StaleReference,
     /// No message has the UID (the server returned no FETCH for it).
     MessageNotFound,
+    /// The server advertises neither `MOVE` nor `UIDPLUS`. Nothing was
+    /// selected, copied or changed.
+    MoveUnsupported,
+    /// The server refused to move or copy into the target mailbox (`NO`,
+    /// e.g. `[TRYCREATE]`).
+    TargetNotFound,
 }
 
 /// Logs in to the Account and lists every mailbox, raw (modified UTF-7) names
@@ -483,6 +490,186 @@ async fn flag_in(
     flags_of(session, uid)
         .await?
         .ok_or(ImapError::MessageNotFound)
+}
+
+/// Logs in, reads the capabilities, and moves message `uid` of `mailbox` to
+/// `target` (both decoded UTF-8, sent as modified UTF-7). Returns the
+/// target's UIDVALIDITY and the message's new UID when the server reports
+/// them in a `COPYUID` response code, else `None`.
+///
+/// Refuses with [`ImapError::MoveUnsupported`] before any `SELECT` if the
+/// server advertises neither `MOVE` nor `UIDPLUS`. Otherwise `SELECT`s the
+/// source, checks its UIDVALIDITY against `uidvalidity`, confirms the
+/// message exists with `UID FETCH <uid> (UID FLAGS)`, and then sends
+/// `UID MOVE`, or, without `MOVE`, `UID COPY`, `UID STORE <uid>
+/// +FLAGS.SILENT (\Deleted)` and `UID EXPUNGE <uid>`, which removes that
+/// one message only. Never sends `CLOSE`, plain `EXPUNGE` or any body
+/// fetch.
+pub fn move_message(
+    account: &Account,
+    network: &Network,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+    target: &str,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ImapError::Connection)?;
+    runtime.block_on(async {
+        tokio::time::timeout(TIMEOUT, async {
+            let mut session = login(account, network).await?;
+            let result = move_in(&mut session, mailbox, uidvalidity, uid, target).await;
+            // LOGOUT only: never CLOSE, which silently expunges.
+            let _ = session.logout().await;
+            result
+        })
+        .await
+        .map_err(|_| ImapError::Connection)?
+    })
+}
+
+async fn move_in(
+    session: &mut TlsSession,
+    mailbox: &str,
+    uidvalidity: u32,
+    uid: u32,
+    target: &str,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    // Read after login: servers such as Gmail advertise more once
+    // authenticated.
+    let capabilities = session
+        .capabilities()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    let has = |name: &str| {
+        capabilities.iter().any(
+            |c| matches!(c, async_imap::types::Capability::Atom(a) if a.eq_ignore_ascii_case(name)),
+        )
+    };
+    let (can_move, uidplus) = (has("MOVE"), has("UIDPLUS"));
+    // Before any change: without either, the only way would be a plain
+    // EXPUNGE, which also removes messages the human marked \Deleted.
+    if !can_move && !uidplus {
+        return Err(ImapError::MoveUnsupported);
+    }
+    let opened = session
+        .select(crate::utf7::encode(mailbox))
+        .await
+        .map_err(|e| match e {
+            async_imap::error::Error::No(_) => ImapError::MailboxNotFound,
+            _ => ImapError::Protocol,
+        })?;
+    // Before any fetch, move or copy: a renumbered mailbox must never have
+    // the wrong message moved.
+    if opened.uid_validity.ok_or(ImapError::Protocol)? != uidvalidity {
+        return Err(ImapError::StaleReference);
+    }
+    // `UID MOVE` of a missing UID answers OK: it must not be reported as
+    // moved.
+    if flags_of(session, uid).await?.is_none() {
+        return Err(ImapError::MessageNotFound);
+    }
+    let target = quoted(&crate::utf7::encode(target));
+    if can_move {
+        return copy_or_move(session, &format!("UID MOVE {uid} {target}"), uid).await;
+    }
+    let copied = copy_or_move(session, &format!("UID COPY {uid} {target}"), uid).await?;
+    let _: Vec<Fetch> = session
+        .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+        .await
+        .map_err(|_| ImapError::Protocol)?
+        .try_collect()
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    // UIDPLUS: expunge this one UID only, never other \Deleted messages.
+    session
+        .run_command_and_check_ok(format!("UID EXPUNGE {uid}"))
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    Ok(copied)
+}
+
+/// Runs a `UID MOVE` or `UID COPY` of `uid` and reads its responses
+/// itself, since async-imap drops response codes. Returns the target's
+/// UIDVALIDITY and the new UID from a `COPYUID` code, untagged or tagged.
+/// A `NO` is [`ImapError::TargetNotFound`].
+async fn copy_or_move(
+    session: &mut TlsSession,
+    command: &str,
+    uid: u32,
+) -> Result<Option<(u32, u32)>, ImapError> {
+    let id = session
+        .run_command(command)
+        .await
+        .map_err(|_| ImapError::Protocol)?;
+    let mut reported = None;
+    loop {
+        let response = session
+            .read_response()
+            .await
+            .map_err(|_| ImapError::Protocol)?
+            .ok_or(ImapError::Protocol)?;
+        match response.parsed() {
+            Response::Data {
+                status: Status::Ok,
+                outcome,
+            } if reported.is_none() => {
+                reported = outcome.code.as_ref().and_then(|c| copy_uid(c, uid));
+            }
+            Response::Done {
+                tag,
+                status,
+                outcome,
+            } if *tag == id => {
+                return match status {
+                    Status::Ok => {
+                        Ok(reported
+                            .or_else(|| outcome.code.as_ref().and_then(|c| copy_uid(c, uid))))
+                    }
+                    Status::No => Err(ImapError::TargetNotFound),
+                    _ => Err(ImapError::Protocol),
+                };
+            }
+            // EXPUNGE, EXISTS and other untagged data are not needed.
+            _ => {}
+        }
+    }
+}
+
+/// The target UIDVALIDITY and new UID from a `COPYUID` code, if it reports
+/// exactly the one message `uid`.
+fn copy_uid(code: &ResponseCode<'_>, uid: u32) -> Option<(u32, u32)> {
+    let ResponseCode::CopyUid(uidvalidity, source, destination) = code else {
+        return None;
+    };
+    (single_uid(source)? == uid).then_some(())?;
+    Some((*uidvalidity, single_uid(destination)?))
+}
+
+/// The UID of a set holding exactly one, without expanding ranges.
+fn single_uid(set: &[UidSetMember]) -> Option<u32> {
+    match set {
+        [UidSetMember::Uid(uid)] => Some(*uid),
+        [UidSetMember::UidRange(range)] if range.start() == range.end() => Some(*range.start()),
+        _ => None,
+    }
+}
+
+/// `text` as an IMAP quoted string, `"` and `\` escaped. `text` holds no
+/// CR, LF or NUL (checked by the core).
+fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// The flags of message `uid` in the open mailbox, `None` if it has none.
