@@ -13,9 +13,10 @@ use crate::audit::{self, AuditLog, Decision};
 use crate::flag::{self, Flag, FlagAction, FlagResult};
 use crate::imap::{self, ImapError, Network};
 use crate::mandate::{Account, Grant, Mandate, Operation};
+use crate::move_message::MoveResult;
 use crate::read::{self, ReadResult};
 use crate::seal::{self, AgentToken, ListedAccount};
-use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult};
+use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult, SearchText};
 use crate::store::MandateStore;
 use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
@@ -113,6 +114,17 @@ pub enum Command {
         /// with [`Flag::parse`] and never sent to the server.
         flag: String,
     },
+    /// Move one message by its reference to another mailbox of the same
+    /// Account.
+    Move {
+        /// The message, as `search` returned it. Untrusted input; checked
+        /// again here with [`read::is_valid_reference`].
+        reference: MessageRef,
+        /// The target mailbox, decoded UTF-8 as `list` prints it. Untrusted
+        /// input; compared exactly against the Grants and sent only as a
+        /// quoted modified UTF-7 string.
+        target: SearchText,
+    },
     /// Guided creation of a Mandate by the human (`mandate create`).
     MandateCreate {
         /// A Mandate file whose choices pre-fill the flow (`--from`).
@@ -193,6 +205,8 @@ pub enum Outcome {
     Message(ReadResult),
     /// Result of `flag`.
     Flagged(FlagResult),
+    /// Result of `move`.
+    Moved(MoveResult),
     /// A Mandate was sealed and stored. Its Agent Token went only to the
     /// Terminal, so nothing is printed.
     MandateCreated,
@@ -218,10 +232,26 @@ pub enum CoreError {
         /// The mailbox, for operations on one mailbox.
         mailbox: Option<String>,
     },
+    /// `move` named the reference's own mailbox as the target. Nothing was
+    /// moved and no connection was made.
+    SameMailbox {
+        /// Login name of the Account.
+        account: String,
+        /// The mailbox, decoded UTF-8.
+        mailbox: String,
+    },
+    /// The server advertises neither `MOVE` nor `UIDPLUS`, so the message
+    /// cannot be moved without risking other messages. Nothing was moved.
+    MoveUnsupported {
+        /// Login name of the Account.
+        account: String,
+        /// The source mailbox, decoded UTF-8.
+        mailbox: String,
+    },
     /// The reference's UIDVALIDITY no longer matches the mailbox, so its
     /// UID may name another message. Nothing was read or changed.
     StaleReference {
-        /// The operation that was attempted (`read` or `flag`).
+        /// The operation that was attempted (`read`, `flag` or `move`).
         operation: Operation,
         /// Login name of the Account.
         account: String,
@@ -230,7 +260,7 @@ pub enum CoreError {
     },
     /// The mailbox has no message with the reference's UID.
     MessageNotFound {
-        /// The operation that was attempted (`read` or `flag`).
+        /// The operation that was attempted (`read`, `flag` or `move`).
         operation: Operation,
         /// Login name of the Account.
         account: String,
@@ -240,7 +270,7 @@ pub enum CoreError {
     /// A message reference is malformed or holds CR, LF or NUL. The CLI
     /// refuses such references while parsing; other adapters may reach this.
     InvalidReference {
-        /// The operation that was attempted (`read` or `flag`).
+        /// The operation that was attempted (`read`, `flag` or `move`).
         operation: Operation,
     },
     /// `flag` named a flag other than `\Seen` or `\Flagged`. The rejected
@@ -358,6 +388,8 @@ impl CoreError {
             Self::MessageNotFound { .. } => "message_not_found",
             Self::InvalidReference { .. } => "invalid_reference",
             Self::UnsupportedFlag => "unsupported_flag",
+            Self::SameMailbox { .. } => "same_mailbox",
+            Self::MoveUnsupported { .. } => "move_unsupported",
             Self::TlsRequired { .. } => "tls_required",
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
@@ -426,6 +458,7 @@ impl CoreError {
         {
             let nothing_done = match operation {
                 Operation::Read => "the message was not read",
+                Operation::Move => "nothing was moved",
                 _ => "no flag was changed",
             };
             let message = if matches!(self, Self::StaleReference { .. }) {
@@ -440,6 +473,30 @@ impl CoreError {
             return ErrorBody {
                 code: self.code(),
                 operation: Some(operation.as_str()),
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                message,
+            };
+        }
+        if let Self::SameMailbox { account, mailbox } | Self::MoveUnsupported { account, mailbox } =
+            self
+        {
+            let message = if matches!(self, Self::SameMailbox { .. }) {
+                format!(
+                    "the message is already in mailbox {mailbox} of account {account}, so nothing was moved; run `agent-mail list` and pass another mailbox to --to"
+                )
+            } else {
+                format!(
+                    "the mail server of account {account} supports neither MOVE nor UIDPLUS, so the message cannot be moved without risking other messages in mailbox {mailbox}, and nothing was moved; ask the human to move the message in their mail client"
+                )
+            };
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(Operation::Move.as_str()),
                 account: Some(account.clone()),
                 mailbox: Some(mailbox.clone()),
                 accounts: None,
@@ -596,6 +653,8 @@ impl CoreError {
             | Self::MailboxNotFound { .. }
             | Self::StaleReference { .. }
             | Self::MessageNotFound { .. }
+            | Self::SameMailbox { .. }
+            | Self::MoveUnsupported { .. }
             | Self::NotFound { .. }
             | Self::RevocationIncomplete { .. }
             | Self::InvalidMandateFile { .. } => {
@@ -663,6 +722,7 @@ pub fn execute(
                 operation: Operation::List.as_str(),
                 account: trail.account,
                 mailbox: None,
+                target: None,
                 messages: None,
                 change: None,
                 results: None,
@@ -695,6 +755,7 @@ pub fn execute(
                 operation: Operation::Search.as_str(),
                 account: trail.account,
                 mailbox: Some(query.mailbox.as_str().to_string()),
+                target: None,
                 // References and a count only: never subjects, addresses
                 // or `total`.
                 messages: found.map(|r| r.messages.iter().map(|m| m.reference.clone()).collect()),
@@ -728,6 +789,7 @@ pub fn execute(
                 operation: Operation::Read.as_str(),
                 account: trail.account,
                 mailbox: Some(reference.mailbox.clone()),
+                target: None,
                 // The reference only: never a subject, address, body or
                 // attachment name.
                 messages: Some(vec![reference.format()]),
@@ -765,6 +827,7 @@ pub fn execute(
                 operation: Operation::Flag.as_str(),
                 account: trail.account,
                 mailbox: Some(reference.mailbox.clone()),
+                target: None,
                 // The reference and the change only: never a subject or
                 // address. An unsupported flag name is never logged.
                 messages: Some(vec![reference.format()]),
@@ -783,6 +846,44 @@ pub fn execute(
                 .append(&entry)
                 .map_err(|_| CoreError::AuditUnavailable)?;
             result.map(Outcome::Flagged)
+        }
+        Command::Move { reference, target } => {
+            let time = rfc3339_utc(now_secs());
+            let mut trail = Trail::default();
+            let token = env.get(TOKEN_VAR).map(String::as_str);
+            let result = open_mandate(token, context).and_then(|mandate| {
+                trail.mandate = Some(mandate.id.clone());
+                move_message(&mandate, reference, target, context, &mut trail)
+            });
+            // The reference, and on success the new reference the server
+            // reported: never a subject or address.
+            let mut messages = vec![reference.format()];
+            if let Some(new_ref) = result.as_ref().ok().and_then(|r| r.new_ref.clone()) {
+                messages.push(new_ref);
+            }
+            let entry = audit::Entry {
+                time,
+                mandate: trail.mandate,
+                operation: Operation::Move.as_str(),
+                account: trail.account,
+                mailbox: Some(reference.mailbox.clone()),
+                target: Some(target.as_str().to_string()),
+                messages: Some(messages),
+                change: None,
+                results: None,
+                outcome: if trail.allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                reason: result.as_ref().err().map(CoreError::code),
+            };
+            // Fail closed: no result leaves without its audit entry.
+            context
+                .audit
+                .append(&entry)
+                .map_err(|_| CoreError::AuditUnavailable)?;
+            result.map(Outcome::Moved)
         }
         Command::MandateCreate { from } => {
             crate::create::run(env, from.as_deref(), context).map(|()| Outcome::MandateCreated)
@@ -1017,6 +1118,8 @@ fn connector_error(
             },
             None => CoreError::Protocol { account },
         },
+        // Only a move reports these, and it maps them itself.
+        ImapError::MoveUnsupported | ImapError::TargetNotFound => CoreError::Protocol { account },
     }
 }
 
@@ -1145,6 +1248,86 @@ fn flag(
         account: login.to_string(),
         mailbox: mailbox.to_string(),
         flags,
+    })
+}
+
+fn move_message(
+    mandate: &Mandate,
+    reference: &MessageRef,
+    target: &SearchText,
+    context: &Context<'_>,
+    trail: &mut Trail,
+) -> Result<MoveResult, CoreError> {
+    // Checked again here, not only by the CLI parser: no CR, LF or NUL may
+    // reach the server, and the UID must be a real one.
+    if !read::is_valid_reference(reference) {
+        return Err(CoreError::InvalidReference {
+            operation: Operation::Move,
+        });
+    }
+    let login = reference.account.as_str();
+    let mailbox = reference.mailbox.as_str();
+    let target = target.as_str();
+    trail.account = Some(login.to_string());
+    if target == mailbox {
+        return Err(CoreError::SameMailbox {
+            account: login.to_string(),
+            mailbox: mailbox.to_string(),
+        });
+    }
+    // Deny by default, before any connection is made: `move` must be
+    // granted on both the source and the target. The Account is the
+    // Mandate's Account with exactly this login, so a reference naming an
+    // uncovered Account never uses another Account's Credential.
+    let denied = |mailbox: &str| CoreError::Denied {
+        operation: Operation::Move,
+        account: login.to_string(),
+        mailbox: Some(mailbox.to_string()),
+    };
+    let account = mandate
+        .accounts
+        .iter()
+        .find(|a| a.login == login)
+        .ok_or_else(|| denied(mailbox))?;
+    for name in [mailbox, target] {
+        if !mandate.policy.allows_mailbox(Operation::Move, login, name) {
+            return Err(denied(name));
+        }
+    }
+    trail.allowed = true;
+    let moved = imap::move_message(
+        account,
+        &context.network,
+        mailbox,
+        reference.uidvalidity,
+        reference.uid,
+        target,
+    )
+    .map_err(|e| match e {
+        ImapError::MoveUnsupported => CoreError::MoveUnsupported {
+            account: login.to_string(),
+            mailbox: mailbox.to_string(),
+        },
+        ImapError::TargetNotFound => CoreError::MailboxNotFound {
+            account: login.to_string(),
+            mailbox: target.to_string(),
+        },
+        e => connector_error(e, Operation::Move, login, Some(mailbox)),
+    })?;
+    Ok(MoveResult {
+        reference: reference.format(),
+        account: login.to_string(),
+        mailbox: mailbox.to_string(),
+        target: target.to_string(),
+        new_ref: moved.map(|(uidvalidity, uid)| {
+            MessageRef {
+                account: login.to_string(),
+                mailbox: target.to_string(),
+                uidvalidity,
+                uid,
+            }
+            .format()
+        }),
     })
 }
 
@@ -1284,6 +1467,32 @@ mod tests {
                 operation: Operation::Flag,
             },
             CoreError::UnsupportedFlag,
+            CoreError::Denied {
+                operation: Operation::Move,
+                account: account.clone(),
+                mailbox: Some("Archive".to_string()),
+            },
+            CoreError::StaleReference {
+                operation: Operation::Move,
+                account: account.clone(),
+                mailbox: "INBOX".to_string(),
+            },
+            CoreError::MessageNotFound {
+                operation: Operation::Move,
+                account: account.clone(),
+                mailbox: "INBOX".to_string(),
+            },
+            CoreError::InvalidReference {
+                operation: Operation::Move,
+            },
+            CoreError::SameMailbox {
+                account: account.clone(),
+                mailbox: "INBOX".to_string(),
+            },
+            CoreError::MoveUnsupported {
+                account: account.clone(),
+                mailbox: "Filing".to_string(),
+            },
             CoreError::TlsRequired {
                 account: account.clone(),
             },

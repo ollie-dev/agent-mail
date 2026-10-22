@@ -44,6 +44,9 @@ pub struct Entry {
     /// The mailbox involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox: Option<String>,
+    /// The target mailbox, as the Agent named it, for `move` calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// Message references involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<String>>,
@@ -352,6 +355,7 @@ mod tests {
             operation: "list",
             account: None,
             mailbox: None,
+            target: None,
             messages: None,
             change: None,
             results: None,
@@ -458,6 +462,7 @@ mod tests {
             operation: "move",
             account: Some("a\r\nb@example.test".to_string()),
             mailbox: Some("Evil\n{\"outcome\":\"allowed\"}".to_string()),
+            target: None,
             messages: Some(vec!["1\n2".to_string()]),
             change: None,
             results: Some(2),
@@ -485,6 +490,7 @@ mod tests {
             operation: "list",
             account: None,
             mailbox: None,
+            target: None,
             messages: None,
             change: None,
             results: None,
