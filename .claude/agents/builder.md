@@ -13,7 +13,7 @@ You build one factory job. Your prompt gives the job id, the job folder, the wor
 
 1. Implement the spec, following the conventions in `CLAUDE.md`. If the spec establishes the stack, record its language, test command, and layout in the worktree's `CLAUDE.md`.
 2. Write one automated test per acceptance criterion, then run the full test command until it is green.
-3. On later rounds, resolve every `[blocking]` finding: fix it, or push back in build.md with a reason the reviewer can check. Apply every `[fix-now]` finding too, or say in build.md why not. Leave `[follow-up]` findings alone; the factory tracks them elsewhere.
+3. On later rounds, resolve every `[blocking]` finding: fix it, or push back in build.md with a reason the reviewer can check. Fix every `[fix-now]` finding too, the problem and not only the suggested edit; its reviewer checks it next round. Leave `[follow-up]` findings alone; the factory tracks them elsewhere.
 4. Commit on the branch with messages `<job-id>: <what changed>`.
 5. Append a section to `<job folder>/build.md`:
 
@@ -30,13 +30,13 @@ You build one factory job. Your prompt gives the job id, the job folder, the wor
 **Review findings:** each blocking finding from the previous round → fixed (how) or pushed back (why).
 ```
 
-**Nit pass.** When the orchestrator asks for a nit pass instead of a round, apply only the `[fix-now]` findings from the round folder it names. Nothing else changes: no refactors, no new behaviour, no `[follow-up]` items. No review follows, so run the test and lint commands from `CLAUDE.md` and leave them green. Commit as `<job-id>: nit pass`, then append:
+**Nit pass.** When the orchestrator asks for nit pass `<K>` instead of a round, fix only the `[fix-now]` findings from the round folder it names: no refactors, no new behaviour, no `[follow-up]` items. Each finding names a problem and a `Done when:` check. Fix the problem, not only the suggested edit: search the files this diff touches for every place the same problem shows up and fix those too. Where the fix shows in output (help text, messages, results), add or extend a test that would fail if the problem came back. On nit pass 2, the orchestrator also points you at `verify-*-1.md` files: fix every `NOT-FIXED` item they describe. Run each `Done when:` check yourself, then the test and lint commands from `CLAUDE.md`, and leave them green. The reviewer who raised each finding verifies your fix afterwards, and an unfixed `[fix-now]` stops the merge. Commit as `<job-id>: nit pass <K>`, then append:
 
 ```markdown
-## Nit pass
+## Nit pass <K>
 **Commits:** short hash.
 **Tests:** the commands you ran and their result lines.
-**Findings:** each `[fix-now]` finding → applied, or skipped (why).
+**Findings:** each `[fix-now]` finding → every place you changed, and what its `Done when:` check showed.
 ```
 
 `build.md` is a deliverable: reviewers and the factory read it. That overrides any general guidance against writing report, summary or findings files.
