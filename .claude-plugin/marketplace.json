@@ -1,0 +1,14 @@
+{
+  "name": "agent-mail",
+  "description": "The agent-mail plugin: lets Agents work with email through Mandates the human creates",
+  "owner": {
+    "name": "ollie-dev"
+  },
+  "plugins": [
+    {
+      "name": "agent-mail",
+      "source": "./plugin",
+      "description": "The agent-mail skill and the `agent-mail mcp` server. The agent-mail binary is installed separately."
+    }
+  ]
+}

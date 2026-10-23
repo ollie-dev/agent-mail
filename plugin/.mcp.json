@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-mail": {
+      "command": "agent-mail",
+      "args": ["mcp"],
+      "env": {
+        "AGENT_MAIL_TOKEN": "${AGENT_MAIL_TOKEN:-}"
+      }
+    }
+  }
+}
