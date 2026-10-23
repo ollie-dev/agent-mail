@@ -1,0 +1,23 @@
+APPROVE
+All four round-2 reviews pass, the human's rework (tests in a read-only job that publish depends on) is done and tested, and every criterion has a test that passed in my run.
+
+## Acceptance criteria
+- AC1: pass (`tests/selfcheck.rs` `release::ac1_hardened_release_binary_reaches_the_keychain`, opt-in; I ran it with `--ignored` on macOS). The test asserts the existing job 014 `whoami` contract (exit 0, `invalid_tokens`), not the spec's literal exit 1 with `invalid_token`. It still proves the Keychain lookup ran and was never refused. Round 1 put this to the human, and the rework note did not object to it.
+- AC2: pass (`release::ac2_unhardened_release_binary_refuses_every_keychain_access`, opt-in, ran with `--ignored`; plain `cargo test` reports it as ignored)
+- AC3: pass locally (`tests/release.rs` `ac3_workflow_triggers_on_version_tags`, `ac3_workflow_builds_signs_attests_and_verifies`, `ac3_workflow_checks_the_tag_against_cargo_toml`, `ac3_tests_run_in_a_read_only_job_that_publish_depends_on` (new in round 2), `ac3_scripts_are_executable_and_parse`). The CI `verify` job runs only on the first real `v*` tag push, which the spec puts out of scope.
+- AC4: pass locally (`release::ac4_sign_script_applies_adhoc_runtime_and_check_only_verifies`, opt-in, ran with `--ignored`). The CI part runs in `scripts/verify-release.sh` on the first tag push.
+- AC5: pass (`installer::ac5_installs_the_host_binary_with_mode_755`, `ac5_checksum_mismatch_aborts_without_installing`, `ac5_missing_asset_installs_nothing`, plus three more `ac5_*` tests)
+- AC6: pass (`release::ac6_release_binary_needs_no_rust_toolchain`, opt-in, ran with `--ignored`)
+- AC7: pass (`ac7_release_notes_hold_the_one_liner_and_the_keychain_note`, `ac7_readme_install_section_has_the_keychain_note`)
+- AC8: pass (`src/selfcheck.rs` unit tests; `tests/selfcheck.rs` `ac8_*`, 9 tests, including `ac8_failed_guard_never_forwards_a_call`, `ac8_mandate_create_is_refused_before_the_first_prompt`, `ac8_mcp_whoami_is_a_tool_error_with_the_same_code`, `ac8_refused_list_is_audited_like_store_unavailable`, `ac8_passing_guard_matches_the_unwrapped_store`)
+- AC9: pass (`ac9_check_passes_in_debug_builds`, `ac9_debug_binary_reaches_the_store`, `selfcheck::tests::debug_builds_pass_whatever_the_status`)
+- AC10: pass (`ac10_readme_install_section_and_releasing_paragraph`, `ac10_claude_md_lists_the_new_files`, `release_profile_pins_debug_assertions_off`). I ran `cargo test` (every binary ok, 0 failed, 6 ignored), `cargo test --test selfcheck -- --ignored` (4 passed), `cargo clippy -- -D warnings` (clean) and `cargo fmt --check` (clean).
+
+## For the human
+Round 2 contains only commit 256130f, which touches `.github/workflows/release.yml`, `README.md` and `tests/release.rs`. `cargo test --locked` and the tag-version check now run in a `test` job with `contents: read` only. `publish` has `needs: test`, runs no tests, and keeps the three write scopes. The workflow has no cache, so the test job cannot poison anything `publish` uses. The `whoami` deviation from round 1 stays as built, since your note asked only for the workflow change. After merging, bump the version, push a `v*` tag and watch the `verify` job, because AC3 and AC4 are only fully proven there. Running the opt-in AC2 test again added one more `denied` line (no token) to your real audit log.
+
+## Follow-ups
+- code · src/store.rs (`impl GuardedStore<KeychainStore>`, `keys`): the guarded `keys()` has no caller → drop it, or route any future Keychain enumeration through it.
+- [pattern] ui · src/core.rs:902 (`HardenedRuntimeMissing` message): "refused to access the Keychain and the Keychain was not accessed" says the same thing twice in a message of about 250 characters. The same kind of finding (wordy or overlong help and error text) is logged in 012 (F3), 015 (F9) and 016 (F13) → trim it to "so it refused to access the Keychain", and add the CLAUDE.md convention proposed in F13 (short, non-repetitive error and help text, at most about 300 characters per paragraph) with a ui reviewer check.
+- ux · install.sh:25: `arm64 | aarch64` also accepts `aarch64`, although the spec maps only `arm64` → keep it and note it in the spec, or narrow it to `arm64`.
+- decider · tests/selfcheck.rs (`release::ac2_unhardened_release_binary_refuses_every_keychain_access`): the refused `list` in the opt-in test appends a `denied` line to the developer's real audit log. That breaks the CLAUDE.md rule that tests never write to the user's data directory → drop `list` from the release-binary loop (AC8 already covers the in-process audit), or document the exception in CLAUDE.md.

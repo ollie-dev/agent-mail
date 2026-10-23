@@ -372,6 +372,33 @@
       "reason": "",
       "updated": "2026-10-23T06:51:47Z",
       "builder": "a94728d6356e2affe"
+    },
+    {
+      "id": "017-self-check-release",
+      "title": "Self-check and release",
+      "feature": "Ticket 16: Hardened-runtime self-check and release pipeline (.scratch/agent-mail-v1/issues/16-self-check-release.md)",
+      "branch": "factory/017-self-check-release",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-23T13:21:53Z",
+      "builder": "a6e4c76d1a5373c73"
     }
-  ]
+  ],
+  "updated": null
 }
