@@ -1,0 +1,61 @@
+#!/bin/sh
+# Verifies a published agent-mail release.
+#
+#   scripts/verify-release.sh <tag>      e.g. scripts/verify-release.sh v0.1.0
+#
+# For each macOS target: downloads the tarball and its .sha256 file with
+# `gh release download`, checks the checksum, extracts the binary, checks
+# that it is signed ad hoc with the hardened runtime, verifies the build
+# attestation, and on the matching architecture runs `agent-mail --version`.
+# Needs `gh` (authenticated) and, for the signature check, macOS.
+set -eu
+
+repo=ollie-dev/agent-mail
+targets="aarch64-apple-darwin x86_64-apple-darwin"
+
+[ $# -eq 1 ] || { echo "usage: $0 <tag>" >&2; exit 2; }
+tag=$1
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+case "$(uname -m)" in
+    arm64 | aarch64) host=aarch64-apple-darwin ;;
+    x86_64) host=x86_64-apple-darwin ;;
+    *) host="" ;;
+esac
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/agent-mail-verify.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+for target in $targets; do
+    asset="agent-mail-$target.tar.gz"
+    dir="$work/$target"
+    mkdir -p "$dir"
+    echo "== $asset"
+    gh release download "$tag" --repo "$repo" --dir "$dir" \
+        --pattern "$asset" --pattern "$asset.sha256"
+    [ -f "$dir/$asset" ] || { echo "missing asset $asset" >&2; exit 1; }
+    [ -f "$dir/$asset.sha256" ] || { echo "missing asset $asset.sha256" >&2; exit 1; }
+    grep -Eqx "[0-9a-f]{64}  $asset" "$dir/$asset.sha256" || {
+        echo "$asset.sha256 is not in shasum -a 256 format" >&2
+        exit 1
+    }
+    (cd "$dir" && shasum -a 256 -c "$asset.sha256")
+    members=$(tar -tzf "$dir/$asset")
+    [ "$members" = "agent-mail" ] || {
+        echo "$asset must hold exactly agent-mail, holds: $members" >&2
+        exit 1
+    }
+    tar -xzf "$dir/$asset" -C "$dir"
+    "$root/scripts/sign-macos.sh" --check-only "$dir/agent-mail"
+    gh attestation verify "$dir/$asset" --repo "$repo"
+    if [ "$target" = "$host" ]; then
+        version=$("$dir/agent-mail" --version)
+        echo "$version"
+        [ "$version" = "agent-mail ${tag#v}" ] || {
+            echo "expected agent-mail ${tag#v}, got: $version" >&2
+            exit 1
+        }
+    fi
+done
+
+echo "release $tag verified"
