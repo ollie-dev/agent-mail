@@ -19,5 +19,5 @@
 - [x] Ticket 14: Work inside the Claude Code sandbox via its proxy (.scratch/agent-mail-v1/issues/14-sandbox-proxy.md) → 015-sandbox-proxy
 - [x] Ticket 15: MCP server with all Agent commands (.scratch/agent-mail-v1/issues/15-mcp-server.md) → 016-mcp-server
 - [x] Ticket 16: Hardened-runtime self-check and release pipeline (.scratch/agent-mail-v1/issues/16-self-check-release.md) → 017-self-check-release
-- [ ] Ticket 17: Claude Code plugin and README (.scratch/agent-mail-v1/issues/17-plugin-readme.md)
+- [x] Ticket 17: Claude Code plugin and README (.scratch/agent-mail-v1/issues/17-plugin-readme.md) → 018-plugin-readme
 - [ ] Ticket 18: Windows milestone (.scratch/agent-mail-v1/issues/18-windows.md)

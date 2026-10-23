@@ -4,7 +4,7 @@
 
 **Blocked by:** 14, 15, 16
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Installing the plugin in Claude Code makes the agent-mail skill and the `agent-mail mcp` server available
 - [ ] The skill documents every Agent command, the JSON output, the denial error, and that Mandates are created only by the human
