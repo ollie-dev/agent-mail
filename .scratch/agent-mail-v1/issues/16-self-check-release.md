@@ -6,7 +6,7 @@ GitHub Actions builds macOS arm64 and x86_64 on each release tag, signs them, an
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A release binary signed ad-hoc with hardened runtime passes the self-check and can access the Keychain
 - [ ] A release binary without the hardened-runtime flag refuses any Keychain access with a clear error (opt-in macOS test, ignored by default)
