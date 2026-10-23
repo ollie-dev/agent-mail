@@ -353,6 +353,25 @@
       "reason": "",
       "updated": "2026-10-22T21:50:58Z",
       "builder": "a61b73031630f2bc9"
+    },
+    {
+      "id": "016-mcp-server",
+      "title": "MCP server",
+      "feature": "Ticket 15: MCP server with all Agent commands (.scratch/agent-mail-v1/issues/15-mcp-server.md)",
+      "branch": "factory/016-mcp-server",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-23T06:51:47Z",
+      "builder": "a94728d6356e2affe"
     }
   ]
 }
