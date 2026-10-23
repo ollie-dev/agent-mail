@@ -4,9 +4,15 @@
 //! a token or a Credential. The store a build uses is fixed at compile time:
 //! nothing at runtime can select another one.
 
-/// The store could not be read or written.
+/// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreError;
+pub enum StoreError {
+    /// The store could not be read or written.
+    Unavailable,
+    /// The binary is not signed with the hardened runtime, so the store was
+    /// not accessed at all (see [`crate::selfcheck`]).
+    HardenedRuntimeMissing,
+}
 
 /// One stored record: its key and its value.
 pub type Entry = (Vec<u8>, Vec<u8>);
@@ -22,6 +28,106 @@ pub trait MandateStore {
     fn delete(&self, key: &[u8]) -> Result<bool, StoreError>;
     /// Every key the store holds, each with its value, in no set order.
     fn entries(&self) -> Result<Vec<Entry>, StoreError>;
+    /// Whether the store may be accessed at all, without accessing it.
+    /// Passes unless the store is a [`GuardedStore`] whose check fails.
+    fn check(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+/// The hardened-runtime gate a [`GuardedStore`] consults.
+#[derive(Debug, Clone, Copy)]
+enum Gate {
+    /// This process's own check ([`crate::selfcheck::check`]).
+    Process,
+    /// A fixed code-signing status. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    Fixed(Option<u32>),
+}
+
+/// Runs the hardened-runtime self-check before every call to the inner
+/// store, and never forwards a call when it fails: the call returns
+/// [`StoreError::HardenedRuntimeMissing`] instead.
+#[derive(Debug)]
+pub struct GuardedStore<S: MandateStore> {
+    inner: S,
+    gate: Gate,
+}
+
+impl<S: MandateStore> GuardedStore<S> {
+    /// Guards `inner` with this process's self-check.
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            gate: Gate::Process,
+        }
+    }
+
+    /// Guards `inner` with a fixed code-signing `status`, judged by
+    /// [`crate::selfcheck::hardened_runtime_ok`]. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_status(inner: S, status: Option<u32>) -> Self {
+        Self {
+            inner,
+            gate: Gate::Fixed(status),
+        }
+    }
+
+    /// The guarded store, for inspecting it. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
+
+    /// Passes if the self-check passes; touches no store.
+    pub fn check(&self) -> Result<(), StoreError> {
+        let ok = match self.gate {
+            Gate::Process => crate::selfcheck::check(),
+            #[cfg(any(test, feature = "test-support"))]
+            Gate::Fixed(status) => crate::selfcheck::hardened_runtime_ok(status),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(StoreError::HardenedRuntimeMissing)
+        }
+    }
+}
+
+impl<S: MandateStore> MandateStore for GuardedStore<S> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.delete(key)
+    }
+
+    fn entries(&self) -> Result<Vec<Entry>, StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.entries()
+    }
+
+    fn check(&self) -> Result<(), StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.check()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl GuardedStore<KeychainStore> {
+    /// [`KeychainStore::keys`], after the self-check.
+    pub fn keys(&self) -> Result<Vec<Vec<u8>>, StoreError> {
+        GuardedStore::check(self)?;
+        self.inner.keys()
+    }
 }
 
 /// The store a release build uses: the Keychain on macOS.
@@ -44,7 +150,7 @@ impl MandateStore for EmptyStore {
     }
 
     fn put(&self, _key: &[u8], _value: &[u8]) -> Result<(), StoreError> {
-        Err(StoreError)
+        Err(StoreError::Unavailable)
     }
 
     fn delete(&self, _key: &[u8]) -> Result<bool, StoreError> {
@@ -114,7 +220,7 @@ mod keychain {
             let found = match found {
                 Ok(found) => found,
                 Err(e) if e.code() == ITEM_NOT_FOUND => return Ok(Vec::new()),
-                Err(_) => return Err(StoreError),
+                Err(_) => return Err(StoreError::Unavailable),
             };
             found
                 .iter()
@@ -125,7 +231,7 @@ mod keychain {
                             .and_then(|attributes| attributes.get("acct").cloned()),
                         _ => None,
                     }
-                    .ok_or(StoreError)?;
+                    .ok_or(StoreError::Unavailable)?;
                     let key = URL_SAFE_NO_PAD.decode(&account).ok();
                     Ok((key, account))
                 })
@@ -138,7 +244,7 @@ mod keychain {
             match passwords::get_generic_password(SERVICE, &item_account(key)) {
                 Ok(value) => Ok(Some(value)),
                 Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
-                Err(_) => Err(StoreError),
+                Err(_) => Err(StoreError::Unavailable),
             }
         }
 
@@ -152,14 +258,14 @@ mod keychain {
             options
                 .set_service(SERVICE)
                 .set_account_name(item_account(key));
-            options.add().map_err(|_| StoreError)
+            options.add().map_err(|_| StoreError::Unavailable)
         }
 
         fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
             match passwords::delete_generic_password(SERVICE, &item_account(key)) {
                 Ok(()) => Ok(true),
                 Err(e) if e.code() == ITEM_NOT_FOUND => Ok(false),
-                Err(_) => Err(StoreError),
+                Err(_) => Err(StoreError::Unavailable),
             }
         }
 
@@ -240,15 +346,15 @@ mod memory {
             Ok(self
                 .entries
                 .lock()
-                .map_err(|_| StoreError)?
+                .map_err(|_| StoreError::Unavailable)?
                 .get(key)
                 .cloned())
         }
 
         fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
-            let mut entries = self.entries.lock().map_err(|_| StoreError)?;
+            let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
             if entries.contains_key(key) {
-                return Err(StoreError);
+                return Err(StoreError::Unavailable);
             }
             entries.insert(key.to_vec(), value.to_vec());
             Ok(())
@@ -258,7 +364,7 @@ mod memory {
             Ok(self
                 .entries
                 .lock()
-                .map_err(|_| StoreError)?
+                .map_err(|_| StoreError::Unavailable)?
                 .remove(key)
                 .is_some())
         }

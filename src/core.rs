@@ -19,13 +19,16 @@ use crate::move_message::MoveResult;
 use crate::read::{self, ReadResult};
 use crate::seal::{self, AgentToken, ListedAccount, Listing};
 use crate::search::{self, MessageRef, MessageSummary, Query, SearchResult, SearchText};
-use crate::store::MandateStore;
+use crate::store::{MandateStore, StoreError};
 use crate::terminal::{NoTerminal, Terminal};
 use crate::utf7;
 
 /// Environment variable holding the presented Agent Tokens, one or more,
 /// comma-separated.
 pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
+
+/// Where agent-mail releases are published; the place to reinstall from.
+pub const RELEASES_URL: &str = "https://github.com/ollie-dev/agent-mail/releases";
 
 /// What the core runs against: the Mandate store, the network, the
 /// Terminal (used only by `mandate create`) and the audit log.
@@ -427,6 +430,9 @@ pub enum CoreError {
     },
     /// The Mandate store could not be read or written.
     StoreUnavailable,
+    /// The binary is not signed with the hardened runtime, so the Keychain
+    /// was not accessed (ADR-0002).
+    HardenedRuntimeMissing,
     /// The presented Mandates reach several Accounts and the command names
     /// none (or names one that is not acceptable, such as an empty login).
     AccountRequired {
@@ -470,6 +476,15 @@ pub enum CoreError {
     },
     /// The audit entry could not be appended, so the result was withheld.
     AuditUnavailable,
+}
+
+impl From<StoreError> for CoreError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Unavailable => Self::StoreUnavailable,
+            StoreError::HardenedRuntimeMissing => Self::HardenedRuntimeMissing,
+        }
+    }
 }
 
 /// The JSON body of an error, in field order `code`, details, `message`.
@@ -533,6 +548,7 @@ impl CoreError {
             Self::LoginFailed { .. } => "login_failed",
             Self::Protocol { .. } => "server_error",
             Self::StoreUnavailable => "store_unavailable",
+            Self::HardenedRuntimeMissing => "hardened_runtime_missing",
             Self::AccountRequired { .. } => "account_required",
             Self::AmbiguousMandate { .. } => "ambiguous_mandate",
             Self::InteractiveTerminalRequired => "interactive_terminal_required",
@@ -878,6 +894,13 @@ impl CoreError {
                 None,
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
+            ),
+            Self::HardenedRuntimeMissing => (
+                None,
+                None,
+                format!(
+                    "this agent-mail binary is not signed with the hardened runtime, so it refused to access the Keychain and the Keychain was not accessed; ask the human to reinstall agent-mail from {RELEASES_URL}"
+                ),
             ),
             Self::InvalidReference { operation } => (
                 Some(operation.as_str()),
@@ -1329,10 +1352,7 @@ fn whoami(token: Option<&str>, context: &Context<'_>) -> Result<WhoamiResult, Co
 /// is read, so this shows only what the store claims; trust comes from
 /// [`seal::open`] when a token is presented.
 fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
-    let entries = context
-        .store
-        .entries()
-        .map_err(|_| CoreError::StoreUnavailable)?;
+    let entries = context.store.entries().map_err(CoreError::from)?;
     let mut listings = Vec::with_capacity(entries.len());
     let mut unreadable = 0;
     for (_, value) in &entries {
@@ -1368,10 +1388,7 @@ fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
 /// [`CoreError::RevocationIncomplete`] (after deleting every readable match).
 /// The name is reported only if every match agreed on it.
 fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, CoreError> {
-    let entries = context
-        .store
-        .entries()
-        .map_err(|_| CoreError::StoreUnavailable)?;
+    let entries = context.store.entries().map_err(CoreError::from)?;
     let mut matches = Vec::new();
     let mut unreadable = 0;
     for (key, value) in &entries {
@@ -1391,7 +1408,7 @@ fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, Cor
             }
             // Removed by someone else since it was read.
             Ok(false) => {}
-            Err(_) => return Err(CoreError::StoreUnavailable),
+            Err(e) => return Err(e.into()),
         }
     }
     if unreadable > 0 {
@@ -1519,7 +1536,7 @@ fn open_token(text: &str, context: &Context<'_>) -> Result<Option<Mandate>, Core
     let Some(record) = context
         .store
         .get(&token.store_key())
-        .map_err(|_| CoreError::StoreUnavailable)?
+        .map_err(CoreError::from)?
     else {
         return Ok(None);
     };
@@ -2307,6 +2324,7 @@ mod tests {
                 account: account.clone(),
             },
             CoreError::StoreUnavailable,
+            CoreError::HardenedRuntimeMissing,
             CoreError::AccountRequired {
                 accounts: vec![account.clone(), "other@example.test".to_string()],
             },

@@ -86,6 +86,9 @@ pub(crate) fn run(
     if sandbox_indicator(env).is_some() {
         return Err(CoreError::SandboxDetected);
     }
+    // Never ask for Credentials that could not be stored: an unhardened
+    // binary refuses the Keychain, so it fails here, before any prompt.
+    context.store.check()?;
     let file = match from {
         None => None,
         Some(path) => Some(
@@ -102,11 +105,11 @@ pub(crate) fn run(
     };
     let token = AgentToken::mint();
     let record = seal::seal(&token, &mandate);
-    if context.store.put(&record.key, &record.value).is_err() {
+    if let Err(error) = context.store.put(&record.key, &record.value) {
         terminal.message(&format!(
             "The Mandate could not be written to the credential store. {NOTHING_STORED}"
         ));
-        return Err(CoreError::StoreUnavailable);
+        return Err(error.into());
     }
     let reveal = Zeroizing::new(format!(
         "Mandate \"{}\" (ID {}) is sealed and stored.\n\n\
