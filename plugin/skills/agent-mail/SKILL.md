@@ -16,7 +16,7 @@ You can use agent-mail in two ways, with the same results and errors:
 
 Every command reads one or more Agent Tokens, comma-separated, from the `AGENT_MAIL_TOKEN` environment variable. The human puts them there. Never print, echo, log or ask for a token, and never pass one as an argument.
 
-If no token is set the call fails with `missing_token`; if none is valid, with `invalid_token`. Ask the human to set `AGENT_MAIL_TOKEN`.
+If no token is set the call fails with `missing_token`; if none is valid, with `invalid_token`. Ask the human to set a valid token in `AGENT_MAIL_TOKEN` themselves and restart the host. Never have them paste a token into the chat.
 
 ## Workflow
 
@@ -63,7 +63,7 @@ With an invalid token among valid ones, stderr first gets a warning with `"code"
 - `ambiguous_mandate`: two presented Mandates cover the same account. Tell the human; they keep one token for that account.
 - `stale_reference`: the mailbox was renumbered. Search again for a fresh `ref`. `message_not_found`: the message is gone.
 - `proxy_refused`: the sandbox does not allow the mail host. Tell the human to add the error's `host` to the sandbox's allowed domains.
-- `missing_token`, `invalid_token`: ask the human for a valid token in `AGENT_MAIL_TOKEN`.
+- `missing_token`, `invalid_token`: ask the human to set a valid token in `AGENT_MAIL_TOKEN` and restart the host, as above.
 - `login_failed`, `connection_failed`, `store_unavailable`, `hardened_runtime_missing`: tell the human; you cannot fix these.
 
 ## Mandates

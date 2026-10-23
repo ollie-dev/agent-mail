@@ -193,6 +193,18 @@ fn ac2_skill_documents_commands_output_denial_and_human_only_mandates() {
     for line in skill.lines().filter(|l| l.contains("agent-mail mandate")) {
         assert!(line.contains("human"), "line without `human`: {line}");
     }
+    // The Agent never asks the human for a token, which would put it in the
+    // chat; it asks the human to set one in AGENT_MAIL_TOKEN.
+    for line in skill.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("ask the human for") || lower.contains("ask for a") {
+            assert!(
+                !lower.contains("token") || lower.contains("never"),
+                "SKILL.md asks for a token: {line}"
+            );
+        }
+    }
+    assert!(skill.contains("Ask the human to set a valid token in `AGENT_MAIL_TOKEN`"));
 }
 
 #[test]
