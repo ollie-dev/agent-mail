@@ -1672,3 +1672,84 @@ pub fn run_raw_tokens(
 ) -> RunOutput {
     run_logged(args, tokens, store, &server.ca, log)
 }
+
+/// Feeds the JSON-RPC `lines` (one per request, without `\n`) to
+/// `agent_mail::mcp::serve` with `env` and `context`, and returns everything
+/// it wrote. Panics if `serve` fails.
+pub fn mcp_raw(lines: &[String], env: &HashMap<String, String>, context: &Context<'_>) -> String {
+    let mut input = String::new();
+    for line in lines {
+        input.push_str(line);
+        input.push('\n');
+    }
+    let mut output = Vec::new();
+    agent_mail::mcp::serve(input.as_bytes(), &mut output, env, context).expect("serve");
+    String::from_utf8(output).expect("serve writes UTF-8")
+}
+
+/// Every output line of [`mcp_raw`], parsed; panics unless each line is
+/// one JSON object followed by `\n`.
+pub fn mcp_parse(raw: &str) -> Vec<serde_json::Value> {
+    assert!(
+        raw.is_empty() || raw.ends_with('\n'),
+        "output does not end in a newline: {raw:?}"
+    );
+    raw.lines()
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("output line is not JSON ({e}): {line:?}"));
+            assert!(value.is_object(), "output line is not an object: {line}");
+            value
+        })
+        .collect()
+}
+
+/// Runs `lines` through `agent_mail::mcp::serve` with the raw string
+/// `tokens` in `AGENT_MAIL_TOKEN` (unset for `None`), the store `store`,
+/// trusting only `ca` and appending audit entries to `log`, and returns
+/// the parsed response lines.
+pub fn mcp_lines(
+    lines: &[String],
+    tokens: Option<&str>,
+    store: &dyn MandateStore,
+    ca: &CertificateDer<'static>,
+    log: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    let mut env = HashMap::new();
+    if let Some(tokens) = tokens {
+        env.insert(agent_mail::TOKEN_VAR.to_string(), tokens.to_string());
+    }
+    let context = Context::trusting_only(store, vec![ca.clone()])
+        .with_audit_log(agent_mail::audit::AuditLog::at(log));
+    mcp_parse(&mcp_raw(lines, &env, &context))
+}
+
+/// The `initialize` request (id 1) and the `notifications/initialized`
+/// notification that open a session.
+pub fn mcp_opening() -> Vec<String> {
+    vec![
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test-host", "version": "0" }
+            }
+        })
+        .to_string(),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+    ]
+}
+
+/// A `tools/call` request line for `name` with `arguments`.
+pub fn mcp_call(id: u64, name: &str, arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    })
+    .to_string()
+}

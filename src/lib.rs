@@ -11,6 +11,7 @@ pub mod export;
 pub mod flag;
 pub mod imap;
 pub mod mandate;
+pub mod mcp;
 pub mod move_message;
 pub mod proxy;
 pub mod read;
@@ -162,6 +163,19 @@ pub enum CliCommand {
         #[command(flatten)]
         output: TextOutput,
     },
+    /// Run as an MCP server over stdio for a host app
+    ///
+    /// For Claude Desktop, Cowork, Claude Code or another MCP host: the host
+    /// starts `agent-mail mcp` with AGENT_MAIL_TOKEN (one or more
+    /// comma-separated agent tokens) in the server's environment, read once
+    /// at start; no tool argument can supply or override it. Speaks
+    /// newline-delimited JSON-RPC 2.0 on stdin and stdout and offers the
+    /// tools whoami, list, search, read, flag, move and draft. Each returns
+    /// the same JSON, error codes and audit entries as the matching command;
+    /// bad tool arguments fail with `invalid_arguments`. Mandate management
+    /// is not offered over MCP: the human creates, lists and deletes Mandates
+    /// with `agent-mail mandate` in their own terminal.
+    Mcp,
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -192,7 +206,7 @@ pub struct AccountChoice {
     pub account: Option<String>,
 }
 
-fn account_login(value: &str) -> Result<String, crate::search::InvalidValue> {
+pub(crate) fn account_login(value: &str) -> Result<String, crate::search::InvalidValue> {
     if crate::core::is_valid_account(value) {
         Ok(value.to_string())
     } else {
@@ -285,7 +299,7 @@ pub struct DraftArgs {
     pub output: TextOutput,
 }
 
-fn address(value: &str) -> Result<String, crate::search::InvalidValue> {
+pub(crate) fn address(value: &str) -> Result<String, crate::search::InvalidValue> {
     if crate::draft::is_valid_address(value) {
         Ok(value.to_string())
     } else {
@@ -295,7 +309,7 @@ fn address(value: &str) -> Result<String, crate::search::InvalidValue> {
     }
 }
 
-fn subject(value: &str) -> Result<String, crate::search::InvalidValue> {
+pub(crate) fn subject(value: &str) -> Result<String, crate::search::InvalidValue> {
     if crate::draft::is_valid_subject(value) {
         Ok(value.to_string())
     } else {
@@ -305,7 +319,7 @@ fn subject(value: &str) -> Result<String, crate::search::InvalidValue> {
     }
 }
 
-fn body(value: &str) -> Result<String, crate::search::InvalidValue> {
+pub(crate) fn body(value: &str) -> Result<String, crate::search::InvalidValue> {
     if crate::draft::is_valid_body(value) {
         Ok(value.to_string())
     } else {
@@ -313,14 +327,14 @@ fn body(value: &str) -> Result<String, crate::search::InvalidValue> {
     }
 }
 
-fn mailbox_name(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+pub(crate) fn mailbox_name(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
     if value.is_empty() {
         return Err(crate::search::InvalidValue("must not be empty"));
     }
     SearchText::new(value)
 }
 
-fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
+pub(crate) fn reference(value: &str) -> Result<MessageRef, crate::search::InvalidValue> {
     crate::read::parse_reference(value)
 }
 
@@ -376,22 +390,22 @@ pub struct SearchArgs {
     pub limit: Limit,
 }
 
-fn gmail_query(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+pub(crate) fn gmail_query(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
     if value.is_empty() {
         return Err(crate::search::InvalidValue("must not be empty"));
     }
     SearchText::new(value)
 }
 
-fn search_text(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
+pub(crate) fn search_text(value: &str) -> Result<SearchText, crate::search::InvalidValue> {
     SearchText::new(value)
 }
 
-fn date(value: &str) -> Result<Date, crate::search::InvalidValue> {
+pub(crate) fn date(value: &str) -> Result<Date, crate::search::InvalidValue> {
     Date::parse(value)
 }
 
-fn limit(value: &str) -> Result<Limit, crate::search::InvalidValue> {
+pub(crate) fn limit(value: &str) -> Result<Limit, crate::search::InvalidValue> {
     Limit::parse(value)
 }
 
@@ -536,6 +550,15 @@ where
             text |= output.text;
             crate::core::Command::Whoami
         }
+        CliCommand::Mcp => {
+            // The binary serves `mcp` itself (see `src/main.rs`); the
+            // in-process runner has no stdin or stdout to serve on.
+            return RunOutput {
+                stdout: String::new(),
+                stderr: "error: `agent-mail mcp` runs as a server on stdin and stdout; start the binary from an MCP host\n".to_string(),
+                code: 2,
+            };
+        }
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -570,7 +593,7 @@ where
     }
 }
 
-fn render_outcome(outcome: &Outcome, text: bool) -> String {
+pub(crate) fn render_outcome(outcome: &Outcome, text: bool) -> String {
     match outcome {
         Outcome::Mailboxes(list) if text => {
             let mut out = String::new();
@@ -670,7 +693,7 @@ fn push_accounts_and_grants(out: &mut String, accounts: &[ListedAccount], grants
     }
 }
 
-fn render_warning(warning: &Warning, text: bool) -> String {
+pub(crate) fn render_warning(warning: &Warning, text: bool) -> String {
     if text {
         return format!("warning: {}: {}\n", warning.code, warning.message);
     }
@@ -772,7 +795,7 @@ fn render_listing(listing: &MandateListing) -> String {
     out
 }
 
-fn render_error(error: &CoreError, text: bool) -> String {
+pub(crate) fn render_error(error: &CoreError, text: bool) -> String {
     let body = error.body();
     if text {
         // The message may echo untrusted input, such as a Mandate ID.
