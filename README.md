@@ -21,6 +21,88 @@ On macOS the first Keychain access after an update prompts once, because each re
 
 Release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A release binary checks its own signature before it touches the Keychain; if the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed. Reinstall from the releases page if you see it.
 
+## Creating a Mandate
+
+A Mandate names the email accounts an Agent may use and grants it operations (`list`, `search`, `read`, `flag`, `move`, `draft`) on chosen mailboxes. Only you create Mandates; an Agent cannot. Run this in your own terminal, not inside an Agent session or sandbox (it refuses to run there):
+
+```sh
+agent-mail mandate create
+```
+
+It asks for a name, then for each account its server, login and Credential (typed hidden; for Gmail an app password, see [Gmail app passwords](#gmail-app-passwords)). It checks a live login, then lets you tick mailboxes and operations.
+
+At the end it stores the Mandate in the Keychain and prints its Agent Token. The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
+
+It then offers to save the Mandate's accounts and Grants (never its Credentials or token) as a TOML file. `agent-mail mandate create --from <FILE>` pre-fills a new setup from that file; every Credential is still typed and checked.
+
+A Mandate cannot be changed. To give an Agent different access, create a new Mandate, swap in its token, and delete the old one:
+
+```sh
+agent-mail mandate list                 # IDs, names, accounts, Grants, creation dates
+agent-mail mandate delete <ID>          # revokes that Mandate's Agent Token at once
+```
+
+## Agent Tokens in Claude Code and Claude Desktop
+
+The Agent gets its Agent Token from the `AGENT_MAIL_TOKEN` environment variable. Give each project its own Mandate, and never put a token in a file you commit.
+
+**Claude Code.** Put the token in the `env` of the project's `.claude/settings.local.json`. This file is git-ignored: Claude Code adds it to your global git excludes when it creates the file; if you create it by hand, add it to `.gitignore` yourself.
+
+```json
+{"env":{"AGENT_MAIL_TOKEN":"<your agent token>"}}
+```
+
+Claude Code applies it once you trust the project folder, to commands the Agent runs and to the [plugin's](#claude-code-plugin) MCP server. Restart Claude Code after changing it. Several tokens go in one value, comma-separated.
+
+**Claude Desktop.** Add agent-mail as an MCP server in `claude_desktop_config.json` (Settings, Developer, Edit Config), with the token in the server's `env`, then restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "agent-mail": {
+      "command": "agent-mail",
+      "args": ["mcp"],
+      "env": { "AGENT_MAIL_TOKEN": "<your agent token>" }
+    }
+  }
+}
+```
+
+If Claude Desktop cannot find `agent-mail`, give the full path, such as `/Users/<you>/.local/bin/agent-mail`, as `command`.
+
+## Claude Code plugin
+
+The plugin gives every Claude Code session the agent-mail skill, which teaches the Agent the commands, and the `agent-mail mcp` server. It carries no binary: [install](#install) agent-mail first. In Claude Code, run:
+
+```
+/plugin marketplace add ollie-dev/agent-mail
+/plugin install agent-mail@agent-mail
+```
+
+The plugin's MCP server (`plugin/.mcp.json`) holds no token. It passes on `AGENT_MAIL_TOKEN` from Claude Code's environment, which the project's `.claude/settings.local.json` sets (see [above](#agent-tokens-in-claude-code-and-claude-desktop)).
+
+If agent-mail is not installed, the skill tells the Agent to ask you to run the installer; it never installs anything itself.
+
+## Gmail app passwords
+
+Gmail needs an app password for IMAP (2-Step Verification must be on). Use one app password per Mandate, and name it after the Mandate. Create them at https://myaccount.google.com/apppasswords.
+
+With one app password per Mandate you can see in Google's list which Agent is which, and revoke one Agent on Google's side without touching the others. Revoke means deleting the app password there; that Mandate's logins then fail with `login_failed`.
+
+To retire a Mandate, do both: run `agent-mail mandate delete <ID>` to revoke its Agent Token, and revoke its app password at Google.
+
+## What each OS protects against
+
+**macOS.** Credentials live in the Keychain, readable only by the signed agent-mail binary. A hijacked Agent cannot extract a Credential: it can only call agent-mail, which enforces the Mandate's Policy and logs each call.
+
+The Keychain prompts once after each agent-mail update; allow it. A Keychain prompt at any other time is a red flag: deny it. Approving it could hand a Credential to another program.
+
+**Agent Tokens.** A token in a host config file, such as `.claude/settings.local.json` or `claude_desktop_config.json`, is plain text. Any program running as the same user can read it, including other Agents. Whoever holds an Agent Token can do what its Mandate grants, and no more.
+
+So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. The audit log can also be read or changed by any program running as you.
+
+**Windows.** There is no Windows release yet. The Windows milestone, when it ships, protects only against honest Agents: any program running as the same user can read the Credentials, so a hijacked Agent could extract them.
+
 ## Several Mandates and whoami
 
 An agent can hold several Mandates at once, for example one for a work account and one for a private account. `AGENT_MAIL_TOKEN` takes one or more agent tokens, comma-separated; spaces around each token and empty fields are ignored, and a token given twice counts once:
@@ -200,27 +282,17 @@ Drafts cannot be edited, replaced or deleted with agent-mail: there is no comman
 
 `agent-mail mcp` runs agent-mail as an MCP server over stdio, so a host app
 (Claude Desktop, Cowork or Claude Code) can start it and the agent calls its
-commands as MCP tools. Put the agent token in the server's environment:
+commands as MCP tools. The agent token comes from the server's environment.
 
-Claude Desktop, in `claude_desktop_config.json`:
+For Claude Desktop, put it in the `env` of the `claude_desktop_config.json` entry, with `"command": "agent-mail"` and `"args": ["mcp"]`; see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop).
 
-```json
-{
-  "mcpServers": {
-    "agent-mail": {
-      "command": "agent-mail",
-      "args": ["mcp"],
-      "env": { "AGENT_MAIL_TOKEN": "<your token>" }
-    }
-  }
-}
-```
-
-Claude Code, in the project's `.mcp.json` (same shape as above), or with:
+In Claude Code the [plugin](#claude-code-plugin) adds the server (its `plugin/.mcp.json` holds no token). Without the plugin, add it for yourself only with:
 
 ```sh
-claude mcp add agent-mail --env AGENT_MAIL_TOKEN=<your token> -- agent-mail mcp
+claude mcp add agent-mail --env AGENT_MAIL_TOKEN=<your agent token> -- agent-mail mcp
 ```
+
+Never put a token in a project's checked-in `.mcp.json`.
 
 The server offers seven tools: `whoami`, `list`, `search`, `read`, `flag`,
 `move` and `draft`. Their arguments mirror the command-line options
@@ -248,6 +320,22 @@ command, with the same audit log entry. An agent starts with `whoami`, then
 stdout carries only JSON-RPC messages, one per line.
 
 ## Sandbox and proxies
+
+**Allowed domains.** The Claude Code sandbox lets commands reach only the hosts in its allowed domains, which start empty. Allow Gmail's IMAP server in `sandbox.network.allowedDomains` of the project's `.claude/settings.local.json` (or of `.claude/settings.json` to share it with your team):
+
+```json
+{
+  "sandbox": {
+    "network": {
+      "allowedDomains": ["imap.gmail.com"]
+    }
+  }
+}
+```
+
+An entry without a port allows every port, so this covers port 993. For another account, run `agent-mail whoami` and add each account's `host` it shows to the same list. A host missing from the list makes calls fail with `proxy_refused`, naming the `host` to add.
+
+The sandbox applies to commands the Agent runs in the shell. The `agent-mail mcp` server is started by Claude Code itself and connects directly. Under an organisation's managed settings, ask your administrator to allow the host.
 
 Inside the Claude Code sandbox there is no direct network: agent-mail reaches
 the mail server through the proxy named in the environment, and nothing
