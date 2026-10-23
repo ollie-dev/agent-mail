@@ -367,6 +367,15 @@ pub enum CoreError {
         /// Login name of the Account.
         account: String,
     },
+    /// The server refused to store the draft in the Drafts mailbox (its
+    /// `APPEND` answered `NO` or `BAD`). No draft was created. The server's
+    /// text is never echoed.
+    DraftRefused {
+        /// Login name of the Account.
+        account: String,
+        /// The Drafts mailbox, decoded UTF-8.
+        mailbox: String,
+    },
     /// A `draft` value is not acceptable. The CLI refuses such values while
     /// parsing; other adapters may reach this. The value is never echoed or
     /// logged.
@@ -536,6 +545,7 @@ impl CoreError {
             Self::InvalidReference { .. } => "invalid_reference",
             Self::UnsupportedFlag => "unsupported_flag",
             Self::DraftsNotFound { .. } => "drafts_not_found",
+            Self::DraftRefused { .. } => "draft_refused",
             Self::InvalidDraft { .. } => "invalid_draft",
             Self::SameMailbox { .. } => "same_mailbox",
             Self::MoveUnsupported { .. } => "move_unsupported",
@@ -606,6 +616,23 @@ impl CoreError {
                 message: format!(
                     "no grant allows `{}` on mailbox {mailbox} of account {account}; ask the human to grant it, or run `agent-mail list` to see the mailboxes this token can use",
                     operation.as_str()
+                ),
+            };
+        }
+        if let Self::DraftRefused { account, mailbox } = self {
+            return ErrorBody {
+                code: self.code(),
+                operation: Some(Operation::Draft.as_str()),
+                account: Some(account.clone()),
+                mailbox: Some(mailbox.clone()),
+                accounts: None,
+                mandates: None,
+                id: None,
+                deleted: None,
+                unreadable: None,
+                host: None,
+                message: format!(
+                    "the mail server of account {account} refused to store the draft in mailbox {mailbox}, so no draft was created; retry later, or ask the human to check that mailbox (it may be missing or full) in their mail client"
                 ),
             };
         }
@@ -907,6 +934,12 @@ impl CoreError {
                 None,
                 "the message reference is malformed; run `agent-mail search` and pass a `ref` exactly as it prints it"
                     .to_string(),
+            ),
+            // Built above, with its mailbox.
+            Self::DraftRefused { account, .. } => (
+                Some(Operation::Draft.as_str()),
+                Some(account.clone()),
+                "no draft was created".to_string(),
             ),
             Self::DraftsNotFound { account } => (
                 Some(Operation::Draft.as_str()),
@@ -1709,6 +1742,9 @@ fn connector_error(
             None => CoreError::Protocol { account },
         },
         ImapError::DraftsNotFound => CoreError::DraftsNotFound { account },
+        // Only a draft reports this, and it maps it itself, since the
+        // mailbox is the Drafts mailbox, not the one passed here.
+        ImapError::AppendRefused => CoreError::Protocol { account },
         ImapError::GmailUnsupported => match mailbox {
             Some(mailbox) => CoreError::Unsupported {
                 account,
@@ -2055,13 +2091,17 @@ fn draft(
     // Malformed modified UTF-7 falls back to the raw name, losslessly.
     let mailbox = raw_drafts.map(|raw| utf7::decode(&raw).unwrap_or(raw));
     trail.mailbox.clone_from(&mailbox);
-    let appended = appended.map_err(|e| {
-        connector_error(
+    let appended = appended.map_err(|e| match (e, &mailbox) {
+        (ImapError::AppendRefused, Some(drafts)) => CoreError::DraftRefused {
+            account: login.to_string(),
+            mailbox: drafts.clone(),
+        },
+        (e, _) => connector_error(
             e,
             Operation::Draft,
             login,
             reply_to.map(|r| r.mailbox.as_str()),
-        )
+        ),
     })?;
     let mailbox = mailbox.ok_or_else(|| CoreError::Protocol {
         account: login.to_string(),

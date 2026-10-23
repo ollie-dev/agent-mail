@@ -1044,3 +1044,87 @@ fn drafts_mailbox_returns_the_first_listed_drafts_mailbox_or_drafts_not_found() 
         Err(ImapError::DraftsNotFound)
     );
 }
+
+/// The arguments of the refused drafts (job 020).
+const REFUSED_ARGS: [&str; 7] = [
+    "draft",
+    "--to",
+    "carol@example.com",
+    "--subject",
+    "Status",
+    "--body",
+    "Hi",
+];
+
+/// Asserts `error` is a `draft_refused` error on `mailbox` that names
+/// nothing done and a next step, and quotes none of the server's text.
+fn assert_draft_refused(error: &Value, mailbox: &str) {
+    let mut keys: Vec<&String> = error.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["account", "code", "mailbox", "message", "operation"]);
+    assert_eq!(error["code"], json!("draft_refused"));
+    assert_eq!(error["operation"], json!("draft"));
+    assert_eq!(error["account"], json!(LOGIN));
+    assert_eq!(error["mailbox"], json!(mailbox));
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("no draft was created"), "{message}");
+    assert!(
+        message.contains("retry") || message.contains("ask the human"),
+        "{message}"
+    );
+    for server_text in ["zq7", "TRYCREATE", "no such mailbox"] {
+        assert!(!message.contains(server_text), "{message}");
+    }
+}
+
+#[test]
+fn job020_ac1_trycreate_on_the_drafts_mailbox_fails_with_draft_refused() {
+    let server = FakeImap::start_with_list(Mode::Implicit, &["UIDPLUS"], &["Ghost"], Some("Ghost"));
+    let s = Setup::on(server, Setup::default_grants());
+    let error = s.fails(&REFUSED_ARGS);
+    assert_draft_refused(&error, "Ghost");
+    assert!(s.server.appended().is_empty());
+    let commands = s.server.commands();
+    assert_has(&commands, "APPEND");
+    assert_has(&commands, "LOGOUT");
+}
+
+#[test]
+fn job020_ac2_other_append_refusals_fail_with_draft_refused() {
+    for (before_literal, reply) in [
+        (false, "NO [OVERQUOTA] mailbox full zq7"),
+        (false, "BAD message rejected zq7"),
+        (true, "NO append not allowed zq7"),
+    ] {
+        let s = Setup::granted();
+        s.server.refuse_append(before_literal, reply);
+        let before = s.snapshot();
+        let error = s.fails(&REFUSED_ARGS);
+        assert_draft_refused(&error, "Drafts");
+        assert!(s.server.appended().is_empty(), "{reply}");
+        assert_eq!(s.snapshot(), before, "{reply}");
+        assert_has(&s.server.commands(), "LOGOUT");
+        // The next APPEND is accepted again: the refusal was for one call.
+        s.draft(&REFUSED_ARGS[1..]);
+        assert_eq!(s.server.appended().len(), 1);
+    }
+}
+
+#[test]
+fn job020_ac3_a_refused_draft_is_audited_once_without_secrets() {
+    let server = FakeImap::start_with_list(Mode::Implicit, &["UIDPLUS"], &["Ghost"], Some("Ghost"));
+    let s = Setup::on(server, Setup::default_grants());
+    s.fails(&REFUSED_ARGS);
+    let lines = s.audit();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        with_t(&lines[0]),
+        "{\"time\":T,\"mandate\":\"aaaa1111\",\"operation\":\"draft\",\"account\":\"agent@example.test\",\"mailbox\":\"Ghost\",\"recipients\":[\"carol@example.com\"],\"outcome\":\"allowed\",\"reason\":\"draft_refused\"}"
+    );
+    let entry: Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(entry["operation"], json!("draft"));
+    assert_eq!(entry["outcome"], json!("allowed"));
+    assert_eq!(entry["reason"], json!("draft_refused"));
+    assert_eq!(entry["mailbox"], json!("Ghost"));
+    assert_log_clean(&s);
+}

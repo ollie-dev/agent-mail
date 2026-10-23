@@ -503,9 +503,10 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(err) => {
+        Err(err) if is_help_or_version(&err) => {
             let text = err.render().to_string();
             let (stdout, stderr) = if err.use_stderr() {
                 (String::new(), text)
@@ -516,6 +517,18 @@ where
                 stdout,
                 stderr,
                 code: err.exit_code(),
+            };
+        }
+        Err(err) => {
+            // Always JSON: the output mode is unknown when parsing fails.
+            let error = UsageError {
+                code: "invalid_arguments",
+                message: usage_message(&err, &args),
+            };
+            return RunOutput {
+                stdout: String::new(),
+                stderr: json_line(&serde_json::json!({ "error": error })),
+                code: 2,
             };
         }
     };
@@ -579,9 +592,17 @@ where
         CliCommand::Mcp => {
             // The binary serves `mcp` itself (see `src/main.rs`); the
             // in-process runner has no stdin or stdout to serve on.
+            let message = "`agent-mail mcp` runs as a server on stdin and stdout; start the binary from an MCP host";
+            let stderr = if text {
+                format!("error: invalid_arguments: {message}\n")
+            } else {
+                json_line(&serde_json::json!({
+                    "error": UsageError { code: "invalid_arguments", message: message.to_string() }
+                }))
+            };
             return RunOutput {
                 stdout: String::new(),
-                stderr: "error: `agent-mail mcp` runs as a server on stdin and stdout; start the binary from an MCP host\n".to_string(),
+                stderr,
                 code: 2,
             };
         }
@@ -617,6 +638,125 @@ where
             }
         }
     }
+}
+
+/// The `invalid_arguments` error of a command line clap refused, the same
+/// code and shape the MCP server uses for bad tool arguments.
+#[derive(serde::Serialize)]
+struct UsageError {
+    code: &'static str,
+    message: String,
+}
+
+/// Whether clap's `err` is help or version output (including the help
+/// printed for a missing subcommand), which keeps clap's plain text.
+fn is_help_or_version(err: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    )
+}
+
+/// The one-line message of a usage error, ending with the `--help` pointer
+/// of the subcommand `args` name.
+///
+/// Built from clap's error context, never from its rendered text, so no
+/// value the caller passed is echoed: only argument names, and an unknown
+/// option cut at its first `=`.
+fn usage_message(err: &clap::Error, args: &[OsString]) -> String {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let names = |kind: ContextKind| -> Option<String> {
+        match err.get(kind)? {
+            ContextValue::String(name) => Some(escape_controls(name)),
+            ContextValue::Strings(names) => Some(
+                names
+                    .iter()
+                    .map(|n| escape_controls(n))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            _ => None,
+        }
+    };
+    let arg = names(ContextKind::InvalidArg);
+    let problem = match err.kind() {
+        ErrorKind::ValueValidation | ErrorKind::InvalidValue => {
+            // Only the validator's own reason, never the value.
+            let reason = std::error::Error::source(err)
+                .and_then(|e| e.downcast_ref::<crate::search::InvalidValue>())
+                .map_or("is not valid", |reason| reason.0);
+            match arg {
+                Some(arg) => format!("invalid value for {arg}: {reason}"),
+                None => format!("invalid value: {reason}"),
+            }
+        }
+        ErrorKind::UnknownArgument => match err.get(ContextKind::InvalidArg) {
+            Some(ContextValue::String(given)) if given.starts_with('-') => {
+                let name = given.split('=').next().unwrap_or_default();
+                format!("unknown option {}", escape_controls(name))
+            }
+            _ => "an unexpected argument was given".to_string(),
+        },
+        // A suggestion names a known command, never the caller's word.
+        ErrorKind::InvalidSubcommand => match names(ContextKind::SuggestedSubcommand) {
+            Some(suggested) => format!("unknown command; did you mean `{suggested}`?"),
+            None => "unknown command".to_string(),
+        },
+        ErrorKind::MissingRequiredArgument => match arg {
+            Some(arg) => format!("missing required argument {arg}"),
+            None => "a required argument is missing".to_string(),
+        },
+        ErrorKind::MissingSubcommand => "a subcommand is required".to_string(),
+        ErrorKind::ArgumentConflict => match (arg, names(ContextKind::PriorArg)) {
+            (Some(arg), Some(prior)) => format!("{arg} cannot be used with {prior}"),
+            (Some(arg), None) => format!("{arg} cannot be used with another argument given"),
+            _ => "two arguments given cannot be used together".to_string(),
+        },
+        ErrorKind::NoEquals => match arg {
+            Some(arg) => format!("{arg} needs `=` before its value"),
+            None => "an option needs `=` before its value".to_string(),
+        },
+        ErrorKind::TooManyValues | ErrorKind::WrongNumberOfValues => match arg {
+            Some(arg) => format!("wrong number of values for {arg}"),
+            None => "wrong number of values".to_string(),
+        },
+        ErrorKind::InvalidUtf8 => "an argument is not valid UTF-8".to_string(),
+        _ => match arg {
+            Some(arg) => format!("invalid use of {arg}"),
+            None => "invalid arguments".to_string(),
+        },
+    };
+    format!(
+        "{problem}; run `{} --help` for usage",
+        subcommand_path(args)
+    )
+}
+
+/// `agent-mail`, followed by the subcommand and nested subcommand `args`
+/// name, if any: the first arguments not starting with `-` that name one.
+fn subcommand_path(args: &[OsString]) -> String {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    let mut path = String::from("agent-mail");
+    for arg in args.iter().skip(1) {
+        let Some(arg) = arg.to_str() else { break };
+        if arg.starts_with('-') {
+            continue;
+        }
+        let Some(sub) = command.find_subcommand(arg).cloned() else {
+            break;
+        };
+        path.push(' ');
+        path.push_str(sub.get_name());
+        if !sub.has_subcommands() {
+            break;
+        }
+        command = sub;
+    }
+    path
 }
 
 pub(crate) fn render_outcome(outcome: &Outcome, text: bool) -> String {

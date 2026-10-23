@@ -1278,3 +1278,104 @@ fn ac8_readme_help_and_claude_md_describe_the_mcp_server() {
     assert!(claude.contains("src/mcp.rs"));
     assert!(claude.contains("tests/mcp.rs"));
 }
+
+// ---------------------------------------------------------------- job 020
+
+/// A server whose `\Drafts` mailbox `Ghost` does not exist, so `APPEND`
+/// gets `NO [TRYCREATE]`.
+fn ghost_server() -> FakeImap {
+    FakeImap::start_with_list(Mode::Implicit, &["UIDPLUS"], &["Ghost"], Some("Ghost"))
+}
+
+#[test]
+fn job020_ac4_draft_refused_matches_the_cli() {
+    let c = compare(
+        ghost_server,
+        with_w,
+        &[
+            "draft",
+            "--to",
+            "carol@example.com",
+            "--subject",
+            "Status",
+            "--body",
+            "Hi",
+        ],
+        "draft",
+        json!({"to": ["carol@example.com"], "subject": "Status", "body": "Hi"}),
+    );
+    let error = c.assert_same_error();
+    assert_eq!(error["code"], json!("draft_refused"));
+    assert_eq!(error["mailbox"], json!("Ghost"));
+    c.assert_same_audit(1);
+    assert!(c.cli.server.appended().is_empty());
+    assert!(c.mcp.server.appended().is_empty());
+}
+
+const NO_TOKEN: &str = "no agent token presented; set AGENT_MAIL_TOKEN";
+
+/// The `missing_token` error a tool call without a token returns.
+fn missing_token_message(side: &Side, tool: &str, arguments: Value) -> (Value, String) {
+    let result = side.tool(tool, arguments.clone(), None);
+    assert_eq!(result["isError"], json!(true), "{tool} {arguments}");
+    let error = result["structuredContent"]["error"].clone();
+    let mut keys: Vec<&String> = error.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["code", "message"], "{tool} {arguments}");
+    assert_eq!(error["code"], json!("missing_token"), "{tool} {arguments}");
+    let message = error["message"].as_str().unwrap().to_string();
+    (result, message)
+}
+
+#[test]
+fn job020_ac11_missing_token_also_reports_argument_mistakes() {
+    let side = Side::new();
+    let (_, message) = missing_token_message(&side, "read", json!({}));
+    assert!(message.starts_with(NO_TOKEN), "{message}");
+
+    // The message the same call gets as `invalid_arguments` with a token.
+    let with_token = Side::new();
+    let tw = with_token.w();
+    let result = with_token.tool("read", json!({}), Some(&tw));
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        json!("invalid_arguments")
+    );
+    let invalid = result["structuredContent"]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert_eq!(invalid, "missing argument `ref`: it is required");
+    assert!(message.contains(invalid), "{message}");
+    assert!(message.chars().count() <= 300, "{message}");
+
+    assert!(side.audit().is_empty());
+    assert_eq!(side.server.connections(), 0);
+}
+
+#[test]
+fn job020_ac12_missing_token_alone_keeps_its_message() {
+    let side = Side::new();
+    let (_, message) = missing_token_message(&side, "read", json!({ "ref": inbox_ref() }));
+    assert_eq!(message, NO_TOKEN);
+    assert_eq!(side.server.connections(), 0);
+}
+
+#[test]
+fn job020_ac13_token_like_arguments_are_named_never_echoed() {
+    let side = Side::new();
+    let token = side.w();
+    for (tool, key) in [("list", "token"), ("draft", "AGENT_MAIL_TOKEN")] {
+        let (result, message) = missing_token_message(&side, tool, json!({ key: token }));
+        assert!(message.starts_with(NO_TOKEN), "{message}");
+        assert!(message.contains(&format!("`{key}`")), "{message}");
+        for text in texts(&result) {
+            assert!(!text.contains(&token), "{tool}: the token is in the text");
+        }
+        assert!(
+            !result["structuredContent"].to_string().contains(&token),
+            "{tool}: the token is in structuredContent"
+        );
+    }
+    assert!(side.audit().is_empty());
+    assert_eq!(side.server.connections(), 0);
+}

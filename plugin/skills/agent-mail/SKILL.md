@@ -46,7 +46,7 @@ A `ref` looks like `agent@example.test/INBOX/1700000001/2`. Use it exactly as `s
 
 Every command prints one JSON object on stdout and exits with code 0. Add `--text` before the subcommand for human-readable lines instead, as in `agent-mail --text whoami`. After `search`, `--text` is the body-text criterion, so put it before `search` for text output.
 
-Errors are one JSON object on stderr with exit code 1, such as `{"error":{"code":"stale_reference","message":"..."}}`. Act on `code`; `message` explains it. A usage error, such as a malformed `ref`, exits with code 2.
+Errors are one JSON object on stderr with exit code 1, such as `{"error":{"code":"stale_reference","message":"..."}}`. Act on `code`; `message` explains it. A usage error, such as a malformed `ref`, is a JSON error with code `invalid_arguments` and exit code 2: fix the call as its message says.
 
 With an invalid token among valid ones, stderr first gets a warning with `"code":"invalid_token"` and the token positions; the call still runs.
 
@@ -61,6 +61,7 @@ With an invalid token among valid ones, stderr first gets a warning with `"code"
   Tell the human which `operation` you need on which `account` and `mailbox`. Do not retry or look for another way in.
 - `account_required`: your tokens reach several accounts. Run again with `--account` and one login from `accounts`.
 - `ambiguous_mandate`: two presented Mandates cover the same account. Tell the human; they keep one token for that account.
+- `draft_refused`: the server refused to store the draft, and no draft was created. Retry once later; if it fails again, tell the human the error's `mailbox`.
 - `stale_reference`: the mailbox was renumbered. Search again for a fresh `ref`. `message_not_found`: the message is gone.
 - `proxy_refused`: the sandbox does not allow the mail host. Tell the human to add the error's `host` to the sandbox's allowed domains.
 - `missing_token`, `invalid_token`: ask the human to set a valid token in `AGENT_MAIL_TOKEN` and restart the host, as above.

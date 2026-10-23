@@ -500,6 +500,7 @@ fn failure_reason(error: &ImapError) -> String {
         | ImapError::MoveUnsupported
         | ImapError::TargetNotFound
         | ImapError::DraftsNotFound
+        | ImapError::AppendRefused
         | ImapError::GmailUnsupported => {
             "the server answered unexpectedly; check the server settings".to_string()
         }

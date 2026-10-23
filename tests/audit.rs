@@ -415,7 +415,7 @@ fn ac6_no_command_reads_or_returns_the_audit_log() {
             argv.push(sub);
             let out = run_logged(&argv, Some(token.expose()), &store, &server.ca, &log);
             assert_eq!(out.code, 2, "{sub} is not a subcommand");
-            assert!(out.stderr.contains("unrecognized subcommand"), "{out:?}");
+            assert!(out.stderr.contains("unknown command"), "{out:?}");
             assert_clean(&out, sub);
         }
     }

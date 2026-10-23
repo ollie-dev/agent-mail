@@ -505,3 +505,70 @@ fn ac10_claude_md_names_the_plugin_files() {
         assert!(claude.contains(needle), "CLAUDE.md lacks {needle:?}");
     }
 }
+
+/// The blank-line-separated paragraph of `text` holding `needle`.
+fn paragraph_with<'a>(text: &'a str, needle: &str) -> &'a str {
+    text.split("\n\n")
+        .find(|p| p.contains(needle))
+        .unwrap_or_else(|| panic!("no paragraph holds {needle:?}"))
+}
+
+#[test]
+fn job020_ac14_readme_and_skill_document_draft_refused_and_json_usage_errors() {
+    let draft = readme_section("## Draft");
+    let errors = paragraph_with(&draft, "Errors besides those above:");
+    assert!(errors.contains("`draft_refused`"), "{errors}");
+    let refused = paragraph_with(&draft, "**When the server refuses the draft.**");
+    assert!(refused.contains("`draft_refused`"), "{refused}");
+
+    let audit = readme_section("## Audit log");
+    let reasons = paragraph_with(&audit, "- `reason`:");
+    assert!(reasons.contains("`draft_refused`"), "{reasons}");
+
+    let readme = read("README.md");
+    let usage = paragraph_with(&readme, "A usage error, such as");
+    assert!(
+        usage.contains("JSON error with code `invalid_arguments` and exit code 2"),
+        "{usage}"
+    );
+    let skill = skill();
+    let skill_usage = paragraph_with(&skill, "A usage error");
+    assert!(
+        skill_usage.contains("JSON error with code `invalid_arguments` and exit code 2"),
+        "{skill_usage}"
+    );
+    let skill_refused = skill
+        .lines()
+        .find(|l| l.starts_with("- `draft_refused`"))
+        .expect("SKILL.md lists draft_refused");
+
+    let mcp = readme_section("## MCP server");
+    let missing = paragraph_with(&mcp, "names the argument");
+    let missing = missing
+        .split("\n- ")
+        .find(|item| item.contains("names the argument"))
+        .unwrap();
+
+    let reasons = reasons
+        .lines()
+        .find(|l| l.starts_with("- `reason`:"))
+        .unwrap();
+    for paragraph in [
+        errors,
+        refused,
+        reasons,
+        usage,
+        skill_usage,
+        skill_refused,
+        missing,
+    ] {
+        // Bullet lists are measured item by item.
+        for item in paragraph.split("\n- ") {
+            assert!(
+                item.chars().count() <= 300,
+                "{} characters: {item}",
+                item.chars().count()
+            );
+        }
+    }
+}
