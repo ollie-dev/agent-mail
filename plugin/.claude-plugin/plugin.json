@@ -1,0 +1,10 @@
+{
+  "name": "agent-mail",
+  "description": "Read, search, triage and draft email through agent-mail: the agent-mail skill and the `agent-mail mcp` server. Needs the agent-mail binary and an Agent Token from the human.",
+  "author": {
+    "name": "ollie-dev"
+  },
+  "homepage": "https://github.com/ollie-dev/agent-mail",
+  "repository": "https://github.com/ollie-dev/agent-mail",
+  "license": "Apache-2.0"
+}
