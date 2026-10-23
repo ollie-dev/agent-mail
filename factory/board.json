@@ -426,6 +426,25 @@
       "reason": "",
       "updated": "2026-10-23T14:26:07Z",
       "builder": "builder-018-plugin-readme"
+    },
+    {
+      "id": "019-help-error-text",
+      "title": "Help and error text",
+      "feature": "Follow-ups F3, F7, F9, F13, F17: short, consistent help text and error messages per the CLAUDE.md convention (at most about 300 characters per paragraph, each thing said once), consistent global-versus-subcommand `--text` wording, and a ui reviewer check for the convention (factory/follow-ups.md)",
+      "branch": "factory/019-help-error-text",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-23T20:13:44Z",
+      "builder": "a07d50fdcae7b3961"
     }
   ],
   "updated": null
