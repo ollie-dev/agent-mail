@@ -16,12 +16,12 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  # Runs the tests with read-only permissions, so test and dev-dependency
+  # code never sees the publish job's write scopes or OIDC token.
+  test:
     runs-on: macos-latest
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     env:
       TAG: ${{ github.ref_name }}
     steps:
@@ -39,6 +39,20 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  publish:
+    needs: test
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build
         run: |

@@ -70,6 +70,62 @@ fn ac3_workflow_builds_signs_attests_and_verifies() {
     }
 }
 
+/// The body of one top-level job in the workflow, from its `  name:` line
+/// up to the next job.
+fn job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let jobs = workflow.split("\njobs:\n").nth(1).expect("no jobs: block");
+    let header = format!("\n  {name}:\n");
+    let start = format!("\n{jobs}")
+        .find(&header)
+        .unwrap_or_else(|| panic!("no {name} job"));
+    let body = &jobs[start + header.len() - 1..];
+    let end = body
+        .lines()
+        .scan(0, |offset, line| {
+            let at = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .find(|(_, line)| {
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':')
+        })
+        .map(|(at, _)| at)
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+#[test]
+fn ac3_tests_run_in_a_read_only_job_that_publish_depends_on() {
+    let workflow = read(".github/workflows/release.yml");
+    let test = job(&workflow, "test");
+    assert!(
+        test.contains("cargo test --locked"),
+        "test job runs no tests"
+    );
+    let permissions = test
+        .split("permissions:\n")
+        .nth(1)
+        .expect("test job has no permissions block");
+    let scopes: Vec<&str> = permissions
+        .lines()
+        .take_while(|l| l.starts_with("      "))
+        .map(str::trim)
+        .collect();
+    assert_eq!(scopes, ["contents: read"], "test job permissions");
+    assert!(!test.contains("write"), "test job holds a write scope");
+
+    let publish = job(&workflow, "publish");
+    assert!(
+        publish.contains("needs: test"),
+        "publish does not need test"
+    );
+    assert!(
+        !publish.contains("cargo test"),
+        "publish still runs the tests"
+    );
+    assert!(publish.contains("id-token: write"));
+}
+
 #[test]
 fn ac3_workflow_checks_the_tag_against_cargo_toml() {
     let workflow = read(".github/workflows/release.yml");
