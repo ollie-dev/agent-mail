@@ -201,6 +201,10 @@ pub enum ImapError {
     /// No mailbox `LIST` returned carries the `\Drafts` special-use
     /// attribute. Nothing was appended.
     DraftsNotFound,
+    /// The server refused the `APPEND` of a draft (a tagged `NO` or `BAD`,
+    /// before the continuation or after the literal, e.g. `[TRYCREATE]` or
+    /// `[OVERQUOTA]`). Nothing was stored. The server's text is not kept.
+    AppendRefused,
     /// A Gmail search was asked for, but the server does not advertise
     /// `X-GM-EXT-1`. No mailbox was opened and nothing was searched.
     GmailUnsupported,
@@ -956,7 +960,12 @@ async fn append(
             .ok_or(ImapError::Protocol)?;
         match response.parsed() {
             Response::Continue { .. } => break,
-            Response::Done { tag, .. } if *tag == id => return Err(ImapError::Protocol),
+            Response::Done { tag, status, .. } if *tag == id => {
+                return Err(match status {
+                    Status::No | Status::Bad => ImapError::AppendRefused,
+                    _ => ImapError::Protocol,
+                });
+            }
             _ => {}
         }
     }
@@ -985,6 +994,7 @@ async fn append(
                     }
                     _ => None,
                 })),
+                Status::No | Status::Bad => Err(ImapError::AppendRefused),
                 _ => Err(ImapError::Protocol),
             };
         }

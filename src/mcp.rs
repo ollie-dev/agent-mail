@@ -440,11 +440,16 @@ fn call_tool(
             env, &command, context,
         ))),
         // Without any token the call fails as every Agent command does,
-        // whatever the arguments hold; there is no command to audit.
-        Err(_) if core::no_token_presented(env) => Ok(render_report(Report {
-            result: Err(core::CoreError::MissingToken),
-            invalid_tokens: Vec::new(),
-        })),
+        // whatever the arguments hold; there is no command to audit. The
+        // argument mistake is reported too, so one retry can fix both. It
+        // names argument keys only, never values.
+        Err(message) if core::no_token_presented(env) => {
+            let missing = core::CoreError::MissingToken.body().message;
+            Ok(tool_error(
+                "missing_token",
+                &format!("{missing}. The arguments are also wrong: {message}"),
+            ))
+        }
         Err(message) => Ok(invalid_arguments(&message)),
     }
 }
@@ -486,7 +491,12 @@ fn text_item(text: &str) -> Value {
 }
 
 fn invalid_arguments(message: &str) -> Value {
-    let error = json!({ "error": { "code": "invalid_arguments", "message": message } });
+    tool_error("invalid_arguments", message)
+}
+
+/// A tool error result with only `code` and `message`.
+fn tool_error(code: &str, message: &str) -> Value {
+    let error = json!({ "error": { "code": code, "message": message } });
     json!({
         "content": [text_item(&error.to_string())],
         "structuredContent": error,

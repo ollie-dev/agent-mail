@@ -183,10 +183,7 @@ fn ac11_store_flag_is_an_unknown_argument() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(
-        stderr.contains("unexpected argument '--store'"),
-        "{stderr:?}"
-    );
+    assert!(stderr.contains("unknown option --store;"), "{stderr:?}");
 }
 
 #[test]
@@ -472,6 +469,10 @@ fn error_samples() -> Vec<CoreError> {
             unreadable: 2,
         },
         CoreError::AuditUnavailable,
+        CoreError::DraftRefused {
+            account: account(),
+            mailbox: mailbox(),
+        },
     ];
     let mut samples = Vec::new();
     for seed in seeds {
@@ -482,6 +483,7 @@ fn error_samples() -> Vec<CoreError> {
             | CoreError::MoveUnsupported { .. }
             | CoreError::Unsupported { .. }
             | CoreError::DraftsNotFound { .. }
+            | CoreError::DraftRefused { .. }
             | CoreError::UnsupportedFlag
             | CoreError::MailboxNotFound { .. }
             | CoreError::TlsRequired { .. }
@@ -626,4 +628,274 @@ fn ac8_invalid_token_warning_is_at_most_300_characters() {
             warning.message
         );
     }
+}
+
+// ---- Agent-readable usage errors and the in-process `mcp` refusal (job 020) ----
+
+use support::{
+    CountingStore, FakeImap, Mode, audit_lines, grant, mandate, run_logged, store_mandate,
+    temp_audit_log,
+};
+
+/// A well-formed message reference.
+const VALID_REF: &str = "agent@example.test/INBOX/1700000001/2";
+
+/// Asserts `out` is a usage error (exit 2, empty stdout, stderr one JSON
+/// line `{"error":{"code":"invalid_arguments","message":...}}` with no
+/// other key) and returns its message.
+fn usage_message(args: &[&str], out: &agent_mail::RunOutput) -> String {
+    assert_eq!(out.code, 2, "{args:?}: {out:?}");
+    assert_eq!(out.stdout, "", "{args:?}");
+    assert!(out.stderr.ends_with('\n'), "{args:?}: {:?}", out.stderr);
+    assert_eq!(out.stderr.lines().count(), 1, "{args:?}: {:?}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stderr)
+        .unwrap_or_else(|e| panic!("{args:?}: stderr is not JSON ({e}): {:?}", out.stderr));
+    let outer: Vec<&String> = value.as_object().unwrap().keys().collect();
+    assert_eq!(outer, ["error"], "{args:?}");
+    let error = value["error"].as_object().unwrap();
+    let mut keys: Vec<&String> = error.keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["code", "message"], "{args:?}");
+    assert_eq!(error["code"], "invalid_arguments", "{args:?}");
+    let message = error["message"].as_str().expect("a string message");
+    assert!(
+        !message.contains('\n') && !message.contains('\r'),
+        "{message:?}"
+    );
+    message.to_string()
+}
+
+#[test]
+fn job020_ac5_an_invalid_draft_recipient_is_a_json_usage_error() {
+    let args = [
+        "draft",
+        "--to",
+        "not-an-address-zq7",
+        "--subject",
+        "S",
+        "--body",
+        "B",
+    ];
+    let message = usage_message(&args, &run_in_process(&args));
+    assert!(message.contains("--to"), "{message}");
+    assert!(
+        message.contains("must be a bare address local@domain"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("run `agent-mail draft --help` for usage"),
+        "{message}"
+    );
+    assert!(!message.contains("not-an-address-zq7"), "{message}");
+}
+
+#[test]
+fn job020_ac6_every_command_reports_usage_errors_as_json() {
+    let cases: [(&[&str], Option<&str>, &str); 11] = [
+        (
+            &["list", "--account", ""],
+            Some("--account"),
+            "agent-mail list --help",
+        ),
+        (
+            &["search", "--limit", "0"],
+            Some("--limit"),
+            "agent-mail search --help",
+        ),
+        (
+            &["read", "not-a-ref"],
+            Some("REF"),
+            "agent-mail read --help",
+        ),
+        (
+            &["flag", VALID_REF],
+            Some("--set"),
+            "agent-mail flag --help",
+        ),
+        (&["move", VALID_REF], Some("--to"), "agent-mail move --help"),
+        (
+            &[
+                "draft",
+                "--to",
+                "a@b.example",
+                "--subject",
+                "S",
+                "--body",
+                "B",
+                "--reply-to",
+                VALID_REF,
+            ],
+            Some("--subject"),
+            "agent-mail draft --help",
+        ),
+        (
+            &["whoami", "--full"],
+            Some("--full"),
+            "agent-mail whoami --help",
+        ),
+        (
+            &["mandate", "delete"],
+            Some("<ID>"),
+            "agent-mail mandate delete --help",
+        ),
+        (
+            &["mandate", "create", "--bogus"],
+            Some("--bogus"),
+            "agent-mail mandate create --help",
+        ),
+        (
+            &["mcp", "--bogus"],
+            Some("--bogus"),
+            "agent-mail mcp --help",
+        ),
+        (&["lsit"], None, "agent-mail --help"),
+    ];
+    for (args, names, pointer) in cases {
+        let message = usage_message(args, &run_in_process(args));
+        if let Some(names) = names {
+            assert!(message.contains(names), "{args:?}: {message}");
+        }
+        assert!(
+            message.ends_with(&format!("run `{pointer}` for usage")),
+            "{args:?}: {message}"
+        );
+        assert!(message.chars().count() <= 300, "{args:?}: {message}");
+        // The help pointer is joined once, never after another `;`.
+        assert_eq!(message.matches(';').count(), 1, "{args:?}: {message}");
+    }
+
+    // A suggested command is named inside the problem, not as a second
+    // clause before the pointer.
+    for (args, suggested, pointer) in [
+        (&["lsit"][..], "list", "agent-mail --help"),
+        (&["mandate", "delet"], "delete", "agent-mail mandate --help"),
+    ] {
+        let message = usage_message(args, &run_in_process(args));
+        assert_eq!(
+            message,
+            format!("unknown command (did you mean `{suggested}`?); run `{pointer}` for usage")
+        );
+        assert!(!message.contains("?;"), "{message}");
+    }
+
+    // The built binary prints the same as the in-process run.
+    let args = [
+        "draft",
+        "--to",
+        "not-an-address-zq7",
+        "--subject",
+        "S",
+        "--body",
+        "B",
+    ];
+    let binary = run_agent_mail(&args);
+    let in_process = run_in_process(&args);
+    assert_eq!(binary.status.code(), Some(in_process.code));
+    assert_eq!(String::from_utf8_lossy(&binary.stdout), in_process.stdout);
+    assert_eq!(String::from_utf8_lossy(&binary.stderr), in_process.stderr);
+}
+
+#[test]
+fn job020_ac7_usage_errors_never_echo_the_callers_values() {
+    let args = ["list", "--bogus=hunter2zq7"];
+    let message = usage_message(&args, &run_in_process(&args));
+    assert!(message.contains("--bogus"), "{message}");
+    assert!(!message.contains("hunter2zq7"), "{message}");
+
+    let args = ["read", VALID_REF, "extra-word-zq7"];
+    let message = usage_message(&args, &run_in_process(&args));
+    assert!(!message.contains("extra-word-zq7"), "{message}");
+    assert!(message.contains("unexpected argument"), "{message}");
+
+    let args = ["search", "--subject", "a\nb-zq7"];
+    let message = usage_message(&args, &run_in_process(&args));
+    assert!(message.contains("--subject"), "{message}");
+    assert!(!message.contains("zq7"), "{message}");
+
+    // `--text` does not change the shape: parsing failed, so the output
+    // mode is unknown.
+    let args = ["--text", "list", "--bogus=hunter2zq7"];
+    let message = usage_message(&args, &run_in_process(&args));
+    assert!(!message.contains("hunter2zq7"), "{message}");
+}
+
+#[test]
+fn job020_ac8_help_and_version_keep_clap_plain_text() {
+    for args in [
+        &["--help"][..],
+        &["-h"],
+        &["--version"],
+        &["draft", "--help"],
+        &["help", "draft"],
+    ] {
+        let out = run_in_process(args);
+        assert_eq!(out.code, 0, "{args:?}: {out:?}");
+        assert_eq!(out.stderr, "", "{args:?}");
+        assert!(!out.stdout.is_empty(), "{args:?}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out.stdout).is_err(),
+            "{args:?}: {:?}",
+            out.stdout
+        );
+    }
+    for args in [&[][..], &["mandate"]] {
+        let out = run_in_process(args);
+        assert_eq!(out.code, 2, "{args:?}: {out:?}");
+        assert_eq!(out.stdout, "", "{args:?}");
+        assert!(
+            out.stderr.contains("Usage: agent-mail"),
+            "{args:?}: {out:?}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out.stderr).is_err(),
+            "{args:?}: {:?}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+fn job020_ac9_a_usage_error_reads_no_store_connects_nowhere_and_audits_nothing() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = CountingStore::default();
+    let token = store_mandate(
+        &store.inner,
+        &mandate(
+            server.port,
+            agent_mail::mandate::TlsMode::Implicit,
+            vec![grant(Operation::Draft, &[])],
+        ),
+    );
+    let log = temp_audit_log();
+    let args = [
+        "draft",
+        "--to",
+        "not-an-address",
+        "--subject",
+        "S",
+        "--body",
+        "B",
+    ];
+    let out = run_logged(&args, Some(token.expose()), &store, &server.ca, &log);
+    usage_message(&args, &out);
+    assert_eq!(store.accesses(), 0);
+    assert_eq!(server.connections(), 0);
+    assert!(audit_lines(&log).is_empty());
+}
+
+#[test]
+fn job020_ac10_in_process_mcp_is_refused_as_json_or_text() {
+    let message =
+        "`agent-mail mcp` runs as a server on stdin and stdout; start the binary from an MCP host";
+    let out = run_in_process(&["mcp"]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr,
+        format!("{{\"error\":{{\"code\":\"invalid_arguments\",\"message\":\"{message}\"}}}}\n")
+    );
+    let out = run_in_process(&["--text", "mcp"]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, format!("error: invalid_arguments: {message}\n"));
 }

@@ -482,6 +482,9 @@ struct State {
     appended: Vec<(String, Vec<String>, String)>,
     /// Scripted `X-GM-RAW` results: raw mailbox, exact query, UIDs.
     gmail: Vec<(String, String, Vec<u32>)>,
+    /// A scripted refusal of the next `APPEND`: whether it comes before
+    /// the literal (in place of `+ ready`), and the reply after the tag.
+    refuse_append: Option<(bool, String)>,
 }
 
 impl State {
@@ -631,6 +634,13 @@ impl FakeImap {
             query.to_string(),
             uids.to_vec(),
         ));
+    }
+
+    /// Answers the next `APPEND` with `<tag> <reply>` and stores nothing:
+    /// in place of `+ ready` when `before_literal`, else after reading the
+    /// literal.
+    pub fn refuse_append(&self, before_literal: bool, reply: &str) {
+        self.state.lock().unwrap().refuse_append = Some((before_literal, reply.to_string()));
     }
 
     /// Number of TCP connections accepted.
@@ -952,10 +962,17 @@ fn append(
         .rsplit_once('{')
         .and_then(|(_, rest)| rest.strip_suffix('}'))
         .and_then(|n| n.parse().ok())?;
+    let refusal = state.lock().unwrap().refuse_append.take();
+    if let Some((true, reply)) = &refusal {
+        return Some(format!("{tag} {reply}\r\n"));
+    }
     send(stream, "+ ready\r\n")?;
     let mut bytes = vec![0u8; size];
     stream.read_exact(&mut bytes).ok()?;
     let _rest = read_line(stream)?;
+    if let Some((false, reply)) = &refusal {
+        return Some(format!("{tag} {reply}\r\n"));
+    }
     let raw = String::from_utf8_lossy(&bytes).into_owned();
     let mut state = state.lock().unwrap();
     let Some(index) = state.mailboxes.iter().position(|m| m.name == name) else {

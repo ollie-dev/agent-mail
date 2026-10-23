@@ -139,6 +139,16 @@ With `--text` it is `warning: invalid_token: <message>`. If no token is valid, t
 
 With `--text` (`agent-mail --text whoami` or `agent-mail whoami --text`) each Mandate is a line `<id>  <name>`, followed by `  account <login> (<host>:<port>, <tls>)` and `  grant <operation> on <account>: <mailboxes>` lines, and each invalid token a line `token <position> of AGENT_MAIL_TOKEN is not valid and was ignored`.
 
+## Usage errors
+
+A usage error, such as an unknown option, a missing argument or a malformed value, is a JSON error with code `invalid_arguments` and exit code 2, also with `--text`. The message names the argument and the `--help` page to read, and never echoes the value given:
+
+```json
+{"error":{"code":"invalid_arguments","message":"missing required argument --to <MAILBOX>; run `agent-mail move --help` for usage"}}
+```
+
+Nothing is read from the Keychain, connected to or logged. `--help`, `--version` and a bare `agent-mail` still print plain help.
+
 ## Search
 
 `agent-mail search` finds messages in one mailbox the agent's Mandate grants `search` on, in the account given with `--account` (see [Several Mandates and whoami](#several-mandates-and-whoami)). It only reads: the mailbox is opened read-only, and no flag (not even `\Seen`) changes.
@@ -262,6 +272,8 @@ Anything else is a usage error (exit code 2): nothing is connected to and nothin
 
 **How the Drafts mailbox is found.** agent-mail lists your mailboxes and uses the first one, in server order, that the server marks with the `\Drafts` special-use attribute (RFC 6154), whatever its name, so localised names such as `[Gmail]/Entwürfe` work. The name never comes from the agent, so an agent cannot write into another mailbox. If no mailbox is marked, the call fails with `drafts_not_found` and nothing is created: create a Drafts folder, or mark one as the Drafts folder, in your mail client.
 
+**When the server refuses the draft.** If the server refuses to store the draft (say the mailbox is missing or full), the call fails with `draft_refused`, naming the `account` and the Drafts `mailbox`, and no draft is created. Retry later, or check that mailbox in your mail client.
+
 **Reply mode.** With `--reply-to <REF>`, given the `ref` that `agent-mail search` printed for the original message, the draft threads with it: `In-Reply-To` is the original's Message-ID, `References` is the original's References followed by its Message-ID, and the subject is the original's with `Re: ` in front, unless it already starts with `Re:` (in any case). The account is the Mandate's account whose login matches the reference, and the Mandate also needs a `read` Grant on the original's mailbox; without it the call is denied (with `operation` `read` and the mailbox) before any connection. The original is opened read-only and its headers are fetched with a peek, so it is not marked as read. Message ids from the original that hold anything but printable ASCII without spaces or angle brackets are left out; an original without a Message-ID gets a reply subject but neither header. If the mailbox was renumbered since the search, the call fails with `stale_reference`, and a UID that no longer exists fails with `message_not_found`; in both cases no draft is created.
 
 The draft is a plain-text UTF-8 message with `From` (your login), `To`, `Subject` (RFC 2047-encoded when not ASCII), `Date` and a random `Message-ID`; its body is quoted-printable encoded, so no line is too long.
@@ -274,7 +286,7 @@ The JSON result has these keys, in this order: `ref` (the new draft's reference,
 
 With `--text` (`agent-mail --text draft ...` or after the subcommand) the output is one line, `draft created: <ref>`, or `draft created in <mailbox> (new reference not reported)`.
 
-Errors besides those above: `denied`, `drafts_not_found`, `invalid_draft` (a value the command line would have refused, reached through another adapter; the message names the field but never echoes the value), `stale_reference`, `message_not_found`, `invalid_reference`, and the connection errors every command shares.
+Errors besides those above: `denied`, `drafts_not_found`, `draft_refused`, `invalid_draft` (a value the command line would refuse, sent through MCP; it is never echoed), `stale_reference`, `message_not_found`, `invalid_reference`, and the connection errors every command shares.
 
 Drafts cannot be edited, replaced or deleted with agent-mail: there is no command for it, and `draft` never selects a mailbox read-write or sends `STORE`, `COPY`, `MOVE` or `EXPUNGE`. Change or discard a draft in your own mail client.
 
@@ -307,10 +319,12 @@ command, with the same audit log entry. An agent starts with `whoami`, then
   `invalid_token` warning follows as a second text item.
 - A failed call is a tool error (`isError` true) whose content is the CLI's
   error object `{"error":{"code":...}}`, with the CLI's codes (`denied`,
-  `missing_token`, `stale_reference` and so on). Arguments the CLI would
-  refuse (a malformed reference, both `set` and `clear`, an unknown
-  property, a wrong type) fail with `invalid_arguments`, a code only the MCP
-  server uses, before anything is connected or logged.
+  `missing_token`, `stale_reference` and so on).
+- Arguments the CLI would refuse (a malformed reference, both `set` and
+  `clear`, an unknown property, a wrong type) fail with `invalid_arguments`,
+  the code of a CLI usage error, before anything is connected or logged.
+- Without a token, a call with such arguments fails with `missing_token`,
+  whose message also names the argument mistake.
 - The token comes only from the server's environment (`AGENT_MAIL_TOKEN`,
   read once when the host starts the server; restart it for a new token).
   No tool argument or request field can supply or override it.
@@ -392,7 +406,7 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 - `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
 - `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `account_required`, `ambiguous_mandate`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft`, `store_unavailable`, `hardened_runtime_missing` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, such as `denied`, `missing_token`, `login_failed`, `drafts_not_found`, `draft_refused` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
 The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
 

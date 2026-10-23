@@ -504,11 +504,16 @@ fn ac9_credential_flags_are_usage_errors() {
             session
                 .output
                 .stderr
-                .contains(&format!("unexpected argument '{flag}'")),
+                .contains(&format!("unknown option {flag};")),
             "{flag}: {:?}",
             session.output.stderr
         );
-        assert!(session.output.stderr.contains("Usage:"));
+        assert!(
+            session
+                .output
+                .stderr
+                .contains("run `agent-mail mandate create --help` for usage")
+        );
         assert!(session.terminal.transcript().is_empty());
         assert!(store.entries().is_empty());
     }
