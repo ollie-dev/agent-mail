@@ -4,7 +4,7 @@
 
 **Blocked by:** 08, 09, 10, 11, 13
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Listing tools returns exactly `whoami`, `list`, `search`, `read`, `flag`, `move` and `draft`, with input schemas matching the CLI options
 - [ ] Each tool call returns the same structure as the equivalent CLI command's JSON output
