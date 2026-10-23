@@ -1,6 +1,26 @@
 # Agent Mail - Connects you agents securely to your E-Mails
 Agent Mail is a simple and secure way to configure access to your email for your agents. It securely stores your credentials hidden from your agents and allows you to configure what agents can access and do.
 
+## Install
+
+agent-mail releases are built for macOS (Apple silicon and Intel). Install the latest release with:
+
+```sh
+curl -fsSL https://github.com/ollie-dev/agent-mail/releases/latest/download/install.sh | sh
+```
+
+The installer picks the binary for your Mac's architecture, downloads it with its SHA-256 checksum file, verifies the checksum and only then installs the binary to `~/.local/bin/agent-mail`. If the checksum does not match, it stops and installs nothing. It never uses `sudo` and needs no Rust toolchain. If `~/.local/bin` is not on your `PATH`, it prints a hint.
+
+The checksum comes from the same release as the binary, so it catches a corrupted or tampered download, not a compromised release. To check that a release was built from this repository by its release workflow, download the tarball from the [releases page](https://github.com/ollie-dev/agent-mail/releases) and verify its build attestation with the GitHub CLI:
+
+```sh
+gh attestation verify agent-mail-aarch64-apple-darwin.tar.gz --repo ollie-dev/agent-mail
+```
+
+On macOS the first Keychain access after an update prompts once, because each release has a new code signature; allow it. A Keychain prompt at any other time is a red flag: deny it.
+
+Release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A release binary checks its own signature before it touches the Keychain; if the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed. Reinstall from the releases page if you see it.
+
 ## Several Mandates and whoami
 
 An agent can hold several Mandates at once, for example one for a work account and one for a private account. `AGENT_MAIL_TOKEN` takes one or more agent tokens, comma-separated; spaces around each token and empty fields are ignored, and a token given twice counts once:
@@ -284,7 +304,7 @@ Each line is one JSON object with these keys, in this order, absent keys left ou
 - `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
 - `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `account_required`, `ambiguous_mandate`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, e.g. `denied`, `invalid_token`, `missing_token`, `account_required`, `ambiguous_mandate`, `login_failed`, `stale_reference`, `message_not_found`, `unsupported_flag`, `same_mailbox`, `move_unsupported`, `drafts_not_found`, `invalid_draft`, `store_unavailable`, `hardened_runtime_missing` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
 
 The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
 
@@ -302,3 +322,7 @@ cargo test --test gmail_live -- --ignored
 ```
 
 The app password is held in memory only: the test keeps it in an in-memory Mandate store, writes its audit lines to a temporary file, and checks that neither the output nor that file contains it or the agent token. Without the two variables the test prints a one-line skip message and passes.
+
+**Release-binary tests.** `tests/selfcheck.rs` holds opt-in macOS tests, ignored by default, that build the release binary, sign a copy with `scripts/sign-macos.sh` and another without the hardened runtime, and check that only the first reaches the Keychain, that it links only system libraries and that it runs without a Rust toolchain. They present a freshly minted token that no Keychain item matches, so they raise no prompt; the refused `list` run adds one `denied` line to your audit log. Run them with `cargo test --test selfcheck -- --ignored`.
+
+**Releasing.** Bump `version` in `Cargo.toml`, commit, then tag the commit `vX.Y.Z` with the same version and push the tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `release` workflow (`.github/workflows/release.yml`) checks that the tag matches `Cargo.toml` and runs the tests in a `test` job that only has read access to the repository; once it passes, the `publish` job builds both macOS targets, signs them with `scripts/sign-macos.sh`, attests them and publishes the release with `.github/release-notes.md` as its notes. A final `verify` job then runs `scripts/verify-release.sh vX.Y.Z` on a fresh runner, checking the checksums, signatures and attestations of the published assets; you can run the same script locally against any published tag.

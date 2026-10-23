@@ -749,7 +749,7 @@ impl MandateStore for FailingStore {
         Ok(None)
     }
     fn put(&self, _: &[u8], _: &[u8]) -> Result<(), StoreError> {
-        Err(StoreError)
+        Err(StoreError::Unavailable)
     }
     fn delete(&self, _: &[u8]) -> Result<bool, StoreError> {
         Ok(false)
