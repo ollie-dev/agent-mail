@@ -46,13 +46,16 @@ use crate::terminal::escape_controls;
     about,
     arg_required_else_help = true,
     after_help = "Agent commands read one or more agent tokens from AGENT_MAIL_TOKEN, comma-separated. \
-Each command works on one account: name it with --account on list, search and draft (it may be left \
-out when the tokens reach only one account); read, flag, move and draft --reply-to take it from the \
-message reference. The one Mandate covering that account is used; grants never combine across \
-Mandates. Run `agent-mail whoami` to see what the tokens allow."
+Run `agent-mail whoami` to see what they allow.
+
+Each command works on one account. list, search and draft take it from --account, which may be \
+left out when the tokens reach only one account; read, flag, move and draft --reply-to take it \
+from the message reference.
+
+The one Mandate covering that account is used; grants never combine across Mandates."
 )]
 pub struct Cli {
-    /// Print human-readable text instead of JSON (for `search`, put it before the subcommand)
+    /// Print human-readable text instead of JSON; may also follow the subcommand, except for search, whose --text is a search criterion
     #[arg(long)]
     pub text: bool,
 
@@ -79,103 +82,121 @@ pub enum CliCommand {
     /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN
     /// and works on the account given with --account. Criteria combine with
     /// AND; string criteria are case-insensitive substring matches. With no
-    /// criterion every message matches. Prints one JSON object on stdout:
-    /// account, mailbox, total (how many matched), more (whether more
-    /// matched than are shown) and messages, each with ref, date, from,
-    /// subject and flags. A ref is <account>/<mailbox>/<uidvalidity>/<uid>,
-    /// with `%`, `/` and bytes outside printable ASCII in the account and
-    /// mailbox percent-encoded. Here --text is the TEXT criterion; for
-    /// human-readable output run `agent-mail --text search ...`.
+    /// criterion every message matches.
+    ///
+    /// Prints one JSON object on stdout: account, mailbox, total (how many
+    /// matched), more (whether more matched than are shown) and messages,
+    /// each with ref, date, from, subject and flags.
+    ///
+    /// A ref is <account>/<mailbox>/<uidvalidity>/<uid>, with `%`, `/` and
+    /// bytes outside printable ASCII in the account and mailbox
+    /// percent-encoded.
+    ///
+    /// Here --text is the TEXT criterion; for human-readable output run
+    /// `agent-mail --text search ...`.
     Search(SearchArgs),
     /// Read one message by the reference `search` printed, without marking it seen
     ///
-    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
-    /// the account is the reference's. Needs a `read` grant on
-    /// the reference's account and mailbox. Prints one JSON object on
-    /// stdout: ref, account, mailbox, date, from, to, cc, subject,
-    /// message_id, body (the plain-text part, or the HTML part converted to
-    /// text), truncated, and attachments (name, type and size only, never
-    /// their content). A body longer than 20,000 characters is cut, with
-    /// `truncated` true and a marker at the end, unless --full is given.
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// Needs a `read` grant on the reference's account and mailbox.
+    ///
+    /// Prints one JSON object on stdout: ref, account, mailbox, date, from,
+    /// to, cc, subject, message_id, body (the plain-text part, or the HTML
+    /// part converted to text), truncated, and attachments (name, type and
+    /// size only, never their content).
+    ///
+    /// A body cut at 20,000 characters has `truncated` true and a marker at
+    /// the end; --full returns it whole.
+    ///
     /// If the mailbox was renumbered since the search, the read fails with
     /// `stale_reference`: search again for a fresh reference.
     Read(ReadArgs),
     /// Mark one message read or unread, or starred or unstarred, by the reference `search` printed
     ///
-    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
-    /// the account is the reference's. Needs a `flag` grant on
-    /// the reference's account and mailbox. Give exactly one of --set or
-    /// --clear. Only two flags can be changed: `seen` (or `\Seen`), the
-    /// message is read, and `flagged` (or `\Flagged`), the message is
-    /// starred; names are case-insensitive, and any other flag fails with
-    /// `unsupported_flag`. Prints one JSON object on stdout: ref, account,
-    /// mailbox and flags (every flag of the message after the change).
-    /// Setting a flag that is already set, or clearing one that is not, is
-    /// harmless. If the mailbox was renumbered since the search, nothing is
-    /// changed and the call fails with `stale_reference`: search again for a
-    /// fresh reference.
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// Needs a `flag` grant on the reference's account and mailbox. Give
+    /// exactly one of --set or --clear.
+    ///
+    /// Only `seen` (or `\Seen`) and `flagged` (or `\Flagged`) can be
+    /// changed; names are case-insensitive, and any other flag fails with
+    /// `unsupported_flag`.
+    ///
+    /// Prints one JSON object on stdout: ref, account, mailbox and flags
+    /// (every flag of the message after the change). Setting a flag that is
+    /// already set, or clearing one that is not, is harmless.
+    ///
+    /// If the mailbox was renumbered since the search, nothing is changed and
+    /// the call fails with `stale_reference`: search again for a fresh
+    /// reference.
     Flag(FlagArgs),
     /// Move one message, by the reference `search` printed, to another mailbox of the same account
     ///
-    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN;
-    /// the account is the reference's. Needs a `move` grant on
-    /// both mailboxes of the reference's account: the source the reference
-    /// names and the target given with --to, a mailbox name as `agent-mail
-    /// list` prints it. Prints one JSON object on stdout: ref, account,
-    /// mailbox (the source), target, and new_ref, the message's reference
-    /// in the target, which may be null when the server does not report
-    /// it (then search the target for it). Uses the server's MOVE, or else
-    /// copies the message, marks it deleted and expunges that one message
-    /// only (UIDPLUS). A server with neither fails with `move_unsupported`
-    /// and nothing is moved. If the mailbox was renumbered since the
-    /// search, nothing is moved and the call fails with `stale_reference`:
-    /// search again for a fresh reference.
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// Needs a `move` grant on both mailboxes of the reference's account: the
+    /// source the reference names and the target given with --to.
+    ///
+    /// Prints one JSON object on stdout: ref, account, mailbox (the source),
+    /// target, and new_ref, the message's reference in the target, which may
+    /// be null when the server does not report it (then search the target
+    /// for it).
+    ///
+    /// Uses the server's MOVE, or else copies the message, marks it deleted
+    /// and expunges that one message only (UIDPLUS). A server with neither
+    /// fails with `move_unsupported` and nothing is moved.
+    ///
+    /// If the mailbox was renumbered since the search, nothing is moved and
+    /// the call fails with `stale_reference`: search again for a fresh
+    /// reference.
     Move(MoveArgs),
     /// Create a draft in the account's Drafts mailbox for the human to review and send, optionally as a reply
     ///
     /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
-    /// The account is the one given with --account, or a reply's
-    /// reference's. Needs a `draft` grant on
-    /// the account; a reply (--reply-to) also needs a `read` grant on the
-    /// original's mailbox. --to is repeatable and takes bare addresses
-    /// (local@domain, no display names). Give --subject for a new message,
-    /// or --reply-to with a reference exactly as `agent-mail search` prints
-    /// it, but not both: the draft then threads with the original (In-Reply-To and
-    /// References) and its subject is the original's with `Re: ` in front,
-    /// added only once. The draft goes to the mailbox the server marks with
-    /// the \Drafts special-use attribute, whatever its name, with the
-    /// \Draft flag; with none marked, the call fails with
-    /// `drafts_not_found`. Prints one JSON object on stdout: ref (the new
-    /// draft's reference, null when the server does not report it),
-    /// account, mailbox, to, subject and original (the --reply-to
-    /// reference, or null). Drafts cannot be changed or removed with
-    /// agent-mail afterwards; the human reviews and sends them in their own
-    /// mail client.
+    /// Needs a `draft` grant on the account; a reply also needs a `read`
+    /// grant on the original's mailbox.
+    ///
+    /// Give --subject for a new message or --reply-to for a reply, but not
+    /// both. A reply threads with the original (In-Reply-To and References)
+    /// and takes its subject with `Re: ` in front, added only once.
+    ///
+    /// The draft goes to the mailbox the server marks with the \Drafts
+    /// special-use attribute, whatever its name, with the \Draft flag; with
+    /// none marked, the call fails with `drafts_not_found`.
+    ///
+    /// Prints one JSON object on stdout: ref (the new draft's reference, null
+    /// when the server does not report it), account, mailbox, to, subject and
+    /// original (the --reply-to reference, or null).
+    ///
+    /// Drafts cannot be changed or removed with agent-mail afterwards; the
+    /// human reviews and sends them in their own mail client.
     Draft(DraftArgs),
     /// Show what the presented agent tokens allow: each Mandate's ID, name, accounts and grants
     ///
-    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN
-    /// and prints one JSON object on stdout: mandates, in token order, each
-    /// with id, name, accounts (login, host, port, tls) and grants
-    /// (operation, account, mailboxes), and invalid_tokens, the positions in
-    /// AGENT_MAIL_TOKEN of tokens that are not valid. Needs no grant, makes
-    /// no connection and never shows a credential or token.
+    /// Reads one or more comma-separated agent tokens from AGENT_MAIL_TOKEN.
+    /// Needs no grant, makes no connection and never shows a credential or
+    /// token.
+    ///
+    /// Prints one JSON object on stdout: mandates, in token order, each with
+    /// id, name, accounts (login, host, port, tls) and grants (operation,
+    /// account, mailboxes), and invalid_tokens, the positions in
+    /// AGENT_MAIL_TOKEN of tokens that are not valid.
     Whoami {
         #[command(flatten)]
         output: TextOutput,
     },
     /// Run as an MCP server over stdio for a host app
     ///
-    /// For Claude Desktop, Cowork, Claude Code or another MCP host: the host
+    /// For Claude Desktop, Cowork, Claude Code or another MCP host. The host
     /// starts `agent-mail mcp` with AGENT_MAIL_TOKEN (one or more
     /// comma-separated agent tokens) in the server's environment, read once
-    /// at start; no tool argument can supply or override it. Speaks
-    /// newline-delimited JSON-RPC 2.0 on stdin and stdout and offers the
-    /// tools whoami, list, search, read, flag, move and draft. Each returns
-    /// the same JSON, error codes and audit entries as the matching command;
-    /// bad tool arguments fail with `invalid_arguments`. Mandate management
-    /// is not offered over MCP: the human creates, lists and deletes Mandates
-    /// with `agent-mail mandate` in their own terminal.
+    /// at start; no tool argument can supply or override it.
+    ///
+    /// Speaks newline-delimited JSON-RPC 2.0 on stdin and stdout and offers
+    /// the tools whoami, list, search, read, flag, move and draft. Each
+    /// returns the same JSON, error codes and audit entries as the matching
+    /// command; bad tool arguments fail with `invalid_arguments`.
+    ///
+    /// Mandate management is not offered over MCP: the human creates, lists
+    /// and deletes Mandates with `agent-mail mandate` in their own terminal.
     Mcp,
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
@@ -260,7 +281,7 @@ pub struct MoveArgs {
     /// The message reference, exactly as `agent-mail search` prints it in `ref`: <account>/<mailbox>/<uidvalidity>/<uid>
     #[arg(value_name = "REF", value_parser = reference)]
     pub reference: MessageRef,
-    /// The target mailbox, by its name as `agent-mail list` prints it; `move` must be granted on it too
+    /// The target mailbox, by its name as `agent-mail list` prints it
     #[arg(long, value_name = "MAILBOX", required = true, value_parser = mailbox_name)]
     pub to: SearchText,
     #[command(flatten)]
@@ -375,9 +396,10 @@ pub struct SearchArgs {
     ///
     /// The query is sent to the server unchanged. Works only on servers
     /// advertising Gmail's extensions (X-GM-EXT-1) and fails with
-    /// `unsupported` elsewhere. Cannot be combined with --from, --to,
-    /// --subject, --text, --since, --before, --unseen or --flagged, but
-    /// works with --mailbox and --limit.
+    /// `unsupported` elsewhere.
+    ///
+    /// Cannot be combined with --from, --to, --subject, --text, --since,
+    /// --before, --unseen or --flagged, but works with --mailbox and --limit.
     #[arg(
         long,
         value_name = "QUERY",
@@ -435,11 +457,14 @@ pub enum MandateCommand {
     ///
     /// Asks for each Account's settings and Credential with hidden input,
     /// checks a live login, lets you tick mailboxes and operations, and shows
-    /// the new Agent Token once, then offers to save the Mandate's Accounts
-    /// and Grants as a TOML file (never its Credentials or Agent Token).
-    /// With --from, a saved file pre-fills the choices; every Credential is
-    /// still typed and live-checked. Refuses to run without a terminal or
-    /// inside an agent sandbox. No option can supply a Credential.
+    /// the new Agent Token once.
+    ///
+    /// Then offers to save the Mandate's Accounts and Grants as a TOML file
+    /// for --from (never its Credentials or Agent Token). With --from, every
+    /// Credential is still typed and live-checked.
+    ///
+    /// Refuses to run without a terminal or inside an agent sandbox. No
+    /// option can supply a Credential.
     Create {
         /// Pre-fill the setup from a Mandate file saved by an earlier `mandate create`
         #[arg(long, value_name = "FILE")]

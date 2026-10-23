@@ -246,3 +246,23 @@ fn ac11_release_binary_has_no_test_only_code() {
         "release binary contains test-only code"
     );
 }
+
+#[test]
+fn ac9_ui_reviewer_checks_the_help_and_error_text_convention() {
+    let text = read(&repo_root().join(".claude/agents/review-ui.md"));
+    let bullets: Vec<&str> = text
+        .lines()
+        .skip_while(|line| line.trim() != "**Look for:**")
+        .skip(1)
+        .take_while(|line| line.starts_with("- "))
+        .collect();
+    assert!(!bullets.is_empty(), "no \"Look for\" list: {text}");
+    assert!(
+        bullets.iter().any(|line| {
+            ["help text", "error message", "300", "once"]
+                .iter()
+                .all(|needle| line.contains(needle))
+        }),
+        "no \"Look for\" bullet names help text, error messages, 300 and once: {bullets:?}"
+    );
+}
