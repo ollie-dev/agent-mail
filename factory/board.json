@@ -445,6 +445,35 @@
       "reason": "",
       "updated": "2026-10-23T20:13:44Z",
       "builder": "a07d50fdcae7b3961"
+    },
+    {
+      "id": "020-agent-readable-errors",
+      "title": "Agent-readable errors",
+      "feature": "Follow-ups F2, F4, F14, F15: errors an Agent can read: clear errors for a refused APPEND (no draft created, next step), JSON-shaped usage errors across all commands, mention argument mistakes alongside `missing_token` where practical, JSON shape for the in-process `mcp` refusal (factory/follow-ups.md)",
+      "branch": "factory/020-agent-readable-errors",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [
+        {
+          "round": 1,
+          "attempt": 1,
+          "commit": "d6c7762",
+          "verify": {
+            "ux": "VERIFIED",
+            "ui": "VERIFIED"
+          }
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-23T21:53:11Z",
+      "builder": "afb309b812e4ee45b"
     }
   ],
   "updated": null
