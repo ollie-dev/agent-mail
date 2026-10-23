@@ -201,3 +201,429 @@ fn ac11_store_env_var_changes_nothing() {
     assert_eq!(plain.stdout, with_var.stdout);
     assert_eq!(plain.stderr, with_var.stderr);
 }
+
+// ---- Short help text and error messages (job 019) ----
+
+mod support;
+
+use agent_mail::core::{CoreError, RELEASES_URL, Warning};
+use agent_mail::mandate::Operation;
+use agent_mail::store::InMemoryStore;
+
+/// Every subcommand path whose help pages AC1 checks.
+const HELP_PATHS: [&[&str]; 13] = [
+    &[],
+    &["list"],
+    &["search"],
+    &["read"],
+    &["flag"],
+    &["move"],
+    &["draft"],
+    &["whoami"],
+    &["mcp"],
+    &["mandate"],
+    &["mandate", "create"],
+    &["mandate", "list"],
+    &["mandate", "delete"],
+];
+
+/// Runs `agent-mail <args>` in-process with no token and an empty store.
+fn run_in_process(args: &[&str]) -> agent_mail::RunOutput {
+    let store = InMemoryStore::new();
+    let context = agent_mail::Context::trusting_only(&store, Vec::new());
+    let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+    agent_mail::run(argv, &std::collections::HashMap::new(), &context)
+}
+
+/// The help page of `agent-mail <path> <flag>`, asserting exit 0.
+fn help(path: &[&str], flag: &str) -> String {
+    let mut args = path.to_vec();
+    args.push(flag);
+    let out = run_in_process(&args);
+    assert_eq!(out.code, 0, "{args:?}: {out:?}");
+    out.stdout
+}
+
+/// The paragraphs of a rendered help page, per the spec's paragraph rule.
+/// Blocks that are lists (first line `Commands:`, `Options:` or
+/// `Arguments:`) are measured line by line: the short `-h` page renders
+/// its options as one block without blank lines.
+fn paragraphs(text: &str) -> Vec<String> {
+    let mut blocks: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blocks.push(Vec::new());
+        } else {
+            blocks.last_mut().unwrap().push(line);
+        }
+    }
+    let mut out = Vec::new();
+    for block in blocks.into_iter().filter(|b| !b.is_empty()) {
+        if ["Commands:", "Options:", "Arguments:"].contains(&block[0].trim()) {
+            out.extend(block.iter().map(|l| l.trim().to_string()));
+        } else {
+            let joined: Vec<&str> = block.iter().map(|l| l.trim()).collect();
+            out.push(joined.join(" "));
+        }
+    }
+    out
+}
+
+#[test]
+fn ac1_no_help_paragraph_is_longer_than_300_characters() {
+    let mut invocations = 0;
+    for path in HELP_PATHS {
+        for flag in ["--help", "-h"] {
+            invocations += 1;
+            for paragraph in paragraphs(&help(path, flag)) {
+                assert!(
+                    paragraph.chars().count() <= 300,
+                    "`agent-mail {} {flag}` has a paragraph of {} characters: {paragraph:?}",
+                    path.join(" "),
+                    paragraph.chars().count()
+                );
+            }
+        }
+    }
+    assert_eq!(invocations, 26);
+}
+
+#[test]
+fn ac2_help_keeps_the_facts_an_agent_depends_on() {
+    let cases: [(&[&str], &[&str]); 10] = [
+        (&[], &["AGENT_MAIL_TOKEN", "--account", "agent-mail whoami"]),
+        (&["search"], &["X-GM-EXT-1", "unsupported"]),
+        (&["read"], &["20,000", "stale_reference"]),
+        (&["flag"], &["unsupported_flag", "stale_reference"]),
+        (&["move"], &["move_unsupported", "stale_reference"]),
+        (&["draft"], &["drafts_not_found", "Re: "]),
+        (&["whoami"], &["invalid_tokens"]),
+        (&["mcp"], &["invalid_arguments", "agent-mail mandate"]),
+        (&["mandate", "create"], &["--from"]),
+        (&["mandate", "delete"], &["revocation_incomplete"]),
+    ];
+    for (path, needles) in cases {
+        let text = help(path, "--help");
+        for needle in needles {
+            assert!(
+                text.contains(needle),
+                "`agent-mail {} --help` lacks {needle:?}: {text}",
+                path.join(" ")
+            );
+        }
+    }
+}
+
+const TEXT_HELP: &str = "Print human-readable text instead of JSON; may also follow the subcommand, except for search, whose --text is a search criterion";
+
+#[test]
+fn ac3_global_text_flag_help_line() {
+    for flag in ["--help", "-h"] {
+        let text = help(&[], flag);
+        assert!(
+            !text.contains("put it before the subcommand"),
+            "{flag}: {text}"
+        );
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("--text"))
+            .unwrap_or_else(|| panic!("{flag}: no --text line: {text}"));
+        let description = line.trim_start().trim_start_matches("--text").trim();
+        assert_eq!(description, TEXT_HELP, "{flag}");
+    }
+}
+
+#[test]
+fn ac3_text_before_or_after_whoami_prints_the_same() {
+    let store = InMemoryStore::new();
+    let token = support::store_mandate(
+        &store,
+        &support::mandate(993, agent_mail::mandate::TlsMode::Implicit, Vec::new()),
+    );
+    let run = |args: &[&str]| {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            agent_mail::TOKEN_VAR.to_string(),
+            token.expose().to_string(),
+        );
+        let context = agent_mail::Context::trusting_only(&store, Vec::new());
+        let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+        agent_mail::run(argv, &env, &context)
+    };
+    let before = run(&["--text", "whoami"]);
+    let after = run(&["whoami", "--text"]);
+    assert_eq!(before.code, 0, "{before:?}");
+    assert!(!before.stdout.is_empty());
+    assert_eq!(before.stdout, after.stdout);
+    assert_eq!(after.code, 0);
+}
+
+#[test]
+fn ac4_search_help_names_human_readable_output_once() {
+    let text = help(&["search"], "--help");
+    assert_eq!(
+        text.matches("agent-mail --text search").count(),
+        1,
+        "{text}"
+    );
+    let short = help(&["search"], "-h");
+    let line = short
+        .lines()
+        .find(|l| l.trim_start().starts_with("--text"))
+        .unwrap_or_else(|| panic!("no --text line: {short}"));
+    let description = line.trim_start().trim_start_matches("--text <S>").trim();
+    assert!(
+        description.starts_with("Messages whose headers or body contain S"),
+        "{line:?}"
+    );
+}
+
+/// One sample of every `CoreError` variant, built with the AC5 values. The
+/// exhaustive `match` makes a new variant without a sample fail to compile.
+fn error_samples() -> Vec<CoreError> {
+    let account = || "agent@example.com".to_string();
+    let mailbox = || "INBOX".to_string();
+    let ops = [
+        Operation::Read,
+        Operation::Flag,
+        Operation::Move,
+        Operation::Draft,
+    ];
+    let seeds = vec![
+        CoreError::MissingToken,
+        CoreError::InvalidToken,
+        CoreError::Denied {
+            operation: Operation::Read,
+            account: account(),
+            mailbox: None,
+        },
+        CoreError::Uncovered {
+            operation: Operation::Read,
+            account: account(),
+            mailbox: None,
+        },
+        CoreError::SameMailbox {
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::MoveUnsupported {
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::Unsupported {
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::StaleReference {
+            operation: Operation::Read,
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::MessageNotFound {
+            operation: Operation::Read,
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::InvalidReference {
+            operation: Operation::Read,
+        },
+        CoreError::DraftsNotFound { account: account() },
+        CoreError::InvalidDraft { field: "to" },
+        CoreError::UnsupportedFlag,
+        CoreError::MailboxNotFound {
+            account: account(),
+            mailbox: mailbox(),
+        },
+        CoreError::TlsRequired { account: account() },
+        CoreError::TlsCertificate { account: account() },
+        CoreError::Connection { account: account() },
+        CoreError::ProxyRefused {
+            account: account(),
+            host: "imap.example.com".to_string(),
+            port: 993,
+        },
+        CoreError::InvalidProxy {
+            account: account(),
+            variable: "HTTPS_PROXY",
+        },
+        CoreError::LoginFailed { account: account() },
+        CoreError::Protocol { account: account() },
+        CoreError::StoreUnavailable,
+        CoreError::HardenedRuntimeMissing,
+        CoreError::AccountRequired {
+            accounts: vec![account(), "other@example.com".to_string()],
+        },
+        CoreError::AmbiguousMandate {
+            account: account(),
+            mandates: vec!["aaaa1111".to_string(), "bbbb2222".to_string()],
+        },
+        CoreError::InteractiveTerminalRequired,
+        CoreError::SandboxDetected,
+        CoreError::Aborted,
+        CoreError::InvalidMandateFile {
+            problem: "line 3: unknown operation \"send\"".to_string(),
+        },
+        CoreError::NotFound {
+            id: "aaaa1111".to_string(),
+        },
+        CoreError::RevocationIncomplete {
+            id: "aaaa1111".to_string(),
+            deleted: 1,
+            unreadable: 2,
+        },
+        CoreError::AuditUnavailable,
+    ];
+    let mut samples = Vec::new();
+    for seed in seeds {
+        match seed {
+            CoreError::MissingToken
+            | CoreError::InvalidToken
+            | CoreError::SameMailbox { .. }
+            | CoreError::MoveUnsupported { .. }
+            | CoreError::Unsupported { .. }
+            | CoreError::DraftsNotFound { .. }
+            | CoreError::UnsupportedFlag
+            | CoreError::MailboxNotFound { .. }
+            | CoreError::TlsRequired { .. }
+            | CoreError::TlsCertificate { .. }
+            | CoreError::Connection { .. }
+            | CoreError::ProxyRefused { .. }
+            | CoreError::InvalidProxy { .. }
+            | CoreError::LoginFailed { .. }
+            | CoreError::Protocol { .. }
+            | CoreError::StoreUnavailable
+            | CoreError::HardenedRuntimeMissing
+            | CoreError::AccountRequired { .. }
+            | CoreError::AmbiguousMandate { .. }
+            | CoreError::InteractiveTerminalRequired
+            | CoreError::SandboxDetected
+            | CoreError::Aborted
+            | CoreError::InvalidMandateFile { .. }
+            | CoreError::NotFound { .. }
+            | CoreError::RevocationIncomplete { .. }
+            | CoreError::AuditUnavailable => samples.push(seed),
+            CoreError::Denied { .. } => {
+                for operation in ops {
+                    samples.push(CoreError::Denied {
+                        operation,
+                        account: account(),
+                        mailbox: None,
+                    });
+                    samples.push(CoreError::Denied {
+                        operation,
+                        account: account(),
+                        mailbox: Some(mailbox()),
+                    });
+                }
+            }
+            CoreError::Uncovered { .. } => {
+                for operation in ops {
+                    samples.push(CoreError::Uncovered {
+                        operation,
+                        account: account(),
+                        mailbox: Some(mailbox()),
+                    });
+                }
+            }
+            CoreError::StaleReference { .. } => {
+                for operation in ops {
+                    samples.push(CoreError::StaleReference {
+                        operation,
+                        account: account(),
+                        mailbox: mailbox(),
+                    });
+                }
+            }
+            CoreError::MessageNotFound { .. } => {
+                for operation in ops {
+                    samples.push(CoreError::MessageNotFound {
+                        operation,
+                        account: account(),
+                        mailbox: mailbox(),
+                    });
+                }
+            }
+            CoreError::InvalidReference { .. } => {
+                for operation in ops {
+                    samples.push(CoreError::InvalidReference { operation });
+                }
+            }
+            CoreError::InvalidDraft { .. } => {
+                for field in ["to", "subject", "body"] {
+                    samples.push(CoreError::InvalidDraft { field });
+                }
+            }
+        }
+    }
+    samples
+}
+
+#[test]
+fn ac5_every_error_message_is_at_most_300_characters() {
+    let samples = error_samples();
+    for error in &samples {
+        let message = error.body().message;
+        assert!(
+            message.chars().count() <= 300,
+            "{} has a message of {} characters: {message:?}",
+            error.code(),
+            message.chars().count()
+        );
+    }
+    // The RevocationIncomplete sample with nothing deleted, too.
+    let none_deleted = CoreError::RevocationIncomplete {
+        id: "aaaa1111".to_string(),
+        deleted: 0,
+        unreadable: 2,
+    };
+    assert!(none_deleted.body().message.chars().count() <= 300);
+}
+
+#[test]
+fn ac6_proxy_refused_and_unsupported_keep_their_facts() {
+    let proxy = CoreError::ProxyRefused {
+        account: "agent@example.com".to_string(),
+        host: "imap.example.com".to_string(),
+        port: 993,
+    }
+    .body()
+    .message;
+    assert!(proxy.chars().count() <= 300, "{proxy}");
+    for needle in [
+        "imap.example.com:993",
+        "agent@example.com",
+        "allowed domains",
+    ] {
+        assert!(proxy.contains(needle), "{needle:?} missing: {proxy}");
+    }
+    let gmail = CoreError::Unsupported {
+        account: "agent@example.com".to_string(),
+        mailbox: "INBOX".to_string(),
+    }
+    .body()
+    .message;
+    assert!(gmail.chars().count() <= 300, "{gmail}");
+    assert!(gmail.contains("--gmail"), "{gmail}");
+}
+
+#[test]
+fn ac7_hardened_runtime_missing_says_once_the_keychain_was_not_accessed() {
+    assert_eq!(
+        CoreError::HardenedRuntimeMissing.body().message,
+        format!(
+            "this agent-mail binary is not signed with the hardened runtime, so it refused to access the Keychain; ask the human to reinstall agent-mail from {RELEASES_URL}"
+        )
+    );
+}
+
+#[test]
+fn ac8_invalid_token_warning_is_at_most_300_characters() {
+    for positions in [&[2][..], &[1, 3, 4][..]] {
+        let warning = Warning::invalid_tokens(positions).expect("a warning");
+        assert!(
+            warning.message.chars().count() <= 300,
+            "{positions:?}: {}",
+            warning.message
+        );
+    }
+}

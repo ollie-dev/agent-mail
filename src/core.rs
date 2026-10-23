@@ -581,7 +581,7 @@ impl CoreError {
                 unreadable: None,
                 host: None,
                 message: format!(
-                    "no presented Mandate covers account {account}, so no grant can allow `{}` on it; run `agent-mail whoami` to see the accounts the presented tokens cover, or ask the human for a token whose Mandate covers account {account}",
+                    "no presented Mandate covers account {account}, so no grant can allow `{}` on it; run `agent-mail whoami` to see the accounts the tokens cover, or ask the human for a token whose Mandate covers it",
                     operation.as_str()
                 ),
             };
@@ -705,7 +705,7 @@ impl CoreError {
                 unreadable: None,
                 host: None,
                 message: format!(
-                    "the mail server of account {account} does not support Gmail search (it does not advertise X-GM-EXT-1), so mailbox {mailbox} was not searched; run `agent-mail search` with the standard criteria (--from, --to, --subject, --text, --since, --before, --unseen, --flagged) instead of --gmail"
+                    "the mail server of account {account} does not offer Gmail search (no X-GM-EXT-1), so mailbox {mailbox} was not searched; run `agent-mail search` again with standard criteria such as --from, --subject or --text instead of --gmail"
                 ),
             };
         }
@@ -727,7 +727,7 @@ impl CoreError {
                 deleted: None,
                 unreadable: None,
                 message: format!(
-                    "the network proxy refused the connection to the mail server {host}:{port} of account {account}, so nothing was sent to it; ask the human to allow the host {host} in the sandbox's allowed domains (for the Claude Code sandbox, its network allowed-domains setting), then retry"
+                    "the network proxy refused the connection to the mail server {host}:{port} of account {account}, so nothing was sent; ask the human to add {host} to the sandbox's allowed domains (in Claude Code, the network allowed-domains setting), then retry"
                 ),
             };
         }
@@ -762,7 +762,7 @@ impl CoreError {
                 unreadable: None,
                 host: None,
                 message: format!(
-                    "the presented Mandates {} all cover account {account}, and agent-mail never picks one, so nothing was done; set AGENT_MAIL_TOKEN to only one of these tokens, or ask the human to delete one of these Mandates with `agent-mail mandate delete <ID>`",
+                    "the presented Mandates {} all cover account {account} and agent-mail never picks one, so nothing was done; set AGENT_MAIL_TOKEN to only one of these tokens, or ask the human to delete one with `agent-mail mandate delete <ID>`",
                     mandates.join(", ")
                 ),
             };
@@ -899,7 +899,7 @@ impl CoreError {
                 None,
                 None,
                 format!(
-                    "this agent-mail binary is not signed with the hardened runtime, so it refused to access the Keychain and the Keychain was not accessed; ask the human to reinstall agent-mail from {RELEASES_URL}"
+                    "this agent-mail binary is not signed with the hardened runtime, so it refused to access the Keychain; ask the human to reinstall agent-mail from {RELEASES_URL}"
                 ),
             ),
             Self::InvalidReference { operation } => (

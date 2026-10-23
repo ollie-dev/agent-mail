@@ -82,7 +82,10 @@ fn assert_refused(output: &RunOutput) {
     let message = error["message"].as_str().unwrap();
     assert!(message.contains("hardened runtime"), "{message}");
     assert!(message.contains("Keychain"), "{message}");
-    assert!(message.contains("not accessed"), "{message}");
+    assert!(
+        message.contains("refused to access the Keychain"),
+        "{message}"
+    );
     assert!(
         message.contains("https://github.com/ollie-dev/agent-mail/releases"),
         "{message}"
