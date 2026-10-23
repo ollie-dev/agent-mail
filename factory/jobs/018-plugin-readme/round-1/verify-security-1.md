@@ -1,0 +1,3 @@
+VERIFIED
+
+- FIXED · SKILL.md told the Agent to "ask the human for a valid token", inviting the token into the chat · ran the Done-when grep in the worktree: it prints only SKILL.md:17 ("Never print, echo, log or ask for a token"). Line 19 now says to ask the human to set a valid token in `AGENT_MAIL_TOKEN` themselves, restart the host, and never paste a token into the chat. Line 66 points back to that. A wider grep (`ask.*token|token.*ask`) also finds README.md:129. That line quotes the CLI's own `invalid_token` warning ("ask the human for a new token"), which is existing runtime output and not skill guidance. `cargo test --test plugin`: 10 passed, 0 failed.

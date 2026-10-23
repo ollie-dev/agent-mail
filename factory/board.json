@@ -398,6 +398,34 @@
       "reason": "",
       "updated": "2026-10-23T13:21:53Z",
       "builder": "a6e4c76d1a5373c73"
+    },
+    {
+      "id": "018-plugin-readme",
+      "title": "Plugin and README",
+      "feature": "Ticket 17: Claude Code plugin and README (.scratch/agent-mail-v1/issues/17-plugin-readme.md)",
+      "branch": "factory/018-plugin-readme",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [
+        {
+          "round": 1,
+          "attempt": 1,
+          "commit": "e0c87e2",
+          "verify": {
+            "security": "VERIFIED"
+          }
+        }
+      ],
+      "reason": "",
+      "updated": "2026-10-23T14:26:07Z",
+      "builder": "builder-018-plugin-readme"
     }
   ],
   "updated": null
