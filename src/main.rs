@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use agent_mail::store::RuntimeStore;
+use agent_mail::store::{GuardedStore, RuntimeStore};
 use agent_mail::terminal::InquireTerminal;
 use agent_mail::{Cli, CliCommand};
 use clap::Parser;
@@ -9,7 +9,9 @@ fn main() {
     let env = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
         .collect();
-    let store = RuntimeStore::default();
+    // Every store access first passes the hardened-runtime self-check
+    // (a no-op outside macOS release builds), run lazily on first access.
+    let store = GuardedStore::new(RuntimeStore::default());
     let terminal = InquireTerminal;
     let context = agent_mail::Context::new(&store).with_terminal(&terminal);
     // Binary tests must not write to the user's audit log.

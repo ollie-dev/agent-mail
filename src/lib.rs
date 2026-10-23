@@ -17,6 +17,7 @@ pub mod proxy;
 pub mod read;
 pub mod seal;
 pub mod search;
+pub mod selfcheck;
 pub mod store;
 pub mod terminal;
 pub mod utf7;
