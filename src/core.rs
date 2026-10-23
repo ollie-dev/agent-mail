@@ -1468,6 +1468,20 @@ struct Presented {
     invalid: Vec<usize>,
 }
 
+/// Whether `env` presents no Agent Token at all: [`TOKEN_VAR`] is unset or
+/// holds only empty fields. Agent commands then fail with `missing_token`.
+pub fn no_token_presented(env: &HashMap<String, String>) -> bool {
+    env.get(TOKEN_VAR)
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .all(|field| {
+            field
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .is_empty()
+        })
+}
+
 /// Opens every presented token in `raw`: the fields split on `,`, trimmed
 /// of ASCII whitespace, empty fields skipped, repeated tokens counted once.
 /// Fails with `missing_token` when no field holds a token, and with

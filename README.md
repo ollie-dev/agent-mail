@@ -176,6 +176,57 @@ Errors besides those above: `denied`, `drafts_not_found`, `invalid_draft` (a val
 
 Drafts cannot be edited, replaced or deleted with agent-mail: there is no command for it, and `draft` never selects a mailbox read-write or sends `STORE`, `COPY`, `MOVE` or `EXPUNGE`. Change or discard a draft in your own mail client.
 
+## MCP server
+
+`agent-mail mcp` runs agent-mail as an MCP server over stdio, so a host app
+(Claude Desktop, Cowork or Claude Code) can start it and the agent calls its
+commands as MCP tools. Put the agent token in the server's environment:
+
+Claude Desktop, in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-mail": {
+      "command": "agent-mail",
+      "args": ["mcp"],
+      "env": { "AGENT_MAIL_TOKEN": "<your token>" }
+    }
+  }
+}
+```
+
+Claude Code, in the project's `.mcp.json` (same shape as above), or with:
+
+```sh
+claude mcp add agent-mail --env AGENT_MAIL_TOKEN=<your token> -- agent-mail mcp
+```
+
+The server offers seven tools: `whoami`, `list`, `search`, `read`, `flag`,
+`move` and `draft`. Their arguments mirror the command-line options
+(`reply_to` for `--reply-to`, `ref` for the message reference, `to` of
+`draft` as a list of addresses), and each returns the same JSON as the CLI
+command, with the same audit log entry. An agent starts with `whoami`, then
+`list` and `search`, and passes the `ref` values `search` returns to `read`,
+`flag`, `move` and `draft`.
+
+- A successful call returns the CLI's JSON line as text content and as
+  `structuredContent`. With an invalid token among several, the
+  `invalid_token` warning follows as a second text item.
+- A failed call is a tool error (`isError` true) whose content is the CLI's
+  error object `{"error":{"code":...}}`, with the CLI's codes (`denied`,
+  `missing_token`, `stale_reference` and so on). Arguments the CLI would
+  refuse (a malformed reference, both `set` and `clear`, an unknown
+  property, a wrong type) fail with `invalid_arguments`, a code only the MCP
+  server uses, before anything is connected or logged.
+- The token comes only from the server's environment (`AGENT_MAIL_TOKEN`,
+  read once when the host starts the server; restart it for a new token).
+  No tool argument or request field can supply or override it.
+- Mandate management is CLI-only: no tool creates, lists or deletes
+  Mandates. Run `agent-mail mandate` in your own terminal for that.
+
+stdout carries only JSON-RPC messages, one per line.
+
 ## Sandbox and proxies
 
 Inside the Claude Code sandbox there is no direct network: agent-mail reaches
