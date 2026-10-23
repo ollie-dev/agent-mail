@@ -12,6 +12,7 @@
 ## Conventions
 
 - Credentials never appear in logs, CLI output, agent-visible responses, test fixtures, or commits.
+- Help text and error messages are short and say each thing once; split them into paragraphs or lines of at most about 300 characters.
 
 ## Software factory
 
