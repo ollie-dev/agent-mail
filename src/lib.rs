@@ -702,7 +702,7 @@ fn usage_message(err: &clap::Error, args: &[OsString]) -> String {
         },
         // A suggestion names a known command, never the caller's word.
         ErrorKind::InvalidSubcommand => match names(ContextKind::SuggestedSubcommand) {
-            Some(suggested) => format!("unknown command; did you mean `{suggested}`?"),
+            Some(suggested) => format!("unknown command (did you mean `{suggested}`?)"),
             None => "unknown command".to_string(),
         },
         ErrorKind::MissingRequiredArgument => match arg {

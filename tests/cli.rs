@@ -760,6 +760,22 @@ fn job020_ac6_every_command_reports_usage_errors_as_json() {
             "{args:?}: {message}"
         );
         assert!(message.chars().count() <= 300, "{args:?}: {message}");
+        // The help pointer is joined once, never after another `;`.
+        assert_eq!(message.matches(';').count(), 1, "{args:?}: {message}");
+    }
+
+    // A suggested command is named inside the problem, not as a second
+    // clause before the pointer.
+    for (args, suggested, pointer) in [
+        (&["lsit"][..], "list", "agent-mail --help"),
+        (&["mandate", "delet"], "delete", "agent-mail mandate --help"),
+    ] {
+        let message = usage_message(args, &run_in_process(args));
+        assert_eq!(
+            message,
+            format!("unknown command (did you mean `{suggested}`?); run `{pointer}` for usage")
+        );
+        assert!(!message.contains("?;"), "{message}");
     }
 
     // The built binary prints the same as the in-process run.
