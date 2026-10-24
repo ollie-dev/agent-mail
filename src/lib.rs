@@ -179,6 +179,9 @@ pub enum CliCommand {
     /// id, name, accounts (login, host, port, tls) and grants (operation,
     /// account, mailboxes), and invalid_tokens, the positions in
     /// AGENT_MAIL_TOKEN of tokens that are not valid.
+    ///
+    /// With a proxy variable set, proxy holds its name (variable) and whether
+    /// it is a usable proxy URL (usable). Its value is never shown.
     Whoami {
         #[command(flatten)]
         output: TextOutput,
@@ -829,6 +832,14 @@ fn render_whoami(result: &WhoamiResult) -> String {
         out.push_str(&format!(
             "token {position} of AGENT_MAIL_TOKEN is not valid and was ignored\n"
         ));
+    }
+    match &result.proxy {
+        Some(proxy) if proxy.usable => out.push_str(&format!("proxy {}\n", proxy.variable)),
+        Some(proxy) => out.push_str(&format!(
+            "proxy {} is not a usable proxy URL; ask the human to fix or unset it\n",
+            proxy.variable
+        )),
+        None => {}
     }
     out
 }

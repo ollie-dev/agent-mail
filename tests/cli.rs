@@ -439,6 +439,12 @@ fn error_samples() -> Vec<CoreError> {
             host: "imap.example.com".to_string(),
             port: 993,
         },
+        CoreError::ProxyAuthFailed {
+            account: account(),
+            host: "imap.example.com".to_string(),
+            port: 993,
+            variable: "HTTPS_PROXY",
+        },
         CoreError::InvalidProxy {
             account: account(),
             variable: "HTTPS_PROXY",
@@ -490,6 +496,7 @@ fn error_samples() -> Vec<CoreError> {
             | CoreError::TlsCertificate { .. }
             | CoreError::Connection { .. }
             | CoreError::ProxyRefused { .. }
+            | CoreError::ProxyAuthFailed { .. }
             | CoreError::InvalidProxy { .. }
             | CoreError::LoginFailed { .. }
             | CoreError::Protocol { .. }

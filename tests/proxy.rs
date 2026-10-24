@@ -460,3 +460,248 @@ fn mandate_create_login_check_goes_through_the_proxy() {
         vec![format!("localhost:{}", server.port)]
     );
 }
+
+const WRONG_PROXY_PASSWORD: &str = "not-the-proxy-password";
+
+/// `agent-mail <args>` through a proxy in `var` that `configure` set up;
+/// returns the run, the fake server, the token and the audit log.
+fn list_via(
+    protocol: Protocol,
+    var: &str,
+    url: impl Fn(&FakeProxy) -> String,
+    configure: impl Fn(&FakeProxy),
+    args: &[&str],
+) -> (
+    RunOutput,
+    FakeImap,
+    AgentToken,
+    std::path::PathBuf,
+    FakeProxy,
+) {
+    let (server, store, token) = setup(Mode::Implicit, TlsMode::Implicit);
+    let proxy = FakeProxy::start(protocol);
+    configure(&proxy);
+    let log = temp_audit_log();
+    let env = env_with(&token, &[(var, &url(&proxy))]);
+    let out = run_env(args, &env, &store, &server, &log);
+    (out, server, token, log, proxy)
+}
+
+/// No output or audit line holds the proxy's address.
+fn assert_no_proxy_address(out: &RunOutput, log: &Path, proxy: &FakeProxy) {
+    let address = format!("127.0.0.1:{}", proxy.port);
+    for text in [&out.stdout, &out.stderr] {
+        assert!(!text.contains("127.0.0.1"), "output names the proxy");
+        assert!(!text.contains(&address), "output names the proxy");
+    }
+    for line in audit_lines(log) {
+        assert!(!line.contains(&address), "audit names the proxy");
+    }
+}
+
+fn assert_auth_failed(out: &RunOutput, var: &str) -> Value {
+    assert_eq!(out.code, 1, "{out:?}");
+    assert_eq!(out.stdout, "");
+    let error = error_of(out);
+    assert_eq!(error["code"], "proxy_auth_failed");
+    assert_eq!(error["account"], LOGIN);
+    assert!(error.get("host").is_none(), "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains(var), "{message}");
+    assert!(message.contains("ask the human"), "{message}");
+    assert!(!message.contains("allowed domains"), "{message}");
+    assert!(message.chars().count() <= 300, "{message}");
+    error
+}
+
+#[test]
+fn ac1_allowlist_refusals_stay_proxy_refused() {
+    type Configure = fn(&FakeProxy);
+    let cases: [(Protocol, &str, &str, Configure); 2] = [
+        (Protocol::Connect, "HTTPS_PROXY", "http", |p| {
+            p.answer_status(403)
+        }),
+        (Protocol::Socks5, "ALL_PROXY", "socks5", |p| {
+            p.refuse("localhost")
+        }),
+    ];
+    for (protocol, var, scheme, configure) in cases {
+        let (out, server, _token, log, _proxy) =
+            list_via(protocol, var, |p| p.url(scheme), configure, &["list"]);
+        assert_eq!(out.code, 1, "{protocol:?}");
+        let error = error_of(&out);
+        assert_eq!(error["code"], "proxy_refused");
+        assert_eq!(error["account"], LOGIN);
+        assert_eq!(error["host"], "localhost");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("localhost:{}", server.port)),
+            "{message}"
+        );
+        assert!(message.contains("ask the human"), "{message}");
+        assert!(message.contains("allowed domains"), "{message}");
+        assert_eq!(server.connections(), 0);
+        let audit = last_audit(&log);
+        assert_eq!(audit["outcome"], "allowed");
+        assert_eq!(audit["reason"], "proxy_refused");
+    }
+}
+
+#[test]
+fn ac2_connect_407_is_proxy_auth_failed() {
+    let (out, server, _token, log, proxy) = list_via(
+        Protocol::Connect,
+        "HTTPS_PROXY",
+        |p| p.url("http"),
+        |p| p.require_credentials(PROXY_USER, PROXY_PASSWORD),
+        &["list"],
+    );
+    assert_auth_failed(&out, "HTTPS_PROXY");
+    assert_eq!(proxy.seen().len(), 1);
+    assert_eq!(proxy.seen()[0].authorization, None);
+    assert_eq!(server.connections(), 0);
+    let audit = last_audit(&log);
+    assert_eq!(audit["outcome"], "allowed");
+    assert_eq!(audit["reason"], "proxy_auth_failed");
+}
+
+#[test]
+fn ac3_wrong_connect_credentials_are_proxy_auth_failed_and_never_shown() {
+    let (server, store, token) = setup(Mode::Implicit, TlsMode::Implicit);
+    let proxy = FakeProxy::start(Protocol::Connect);
+    proxy.require_credentials(PROXY_USER, WRONG_PROXY_PASSWORD);
+    let log = temp_audit_log();
+    let env = env_with(
+        &token,
+        &[("HTTPS_PROXY", &with_credentials(&proxy.url("http")))],
+    );
+    for args in [&["list"][..], &["--text", "list"][..]] {
+        let out = run_env(args, &env, &store, &server, &log);
+        assert_eq!(out.code, 1, "{args:?}");
+        assert!(out.stderr.contains("proxy_auth_failed"), "{:?}", out.stderr);
+        assert_no_proxy_secrets(&out, &token, &log);
+        assert_no_proxy_address(&out, &log, &proxy);
+    }
+    assert!(proxy.seen().iter().all(|s| s.authorization.is_some()));
+    assert_eq!(server.connections(), 0);
+}
+
+#[test]
+fn ac4_socks5_no_acceptable_method_is_proxy_auth_failed() {
+    let (out, server, _token, log, proxy) = list_via(
+        Protocol::Socks5,
+        "ALL_PROXY",
+        |p| p.url("socks5"),
+        |p| p.require_credentials(PROXY_USER, PROXY_PASSWORD),
+        &["list"],
+    );
+    assert_auth_failed(&out, "ALL_PROXY");
+    assert_eq!(proxy.seen()[0].methods, vec![0x00]);
+    assert_eq!(server.connections(), 0);
+    assert_eq!(last_audit(&log)["reason"], "proxy_auth_failed");
+}
+
+#[test]
+fn ac5_socks5_rejected_credentials_are_proxy_auth_failed_and_never_shown() {
+    let (server, store, token) = setup(Mode::Implicit, TlsMode::Implicit);
+    let proxy = FakeProxy::start(Protocol::Socks5);
+    proxy.require_credentials(PROXY_USER, WRONG_PROXY_PASSWORD);
+    let log = temp_audit_log();
+    let env = env_with(
+        &token,
+        &[("ALL_PROXY", &with_credentials(&proxy.url("socks5")))],
+    );
+    for args in [&["list"][..], &["--text", "list"][..]] {
+        let out = run_env(args, &env, &store, &server, &log);
+        assert_eq!(out.code, 1, "{args:?}");
+        assert!(out.stderr.contains("proxy_auth_failed"), "{:?}", out.stderr);
+        assert_no_proxy_secrets(&out, &token, &log);
+        assert_no_proxy_address(&out, &log, &proxy);
+    }
+    assert!(proxy.seen().iter().all(|s| s.credentials.is_some()));
+    assert_eq!(server.connections(), 0);
+}
+
+#[test]
+fn ac6_other_connect_4xx_answers_are_connection_failed() {
+    for status in [400, 404, 429] {
+        let (out, server, _token, log, _proxy) = list_via(
+            Protocol::Connect,
+            "HTTPS_PROXY",
+            |p| p.url("http"),
+            |p| p.answer_status(status),
+            &["list"],
+        );
+        assert_eq!(out.code, 1, "{status}");
+        let error = error_of(&out);
+        assert_eq!(error["code"], "connection_failed", "{status}");
+        let message = error["message"].as_str().unwrap();
+        assert!(!message.contains("allowed domains"), "{message}");
+        assert!(!out.stderr.contains("Too Many Requests"), "reason echoed");
+        assert!(!out.stderr.contains("Not Found"), "reason echoed");
+        assert_eq!(last_audit(&log)["reason"], "connection_failed");
+        assert_eq!(server.connections(), 0);
+    }
+}
+
+#[test]
+fn ac7_text_output_of_proxy_auth_failed() {
+    let (out, _server, _token, _log, _proxy) = list_via(
+        Protocol::Connect,
+        "HTTPS_PROXY",
+        |p| p.url("http"),
+        |p| p.require_credentials(PROXY_USER, PROXY_PASSWORD),
+        &["--text", "list"],
+    );
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.starts_with("error: proxy_auth_failed: "),
+        "{:?}",
+        out.stderr
+    );
+}
+
+#[test]
+fn ac9_mandate_create_through_a_proxy_rejecting_credentials() {
+    use agent_mail::create::{ABORT, GENERIC, TLS_IMPLICIT};
+    use agent_mail::terminal::{Answer, Kind, ScriptedTerminal};
+
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let proxy = FakeProxy::start(Protocol::Connect);
+    proxy.require_credentials(PROXY_USER, PROXY_PASSWORD);
+    let env = HashMap::from([("HTTPS_PROXY".to_string(), proxy.url("http"))]);
+    let terminal = ScriptedTerminal::new(vec![
+        Answer::text("test-mandate"),
+        Answer::choose(GENERIC),
+        Answer::text("localhost"),
+        Answer::text(&server.port.to_string()),
+        Answer::choose(TLS_IMPLICIT),
+        Answer::text(LOGIN),
+        Answer::hidden(support::CREDENTIAL),
+        Answer::choose(ABORT),
+    ]);
+    let out = support::run_with_terminal(
+        &["mandate", "create"],
+        &env,
+        &store,
+        &terminal,
+        vec![server.ca.clone()],
+        &[],
+    );
+    assert_eq!(out.code, 1, "{out:?}");
+    assert_eq!(terminal.remaining(), 0, "script not used up");
+    let failure = terminal
+        .transcript()
+        .into_iter()
+        .find(|e| e.kind == Kind::Message && e.text.contains("failed"))
+        .expect("a failure line")
+        .text;
+    assert!(failure.contains("proxy credentials"), "{failure}");
+    assert!(failure.contains("HTTPS_PROXY"), "{failure}");
+    assert!(!failure.contains("allow"), "{failure}");
+    assert!(!failure.contains("127.0.0.1"), "{failure}");
+    assert!(store.entries().is_empty(), "something was stored");
+    assert_eq!(server.connections(), 0);
+}

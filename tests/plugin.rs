@@ -572,3 +572,57 @@ fn job020_ac14_readme_and_skill_document_draft_refused_and_json_usage_errors() {
         }
     }
 }
+
+#[test]
+fn job021_ac14_readme_and_skill_document_proxy_auth_failed_and_whoami_proxy() {
+    let proxies = readme_section("## Sandbox and proxies");
+    let list = paragraph_with(&proxies, "- `proxy_refused`:");
+    let item = |code: &str| -> &str {
+        list.split("\n- ")
+            .find(|i| i.trim_start_matches("- ").starts_with(&format!("`{code}`")))
+            .unwrap_or_else(|| panic!("no {code} bullet"))
+    };
+    let refused = item("proxy_refused");
+    assert!(refused.contains("403"), "{refused}");
+    assert!(refused.contains("not allowed by ruleset"), "{refused}");
+    assert!(!refused.contains("credential"), "{refused}");
+    let auth = item("proxy_auth_failed");
+    assert!(auth.contains("credentials"), "{auth}");
+    assert!(auth.contains("variable"), "{auth}");
+    let other = paragraph_with(&proxies, "Any other proxy refusal");
+    assert!(other.contains("`connection_failed`"), "{other}");
+
+    let whoami = readme_section("## Several Mandates and whoami");
+    let proxy = paragraph_with(&whoami, "**`proxy` in `whoami`.**");
+    let proxy_text = paragraph_with(&whoami, "With `--text` this is a line `proxy");
+
+    let skill = skill();
+    assert!(read("README.md").contains("proxy_auth_failed"));
+    assert!(skill.contains("proxy_auth_failed"));
+    let skill_auth = skill
+        .lines()
+        .find(|l| l.starts_with("- `proxy_auth_failed`"))
+        .expect("SKILL.md lists proxy_auth_failed");
+    assert!(skill_auth.contains("Tell the human"), "{skill_auth}");
+    let skill_whoami = skill
+        .lines()
+        .find(|l| l.starts_with("- `agent-mail whoami`"))
+        .unwrap();
+    assert!(skill_whoami.contains("`proxy`"), "{skill_whoami}");
+
+    for text in [
+        refused,
+        auth,
+        other,
+        proxy,
+        proxy_text,
+        skill_auth,
+        skill_whoami,
+    ] {
+        assert!(
+            text.chars().count() <= 300,
+            "{} characters: {text}",
+            text.chars().count()
+        );
+    }
+}

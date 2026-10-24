@@ -223,7 +223,7 @@ const ACCOUNT_DESCRIPTION: &str = "The account to work on, by its login. May be 
 const TOOLS: [Tool; 7] = [
     Tool {
         name: "whoami",
-        description: "Show what the presented agent tokens allow: each Mandate's ID, name, accounts (login, host, port, tls) and grants (operation, account, mailboxes), in token order, and invalid_tokens, the positions in AGENT_MAIL_TOKEN of tokens that are not valid. Needs no grant, makes no connection and never shows a credential or token. Call this first.",
+        description: "Show what the presented agent tokens allow: each Mandate's ID, name, accounts (login, host, port, tls) and grants (operation, account, mailboxes), in token order, and invalid_tokens, the positions in AGENT_MAIL_TOKEN of tokens that are not valid, and proxy, the proxy variable in effect and whether it is usable (omitted without one). Needs no grant, makes no connection and never shows a credential or token. Call this first.",
         properties: &[],
         required: &[],
     },

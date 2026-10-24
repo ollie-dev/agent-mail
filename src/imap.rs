@@ -120,6 +120,12 @@ impl Network {
         }
     }
 
+    /// The proxy variable in effect and whether it holds a usable proxy
+    /// URL, `None` for direct connections. Never the value.
+    pub fn proxy_summary(&self) -> Option<(&'static str, bool)> {
+        self.proxy.summary()
+    }
+
     /// Connects to `to_host:to_port` whenever an Account names
     /// `host:port`. Test builds only.
     #[cfg(any(test, feature = "test-support"))]
@@ -167,6 +173,16 @@ pub enum ImapError {
         host: String,
         /// The Account's port.
         port: u16,
+    },
+    /// The proxy asked for credentials, or rejected the ones in the
+    /// variable named here. Nothing reached the server.
+    ProxyAuthFailed {
+        /// The Account's host.
+        host: String,
+        /// The Account's port.
+        port: u16,
+        /// The variable, e.g. `HTTPS_PROXY`. Never its value.
+        variable: &'static str,
     },
     /// The proxy variable named here does not hold a usable proxy URL.
     /// Nothing was connected to. Its value is never carried.
@@ -262,6 +278,11 @@ async fn login(account: &Account, network: &Network) -> Result<TlsSession, ImapE
                     TunnelError::Refused => ImapError::ProxyRefused {
                         host: account.host.clone(),
                         port: account.port,
+                    },
+                    TunnelError::Auth => ImapError::ProxyAuthFailed {
+                        host: account.host.clone(),
+                        port: account.port,
+                        variable: proxy.variable(),
                     },
                     TunnelError::Connection => ImapError::Connection,
                 })?
