@@ -313,6 +313,67 @@ mod installer {
         assert!(bin_files(&home).is_empty());
     }
 
+    /// Runs the installer with a fake `uname` first on the `PATH`, which
+    /// prints `Darwin` for `-s` and `machine` for `-m`.
+    fn install_on(home: &Path, downloads: &Path, machine: &str) -> Output {
+        let fake = temp_dir("fake-uname");
+        let uname = fake.join("uname");
+        std::fs::write(
+            &uname,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n    -s) echo Darwin ;;\n    -m) echo {machine} ;;\n    *) exit 1 ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&uname, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Command::new("sh")
+            .arg(Path::new(ROOT).join("install.sh"))
+            .env("HOME", home)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", fake.display()),
+            )
+            .env(
+                "AGENT_MAIL_DOWNLOAD_URL",
+                format!("file://{}", downloads.display()),
+            )
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn job023_ac4_aarch64_is_an_unsupported_architecture() {
+        let home = temp_dir("home");
+        let output = install_on(&home, &downloads(), "aarch64");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status.code(), Some(0), "{output:?}");
+        assert!(
+            stderr.contains("unsupported architecture aarch64"),
+            "{stderr}"
+        );
+        assert!(bin_files(&home).is_empty());
+    }
+
+    #[test]
+    fn job023_ac5_arm64_and_x86_64_install_their_targets() {
+        for (machine, target) in [
+            ("arm64", "aarch64-apple-darwin"),
+            ("x86_64", "x86_64-apple-darwin"),
+        ] {
+            let home = temp_dir("home");
+            let output = install_on(&home, &downloads(), machine);
+            assert_eq!(output.status.code(), Some(0), "{machine}: {output:?}");
+            let ran = Command::new(home.join(".local/bin/agent-mail"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stdout).trim(),
+                target,
+                "{machine}"
+            );
+        }
+    }
+
     #[test]
     fn ac5_missing_asset_installs_nothing() {
         let home = temp_dir("home");
@@ -437,4 +498,79 @@ fn release_profile_pins_debug_assertions_off() {
         .expect("no [profile.release]");
     let release = release.split("\n[").next().unwrap();
     assert!(release.contains("debug-assertions = false"));
+}
+
+// ---------------------------------------------------------------- job 023
+
+#[test]
+fn job023_ac4_installer_no_longer_accepts_aarch64() {
+    let script = read("install.sh");
+    assert!(!script.contains("aarch64)"), "install.sh accepts aarch64");
+    assert!(!script.contains("| aarch64"), "install.sh accepts aarch64");
+    assert!(script.contains("arm64) target=aarch64-apple-darwin"));
+    assert!(script.contains("x86_64) target=x86_64-apple-darwin"));
+}
+
+/// The text of `mod release` in `tests/selfcheck.rs`, up to the closing
+/// brace at the start of a line.
+fn selfcheck_release_module() -> String {
+    let source = read("tests/selfcheck.rs");
+    let start = source
+        .find("\nmod release {\n")
+        .expect("tests/selfcheck.rs has no mod release");
+    let body = &source[start + 1..];
+    let end = body.find("\n}\n").map_or(body.len(), |e| e + 3);
+    body[..end].to_string()
+}
+
+#[test]
+fn job023_ac6_release_binary_tests_run_no_audited_command() {
+    const AUDITED: [&str; 6] = ["list", "search", "read", "flag", "move", "draft"];
+    let module = selfcheck_release_module();
+    // Every argument array, whether passed to `run(` directly or through
+    // the loop, starts with a non-audited command.
+    for (i, _) in module.match_indices("[\"") {
+        let first = module[i + 2..].split('"').next().unwrap();
+        assert!(
+            !AUDITED.contains(&first),
+            "mod release runs audited command {first:?}"
+        );
+    }
+    for (i, _) in module.match_indices("run(") {
+        let call = &module[i..];
+        let call = &call[..call.find('\n').unwrap_or(call.len())];
+        for command in AUDITED {
+            assert!(
+                !call.contains(&format!("&[\"{command}\"")),
+                "run call with {command}: {call}"
+            );
+        }
+    }
+    let squashed: String = module.split_whitespace().collect();
+    assert!(
+        squashed.contains(
+            r#"forargsin[&["whoami"][..],&["mandate","list"],&["mandate","delete","deadbeef"],]{"#
+        ),
+        "the refusal loop is not whoami, mandate list, mandate delete"
+    );
+    assert!(!module.contains("denied line"), "stale audit comment");
+    assert!(
+        !module.contains("TEST_LOG_VAR"),
+        "release test redirects the log"
+    );
+}
+
+#[test]
+fn job023_ac7_readme_says_release_binary_tests_write_nothing_to_the_audit_log() {
+    let readme = read("README.md");
+    assert!(!readme.contains("adds one `denied` line to your audit log"));
+    let paragraph = readme
+        .split("\n\n")
+        .find(|p| p.contains("**Release-binary tests.**"))
+        .expect("no Release-binary tests paragraph");
+    assert!(paragraph.contains("audit log"), "{paragraph}");
+    assert!(
+        paragraph.contains("nothing") || paragraph.contains(" no "),
+        "{paragraph}"
+    );
 }

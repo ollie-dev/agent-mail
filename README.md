@@ -304,13 +304,29 @@ commands as MCP tools. The agent token comes from the server's environment.
 
 For Claude Desktop, put it in the `env` of the `claude_desktop_config.json` entry, with `"command": "agent-mail"` and `"args": ["mcp"]`; see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop).
 
-In Claude Code the [plugin](#claude-code-plugin) adds the server (its `plugin/.mcp.json` holds no token). Without the plugin, add it for yourself only with:
+In Claude Code the [plugin](#claude-code-plugin) adds the server (its `plugin/.mcp.json` holds no token). Without the plugin, run this in your project. The local scope stores the entry only for you, in this project, outside the repository (in `~/.claude.json`):
 
 ```sh
-claude mcp add agent-mail --env AGENT_MAIL_TOKEN=<your agent token> -- agent-mail mcp
+claude mcp add agent-mail --scope local --env AGENT_MAIL_TOKEN=<your agent token> -- agent-mail mcp
 ```
 
-Never put a token in a project's checked-in `.mcp.json`.
+Or commit a project `.mcp.json` that holds only a reference, which Claude Code expands from its environment:
+
+```json
+{
+  "mcpServers": {
+    "agent-mail": {
+      "command": "agent-mail",
+      "args": ["mcp"],
+      "env": {"AGENT_MAIL_TOKEN": "${AGENT_MAIL_TOKEN}"}
+    }
+  }
+}
+```
+
+The token itself then comes from the environment, for example the `env` of the project's `.claude/settings.local.json`; see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop).
+
+Never put a literal token in `.mcp.json` or any other file you commit.
 
 The server offers seven tools: `whoami`, `list`, `search`, `read`, `flag`,
 `move` and `draft`. Their arguments mirror the command-line options
@@ -435,6 +451,6 @@ cargo test --test gmail_live -- --ignored
 
 The app password is held in memory only: the test keeps it in an in-memory Mandate store, writes its audit lines to a temporary file, and checks that neither the output nor that file contains it or the agent token. Without the two variables the test prints a one-line skip message and passes.
 
-**Release-binary tests.** `tests/selfcheck.rs` holds opt-in macOS tests, ignored by default, that build the release binary, sign a copy with `scripts/sign-macos.sh` and another without the hardened runtime, and check that only the first reaches the Keychain, that it links only system libraries and that it runs without a Rust toolchain. They present a freshly minted token that no Keychain item matches, so they raise no prompt; the refused `list` run adds one `denied` line to your audit log. Run them with `cargo test --test selfcheck -- --ignored`.
+**Release-binary tests.** `tests/selfcheck.rs` holds opt-in macOS tests, ignored by default, that build the release binary, sign a copy with `scripts/sign-macos.sh` and another without the hardened runtime, and check that only the first reaches the Keychain, that it links only system libraries and that it runs without a Rust toolchain. They present a freshly minted token that no Keychain item matches, so they raise no prompt. They run no audited command, so they write nothing to your audit log. Run them with `cargo test --test selfcheck -- --ignored`.
 
 **Releasing.** Bump `version` in `Cargo.toml`, commit, then tag the commit `vX.Y.Z` with the same version and push the tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `release` workflow (`.github/workflows/release.yml`) checks that the tag matches `Cargo.toml` and runs the tests in a `test` job that only has read access to the repository; once it passes, the `publish` job builds both macOS targets, signs them with `scripts/sign-macos.sh`, attests them and publishes the release with `.github/release-notes.md` as its notes. A final `verify` job then runs `scripts/verify-release.sh vX.Y.Z` on a fresh runner, checking the checksums, signatures and attestations of the published assets; you can run the same script locally against any published tag.

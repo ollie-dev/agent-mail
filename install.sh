@@ -22,7 +22,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     fail "agent-mail releases are available for macOS only"
 fi
 case "$(uname -m)" in
-    arm64 | aarch64) target=aarch64-apple-darwin ;;
+    arm64) target=aarch64-apple-darwin ;;
     x86_64) target=x86_64-apple-darwin ;;
     *) fail "unsupported architecture $(uname -m); agent-mail releases are built for arm64 and x86_64" ;;
 esac

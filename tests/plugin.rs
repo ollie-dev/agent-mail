@@ -626,3 +626,72 @@ fn job021_ac14_readme_and_skill_document_proxy_auth_failed_and_whoami_proxy() {
         );
     }
 }
+
+#[test]
+fn job023_ac1_mcp_server_section_offers_claude_mcp_add_in_local_scope() {
+    let section = readme_section("## MCP server");
+    for needle in [
+        "claude mcp add",
+        "--scope local",
+        "AGENT_MAIL_TOKEN=<your agent token>",
+    ] {
+        assert!(
+            section.contains(needle),
+            "MCP server section lacks {needle:?}"
+        );
+    }
+    let block = section
+        .split("```sh\n")
+        .skip(1)
+        .map(|b| b.split("```").next().unwrap())
+        .find(|b| b.contains("claude mcp add"))
+        .expect("no sh block with claude mcp add");
+    for needle in [
+        "--scope local",
+        "--env AGENT_MAIL_TOKEN=<your agent token>",
+        "-- agent-mail mcp",
+    ] {
+        assert!(block.contains(needle), "sh block lacks {needle:?}: {block}");
+    }
+    let prose = paragraph_with(&section, "The local scope");
+    for needle in ["only for you", "in this project", "outside the repository"] {
+        assert!(prose.contains(needle), "{prose}");
+    }
+}
+
+#[test]
+fn job023_ac2_mcp_server_section_shows_a_project_mcp_json_with_a_reference() {
+    let section = readme_section("## MCP server");
+    assert!(json_blocks(&section).iter().any(|b| {
+        let server = &b["mcpServers"]["agent-mail"];
+        server["command"] == "agent-mail"
+            && server["args"] == json!(["mcp"])
+            && server["env"] == json!({"AGENT_MAIL_TOKEN": "${AGENT_MAIL_TOKEN}"})
+    }));
+    let prose = paragraph_with(&section, "from the environment");
+    assert!(prose.contains(".claude/settings.local.json"), "{prose}");
+    assert!(prose.contains("`env`"), "{prose}");
+    assert!(
+        prose.contains("Agent Tokens in Claude Code and Claude Desktop"),
+        "{prose}"
+    );
+}
+
+#[test]
+fn job023_ac3_mcp_server_section_warns_never_to_commit_a_token() {
+    let section = readme_section("## MCP server");
+    assert!(section.contains(".mcp.json"));
+    let sentence = section
+        .split(". ")
+        .flat_map(|s| s.split("\n\n"))
+        .find(|s| s.to_lowercase().contains("never") && s.contains("commit"))
+        .expect("no sentence says never to commit a token");
+    assert!(sentence.contains(".mcp.json"), "{sentence}");
+    // The placeholder-only scan covers the README.
+    let readme = read("README.md");
+    let tokens = token_values(&readme_section("## MCP server"));
+    assert!(tokens.contains(&"${AGENT_MAIL_TOKEN}".to_string()));
+    for token in token_values(&readme) {
+        assert!(is_placeholder(&token), "README token value {token:?}");
+    }
+}
