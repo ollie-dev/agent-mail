@@ -474,7 +474,26 @@
       "reason": "",
       "updated": "2026-10-23T21:53:11Z",
       "builder": "afb309b812e4ee45b"
+    },
+    {
+      "id": "021-proxy-error-messages",
+      "title": "Proxy error messages",
+      "feature": "Follow-ups F8, F10: proxy errors: narrow `proxy_refused` to allowlist refusals (CONNECT 403, SOCKS5 0x02), give 407 and SOCKS5 auth failures their own message, and consider a proxy-setting hint in `whoami` (factory/follow-ups.md)",
+      "branch": "factory/021-proxy-error-messages",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-24T21:19:16Z",
+      "builder": "a2ca6fca08d6c3ea2"
     }
   ],
-  "updated": null
+  "updated": "2026-10-24T21:19:16Z"
 }
