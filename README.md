@@ -111,6 +111,8 @@ An agent can hold several Mandates at once, for example one for a work account a
 AGENT_MAIL_TOKEN="amt_...work...,amt_...private..."
 ```
 
+It holds at most 8 distinct tokens. With more, every command fails with `too_many_tokens` before any token is looked up; keep only the tokens the agent needs.
+
 **Choosing the account.** Every command works on one account. On `list`, `search` and `draft`, name it with `--account <LOGIN>`, the account's login exactly as it appears in Grants and output (for example `agent-mail list --account agent@example.test`). It may be left out when the presented tokens reach only one account. `read`, `flag`, `move` and `draft --reply-to` take the account from the message reference, so a reference from `search` can be followed without naming the account again; they do not accept `--account`, and `draft` refuses `--account` together with `--reply-to`. An empty `--account`, or one holding a line break or NUL, is a usage error (exit code 2).
 
 **One Mandate per call.** agent-mail uses the one presented Mandate that covers the account. Every Grant check, the mailboxes `list` shows, the credential used and the audit line's `mandate` come from that Mandate only: Grants never combine across Mandates, so a Grant in one Mandate never allows anything on an account covered only by another. An account no presented Mandate covers is denied (`denied`) before any connection; since no Grant can fix that, its message says no presented Mandate covers the account and points to `agent-mail whoami` or a new token from the human, rather than to a missing Grant.

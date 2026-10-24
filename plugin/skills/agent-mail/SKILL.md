@@ -66,6 +66,7 @@ With an invalid token among valid ones, stderr first gets a warning with `"code"
 - `proxy_refused`: the sandbox does not allow the mail host. Tell the human to add the error's `host` to the sandbox's allowed domains.
 - `proxy_auth_failed`: the proxy rejected or asked for proxy credentials. Tell the human the proxy variable the message names; do not change it yourself.
 - `missing_token`, `invalid_token`: ask the human to set a valid token in `AGENT_MAIL_TOKEN` and restart the host, as above.
+- `too_many_tokens`: `AGENT_MAIL_TOKEN` holds more than 8 distinct tokens. Ask the human to keep at most 8 there and restart the host.
 - `login_failed`, `connection_failed`, `store_unavailable`, `hardened_runtime_missing`: tell the human; you cannot fix these.
 
 ## Mandates

@@ -500,15 +500,31 @@ pub struct RunOutput {
     pub code: i32,
 }
 
-/// Runs the CLI with `args` (including the program name) and `env`.
+/// Runs the CLI with `args` (including the program name) and `env`:
+/// [`parse`], then [`run_cli`].
 pub fn run<I, T>(args: I, env: &HashMap<String, String>, context: &Context<'_>) -> RunOutput
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    match parse(args) {
+        Ok(cli) => run_cli(cli, env, context),
+        Err(output) => output,
+    }
+}
+
+/// Parses `args` (including the program name).
+///
+/// `Err` holds the finished output: help or version text with its exit
+/// code, or the `invalid_arguments` JSON line with code 2.
+pub fn parse<I, T>(args: I) -> Result<Cli, RunOutput>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let cli = match Cli::try_parse_from(&args) {
-        Ok(cli) => cli,
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => Ok(cli),
         Err(err) if is_help_or_version(&err) => {
             let text = err.render().to_string();
             let (stdout, stderr) = if err.use_stderr() {
@@ -516,11 +532,11 @@ where
             } else {
                 (text, String::new())
             };
-            return RunOutput {
+            Err(RunOutput {
                 stdout,
                 stderr,
                 code: err.exit_code(),
-            };
+            })
         }
         Err(err) => {
             // Always JSON: the output mode is unknown when parsing fails.
@@ -528,13 +544,17 @@ where
                 code: "invalid_arguments",
                 message: usage_message(&err, &args),
             };
-            return RunOutput {
+            Err(RunOutput {
                 stdout: String::new(),
                 stderr: json_line(&serde_json::json!({ "error": error })),
                 code: 2,
-            };
+            })
         }
-    };
+    }
+}
+
+/// Runs the parsed command line `cli` with `env`.
+pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -> RunOutput {
     let mut text = cli.text;
     let command = match cli.command {
         CliCommand::List { account, output } => {

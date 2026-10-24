@@ -1475,3 +1475,75 @@ fn ac13_whoami_tool_reports_the_proxy_like_the_cli() {
     }
     assert_eq!(side.server.connections(), 0);
 }
+
+// ------------------------------------------------- job 022: token cap, `to`
+
+#[test]
+fn job022_ac4_too_many_tokens_matches_the_cli() {
+    let nine = |side: &Side| {
+        Some(
+            (1..=9)
+                .map(|i| {
+                    side.add(
+                        &format!("cccc000{i}"),
+                        &[LOGIN],
+                        vec![grant(Operation::List, &["INBOX"])],
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    };
+    let c = compare(default_server, nine, &["list"], "list", json!({}));
+    let error = c.assert_same_error();
+    assert_eq!(error["code"], json!("too_many_tokens"));
+    assert_eq!(
+        c.result["structuredContent"]["error"]["code"],
+        json!("too_many_tokens")
+    );
+    c.assert_same_audit(1);
+    assert_eq!(c.cli.server.connections(), 0);
+    assert_eq!(c.mcp.server.connections(), 0);
+}
+
+#[test]
+fn job022_ac5_draft_rejects_an_invalid_recipient_without_audit_or_echo() {
+    let bad = "not-an-address-zq7";
+    let side = Side::new();
+    let tw = side.add("aaaa1111", &[LOGIN], vec![grant(Operation::Draft, &["*"])]);
+    let result = side.tool(
+        "draft",
+        json!({"to": ["carol@example.com", bad], "subject": "S", "body": "B"}),
+        Some(&tw),
+    );
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["code"], json!("invalid_arguments"));
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("`to`"), "{message}");
+    assert!(!result.to_string().contains(bad), "{result}");
+    assert!(side.audit().is_empty(), "{:?}", side.audit());
+    assert_eq!(side.server.connections(), 0);
+
+    let side = Side::new();
+    let tw = side.add("aaaa1111", &[LOGIN], vec![grant(Operation::Draft, &["*"])]);
+    let out = side.cli(
+        &[
+            "draft",
+            "--to",
+            "carol@example.com",
+            "--to",
+            bad,
+            "--subject",
+            "S",
+            "--body",
+            "B",
+        ],
+        Some(&tw),
+    );
+    assert_eq!(out.code, 2, "{out:?}");
+    assert_eq!(error_of(&out)["code"], json!("invalid_arguments"));
+    assert!(!out.stderr.contains(bad), "{out:?}");
+    assert!(side.audit().is_empty(), "{:?}", side.audit());
+    assert_eq!(side.server.connections(), 0);
+}

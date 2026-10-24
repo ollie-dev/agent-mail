@@ -266,3 +266,26 @@ fn ac9_ui_reviewer_checks_the_help_and_error_text_convention() {
         "no \"Look for\" bullet names help text, error messages, 300 and once: {bullets:?}"
     );
 }
+
+#[test]
+fn job022_ac9_the_guarded_keys_method_is_gone() {
+    let store = read(&repo_root().join("src/store.rs"));
+    assert!(
+        !store.contains("impl GuardedStore<KeychainStore>"),
+        "src/store.rs still has a GuardedStore<KeychainStore> impl"
+    );
+    assert_eq!(store.matches("pub fn keys").count(), 1);
+    let keychain_impl = store
+        .find("impl KeychainStore {")
+        .expect("KeychainStore has an inherent impl");
+    let keys = store.find("pub fn keys").unwrap();
+    assert!(
+        keys > keychain_impl,
+        "`pub fn keys` is not on KeychainStore"
+    );
+    let after_impl = &store[keychain_impl..keys];
+    assert!(
+        !after_impl.contains("\nimpl ") && !after_impl.contains("\n    impl "),
+        "`pub fn keys` is not inside `impl KeychainStore`"
+    );
+}
