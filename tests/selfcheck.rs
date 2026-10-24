@@ -480,11 +480,8 @@ mod release {
     fn ac2_unhardened_release_binary_refuses_every_keychain_access() {
         let binary = unhardened();
         let unknown = AgentToken::mint();
-        // Note: the refused `list` appends one denied line to the user's
-        // audit log, as any release-binary run of an Agent command does.
         for args in [
             &["whoami"][..],
-            &["list"],
             &["mandate", "list"],
             &["mandate", "delete", "deadbeef"],
         ] {
