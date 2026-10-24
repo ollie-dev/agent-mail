@@ -493,6 +493,25 @@
       "reason": "",
       "updated": "2026-10-24T21:19:16Z",
       "builder": "a2ca6fca08d6c3ea2"
+    },
+    {
+      "id": "022-small-code-cleanups",
+      "title": "Small code cleanups",
+      "feature": "Follow-ups F1, F5, F6, F12, F16: small code and test cleanups: confirm the rejected-`--to` audit entry for the MCP `draft` tool, cap presented tokens in `AGENT_MAIL_TOKEN`, assert the audit `mandate` per command in tests/tokens.rs, parse arguments once in main.rs, drop the unused guarded `keys()` (factory/follow-ups.md)",
+      "branch": "factory/022-small-code-cleanups",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-24T21:30:59Z",
+      "builder": "afcc1251886cd8025"
     }
   ],
   "updated": "2026-10-24T21:19:16Z"
