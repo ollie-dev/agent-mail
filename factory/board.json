@@ -512,6 +512,25 @@
       "reason": "",
       "updated": "2026-10-24T21:30:59Z",
       "builder": "afcc1251886cd8025"
+    },
+    {
+      "id": "023-token-arm64-selfcheck",
+      "title": "Token setup, arm64, self-check loop",
+      "feature": "Follow-ups F11, F18, F19 (decided): README recommends `claude mcp add` local scope or `${AGENT_MAIL_TOKEN}` env expansion and warns not to commit the token; install.sh accepts only `arm64`, not `aarch64`; drop `list` from the release-binary loop in tests/selfcheck.rs so the opt-in test never writes to the real audit log (factory/follow-ups.md)",
+      "branch": "factory/023-token-arm64-selfcheck",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-24T21:57:17Z",
+      "builder": "a1f4bf1533de7920f"
     }
   ],
   "updated": "2026-10-24T21:19:16Z"
