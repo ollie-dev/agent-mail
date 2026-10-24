@@ -64,6 +64,19 @@ impl Env {
         out
     }
 
+    /// [`Env::run`] with `extra` variables, such as proxy variables.
+    fn run_with(&self, args: &[&str], tokens: Option<&str>, extra: &[(&str, &str)]) -> RunOutput {
+        let out = run_logged_with(args, tokens, extra, &self.store, &self.server.ca, &self.log);
+        for stream in [&out.stdout, &out.stderr] {
+            assert!(!stream.contains(CREDENTIAL), "output holds the Credential");
+            assert!(
+                tokens_in(stream).is_empty(),
+                "output holds a token: {stream}"
+            );
+        }
+        out
+    }
+
     fn audit(&self) -> Vec<Value> {
         let lines = audit_lines(&self.log);
         for line in &lines {
@@ -872,5 +885,119 @@ fn ac4_uncovered_account_denial_points_to_whoami_not_to_a_grant() {
         let message = stderr_error(&out)["message"].as_str().unwrap().to_string();
         assert!(message.contains("ask the human to grant it"), "{message}");
         assert!(!message.contains("no presented Mandate"), "{message}");
+    }
+}
+
+const PROXY_USER: &str = "proxyuser";
+const PROXY_PASSWORD: &str = "proxy-secret";
+
+#[test]
+fn ac10_whoami_reports_a_usable_proxy_without_connecting() {
+    let env = Env::new();
+    let tw = env.add_named(
+        "aaaa1111",
+        "work-inbox",
+        &[LOGIN],
+        vec![grant(Operation::List, &["INBOX"])],
+    );
+    let proxy = proxy::FakeProxy::start(proxy::Protocol::Connect);
+    let address = format!("127.0.0.1:{}", proxy.port);
+    let url = format!("http://{PROXY_USER}:{PROXY_PASSWORD}@{address}");
+    let port = env.server.port;
+
+    let out = env.run_with(&["whoami"], Some(&tw), &[("HTTPS_PROXY", &url)]);
+    assert_eq!(out.code, 0, "{out:?}");
+    assert_eq!(out.stderr, "");
+    assert_eq!(
+        out.stdout,
+        format!(
+            "{{\"mandates\":[{{\"id\":\"aaaa1111\",\"name\":\"work-inbox\",\"accounts\":[{{\"login\":\"agent@example.test\",\"host\":\"localhost\",\"port\":{port},\"tls\":\"implicit\"}}],\"grants\":[{{\"operation\":\"list\",\"account\":\"agent@example.test\",\"mailboxes\":[\"INBOX\"]}}]}}],\"invalid_tokens\":[],\"proxy\":{{\"variable\":\"HTTPS_PROXY\",\"usable\":true}}}}\n"
+        )
+    );
+    let text = env.run_with(&["--text", "whoami"], Some(&tw), &[("HTTPS_PROXY", &url)]);
+    assert_eq!(text.code, 0, "{text:?}");
+    assert!(
+        text.stdout.lines().any(|l| l == "proxy HTTPS_PROXY"),
+        "{:?}",
+        text.stdout
+    );
+    for out in [&out, &text] {
+        for stream in [&out.stdout, &out.stderr] {
+            for secret in [
+                address.as_str(),
+                "127.0.0.1",
+                PROXY_USER,
+                PROXY_PASSWORD,
+                tw.as_str(),
+            ] {
+                assert!(!stream.contains(secret), "output holds {secret:?}");
+            }
+        }
+    }
+    assert!(proxy.seen().is_empty(), "whoami connected to the proxy");
+    assert_eq!(env.server.connections(), 0);
+    assert!(env.audit().is_empty(), "whoami is not audited");
+}
+
+#[test]
+fn ac11_whoami_reports_an_invalid_proxy_variable() {
+    let env = Env::new();
+    let tw = env.add("aaaa1111", &[LOGIN], Vec::new());
+    let url = format!("ftp://{PROXY_USER}:{PROXY_PASSWORD}@127.0.0.1:1");
+    let extra = [("ALL_PROXY", url.as_str())];
+
+    let out = env.run_with(&["whoami"], Some(&tw), &extra);
+    assert_eq!(out.code, 0, "{out:?}");
+    let value: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(
+        value["proxy"],
+        json!({"variable": "ALL_PROXY", "usable": false})
+    );
+    let text = env.run_with(&["--text", "whoami"], Some(&tw), &extra);
+    assert_eq!(text.code, 0, "{text:?}");
+    assert!(
+        text.stdout
+            .lines()
+            .any(|l| l
+                == "proxy ALL_PROXY is not a usable proxy URL; ask the human to fix or unset it"),
+        "{:?}",
+        text.stdout
+    );
+    for out in [&out, &text] {
+        for stream in [&out.stdout, &out.stderr] {
+            for secret in ["ftp://", "127.0.0.1", PROXY_USER, PROXY_PASSWORD] {
+                assert!(!stream.contains(secret), "output holds {secret:?}");
+            }
+        }
+    }
+    assert_eq!(env.server.connections(), 0);
+    assert!(env.audit().is_empty());
+}
+
+#[test]
+fn ac12_whoami_without_a_proxy_has_no_proxy_key() {
+    let env = Env::new();
+    let tw = env.add("aaaa1111", &[LOGIN], Vec::new());
+    let cases: [&[(&str, &str)]; 3] = [
+        &[],
+        &[
+            ("HTTPS_PROXY", ""),
+            ("https_proxy", ""),
+            ("ALL_PROXY", ""),
+            ("all_proxy", ""),
+        ],
+        &[("HTTP_PROXY", "http://127.0.0.1:1")],
+    ];
+    for extra in cases {
+        let out = env.run_with(&["whoami"], Some(&tw), extra);
+        assert_eq!(out.code, 0, "{out:?}");
+        let value: Value = serde_json::from_str(&out.stdout).unwrap();
+        assert!(value.get("proxy").is_none(), "{extra:?}: {}", out.stdout);
+        let text = env.run_with(&["--text", "whoami"], Some(&tw), extra);
+        assert!(
+            !text.stdout.lines().any(|l| l.starts_with("proxy")),
+            "{extra:?}: {:?}",
+            text.stdout
+        );
     }
 }

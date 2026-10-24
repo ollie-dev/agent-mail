@@ -139,6 +139,10 @@ With `--text` it is `warning: invalid_token: <message>`. If no token is valid, t
 
 With `--text` (`agent-mail --text whoami` or `agent-mail whoami --text`) each Mandate is a line `<id>  <name>`, followed by `  account <login> (<host>:<port>, <tls>)` and `  grant <operation> on <account>: <mailboxes>` lines, and each invalid token a line `token <position> of AGENT_MAIL_TOKEN is not valid and was ignored`.
 
+**`proxy` in `whoami`.** With a proxy variable set (see [Sandbox and proxies](#sandbox-and-proxies)), `whoami` adds `proxy`, such as `{"variable":"HTTPS_PROXY","usable":true}`: the variable in effect and whether it holds a usable proxy URL. It never shows the value and connects to nothing.
+
+With `--text` this is a line `proxy <variable>`, or `proxy <variable> is not a usable proxy URL; ask the human to fix or unset it`. Without a proxy variable there is no `proxy` key and no line.
+
 ## Usage errors
 
 A usage error, such as an unknown option, a missing argument or a malformed value, is a JSON error with code `invalid_arguments` and exit code 2, also with `--text`. The message names the argument and the `--help` page to read, and never echoes the value given:
@@ -371,17 +375,21 @@ changes in how an Agent calls it. The first non-empty one of `HTTPS_PROXY`,
 - The live login check of `mandate create` also goes through a proxy set in
   the human's shell.
 
-Two error codes are specific to proxies:
+Three error codes are specific to proxies:
 
-- `proxy_refused`: the proxy refused the tunnel (an HTTP 4xx answer such as
-  `403`, a SOCKS5 "not allowed by ruleset" reply or rejected proxy
-  credentials). The error carries `account` and `host`; ask the human to
-  allow that host in the sandbox's allowed domains.
+- `proxy_refused`: the proxy's allowlist refused the mail host (an HTTP
+  CONNECT `403` or a SOCKS5 "not allowed by ruleset" reply). The error
+  carries `account` and `host`; ask the human to allow that host in the
+  sandbox's allowed domains.
+- `proxy_auth_failed`: the proxy rejected or asked for proxy credentials
+  (an HTTP `407`, or a SOCKS5 proxy refusing the login). The message names
+  the variable to check, never its value; tell the human.
 - `invalid_proxy`: the proxy variable is not a usable `http://` or
   `socks5://` URL. The message names the variable but never echoes its
   value; nothing is connected to.
 
-A proxy that cannot be reached or answers malformed data gives
+Any other proxy refusal (such as another HTTP 4xx or 5xx answer), a proxy
+that cannot be reached or one that answers malformed data gives
 `connection_failed`, as a direct connection would.
 
 ## Audit log

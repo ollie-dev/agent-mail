@@ -1741,6 +1741,51 @@ pub fn mcp_lines(
     mcp_parse(&mcp_raw(lines, &env, &context))
 }
 
+/// [`mcp_lines`] with `extra` variables (such as proxy variables) added
+/// to the server's environment.
+pub fn mcp_lines_with(
+    lines: &[String],
+    tokens: Option<&str>,
+    extra: &[(&str, &str)],
+    store: &dyn MandateStore,
+    ca: &CertificateDer<'static>,
+    log: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    let mut env: HashMap<String, String> = extra
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    if let Some(tokens) = tokens {
+        env.insert(agent_mail::TOKEN_VAR.to_string(), tokens.to_string());
+    }
+    let context = Context::trusting_only(store, vec![ca.clone()])
+        .with_audit_log(agent_mail::audit::AuditLog::at(log));
+    mcp_parse(&mcp_raw(lines, &env, &context))
+}
+
+/// [`run_logged`] with `extra` variables (such as proxy variables) added to
+/// the environment.
+pub fn run_logged_with(
+    args: &[&str],
+    token: Option<&str>,
+    extra: &[(&str, &str)],
+    store: &dyn MandateStore,
+    ca: &CertificateDer<'static>,
+    log: &std::path::Path,
+) -> RunOutput {
+    let mut env: HashMap<String, String> = extra
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    if let Some(token) = token {
+        env.insert(agent_mail::TOKEN_VAR.to_string(), token.to_string());
+    }
+    let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+    let context = Context::trusting_only(store, vec![ca.clone()])
+        .with_audit_log(agent_mail::audit::AuditLog::at(log));
+    agent_mail::run(argv, &env, &context)
+}
+
 /// The `initialize` request (id 1) and the `notifications/initialized`
 /// notification that open a session.
 pub fn mcp_opening() -> Vec<String> {

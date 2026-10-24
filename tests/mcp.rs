@@ -1379,3 +1379,99 @@ fn job020_ac13_token_like_arguments_are_named_never_echoed() {
     assert!(side.audit().is_empty());
     assert_eq!(side.server.connections(), 0);
 }
+
+/// One `tools/call` with `extra` variables in the server's environment;
+/// returns its JSON-RPC `result`.
+fn tool_with(
+    side: &Side,
+    name: &str,
+    arguments: Value,
+    tokens: &str,
+    extra: &[(&str, &str)],
+) -> Value {
+    let mut lines = mcp_opening();
+    lines.push(mcp_call(2, name, arguments));
+    let out = mcp_lines_with(
+        &lines,
+        Some(tokens),
+        extra,
+        &side.store,
+        &side.server.ca,
+        &side.log,
+    );
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert_eq!(out[1]["id"], json!(2));
+    out[1]["result"].clone()
+}
+
+#[test]
+fn ac8_proxy_auth_failed_matches_the_cli() {
+    let side = Side::new();
+    let tw = side.w();
+    let proxy = proxy::FakeProxy::start(proxy::Protocol::Connect);
+    proxy.require_credentials("proxyuser", "proxy-secret");
+    let url = proxy.url("http");
+    let extra = [("HTTPS_PROXY", url.as_str())];
+
+    let cli = run_logged_with(
+        &["list"],
+        Some(&tw),
+        &extra,
+        &side.store,
+        &side.server.ca,
+        &side.log,
+    );
+    assert_eq!(cli.code, 1, "{cli:?}");
+    let cli_error: Value = serde_json::from_str(cli.stderr.trim_end()).unwrap();
+    assert_eq!(cli_error["error"]["code"], "proxy_auth_failed");
+
+    let result = tool_with(&side, "list", json!({}), &tw, &extra);
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let texts = texts(&result);
+    let tool_error: Value = serde_json::from_str(texts.last().unwrap()).unwrap();
+    assert_eq!(tool_error, cli_error);
+    assert_eq!(result["structuredContent"], cli_error);
+    assert_eq!(side.server.connections(), 0);
+}
+
+#[test]
+fn ac13_whoami_tool_reports_the_proxy_like_the_cli() {
+    let side = Side::new();
+    let tw = side.w();
+    let usable = "http://proxyuser:proxy-secret@127.0.0.1:9";
+    let invalid = "ftp://proxyuser:proxy-secret@127.0.0.1:1";
+    for (var, value, expected) in [
+        (
+            "HTTPS_PROXY",
+            usable,
+            json!({"variable": "HTTPS_PROXY", "usable": true}),
+        ),
+        (
+            "ALL_PROXY",
+            invalid,
+            json!({"variable": "ALL_PROXY", "usable": false}),
+        ),
+    ] {
+        let extra = [(var, value)];
+        let cli = run_logged_with(
+            &["whoami"],
+            Some(&tw),
+            &extra,
+            &side.store,
+            &side.server.ca,
+            &side.log,
+        );
+        assert_eq!(cli.code, 0, "{cli:?}");
+        let result = tool_with(&side, "whoami", json!({}), &tw, &extra);
+        assert_eq!(result["isError"], json!(false), "{result}");
+        let texts = texts(&result);
+        assert_eq!(texts[0], cli.stdout.trim_end());
+        let parsed: Value = serde_json::from_str(&texts[0]).unwrap();
+        assert_eq!(parsed["proxy"], expected);
+        assert_eq!(result["structuredContent"], parsed);
+        for secret in ["127.0.0.1", "proxyuser", "proxy-secret", "ftp://"] {
+            assert!(!texts[0].contains(secret), "{secret}");
+        }
+    }
+    assert_eq!(side.server.connections(), 0);
+}

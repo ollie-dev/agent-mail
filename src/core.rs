@@ -225,6 +225,20 @@ pub struct WhoamiResult {
     /// The positions in [`TOKEN_VAR`] of the presented tokens that are not
     /// valid, ascending.
     pub invalid_tokens: Vec<usize>,
+    /// The proxy variable in effect, if any, and whether it holds a usable
+    /// proxy URL. Never its value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<WhoamiProxy>,
+}
+
+/// The proxy setting in a [`WhoamiResult`]: only the variable's name and
+/// whether its value parses. No connection is made to check it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WhoamiProxy {
+    /// The variable, e.g. `HTTPS_PROXY`.
+    pub variable: &'static str,
+    /// Whether the value is a usable proxy URL.
+    pub usable: bool,
 }
 
 /// One opened Mandate in a [`WhoamiResult`], taken from its authenticated
@@ -419,6 +433,18 @@ pub enum CoreError {
         /// The Account's port.
         port: u16,
     },
+    /// The proxy asked for credentials, or rejected the ones in the
+    /// variable. Nothing reached the server. The value is never echoed.
+    ProxyAuthFailed {
+        /// Login name of the Account.
+        account: String,
+        /// The Account's host.
+        host: String,
+        /// The Account's port.
+        port: u16,
+        /// The variable, e.g. `HTTPS_PROXY`.
+        variable: &'static str,
+    },
     /// A proxy variable holds a value that is not a usable proxy URL.
     /// Nothing was connected to. The value is never echoed or logged.
     InvalidProxy {
@@ -554,6 +580,7 @@ impl CoreError {
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Connection { .. } => "connection_failed",
             Self::ProxyRefused { .. } => "proxy_refused",
+            Self::ProxyAuthFailed { .. } => "proxy_auth_failed",
             Self::InvalidProxy { .. } => "invalid_proxy",
             Self::LoginFailed { .. } => "login_failed",
             Self::Protocol { .. } => "server_error",
@@ -896,6 +923,15 @@ impl CoreError {
                 Some(account.clone()),
                 "could not reach the mail server; check the network and retry, or ask the human to check the account's host and port"
                     .to_string(),
+            ),
+            Self::ProxyAuthFailed {
+                account, variable, ..
+            } => (
+                None,
+                Some(account.clone()),
+                format!(
+                    "the network proxy asked for or rejected the proxy credentials in {variable}, so nothing was sent to the mail server of account {account}; ask the human to check the proxy credentials in {variable}, then retry"
+                ),
             ),
             Self::InvalidProxy { account, variable } => (
                 None,
@@ -1375,9 +1411,14 @@ fn whoami(token: Option<&str>, context: &Context<'_>) -> Result<WhoamiResult, Co
             }
         })
         .collect();
+    let proxy = context
+        .network
+        .proxy_summary()
+        .map(|(variable, usable)| WhoamiProxy { variable, usable });
     Ok(WhoamiResult {
         mandates,
         invalid_tokens: presented.invalid,
+        proxy,
     })
 }
 
@@ -1714,6 +1755,16 @@ fn connector_error(
             account,
             host,
             port,
+        },
+        ImapError::ProxyAuthFailed {
+            host,
+            port,
+            variable,
+        } => CoreError::ProxyAuthFailed {
+            account,
+            host,
+            port,
+            variable,
         },
         ImapError::InvalidProxy { variable } => CoreError::InvalidProxy { account, variable },
         ImapError::Login => CoreError::LoginFailed { account },

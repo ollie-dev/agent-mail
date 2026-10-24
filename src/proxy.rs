@@ -38,6 +38,8 @@ pub struct Proxy {
     host: String,
     port: u16,
     auth: Option<(Zeroizing<String>, Zeroizing<String>)>,
+    /// The variable the URL was read from, e.g. `HTTPS_PROXY`.
+    variable: &'static str,
 }
 
 impl std::fmt::Debug for Proxy {
@@ -50,6 +52,12 @@ impl Proxy {
     /// The protocol.
     pub fn kind(&self) -> ProxyKind {
         self.kind
+    }
+
+    /// The variable the proxy URL was read from, e.g. `HTTPS_PROXY`. Never
+    /// its value.
+    pub fn variable(&self) -> &'static str {
+        self.variable
     }
 }
 
@@ -83,7 +91,7 @@ impl ProxySetting {
             match env.get(variable).map(String::as_str) {
                 None | Some("") => continue,
                 Some(value) => {
-                    return match parse(value) {
+                    return match parse(value, variable) {
                         Some(proxy) => Self::Through(proxy),
                         None => Self::Invalid(variable),
                     };
@@ -91,6 +99,16 @@ impl ProxySetting {
             }
         }
         Self::Direct
+    }
+
+    /// The variable in effect and whether it holds a usable proxy URL;
+    /// `None` when connecting directly. Never the value.
+    pub fn summary(&self) -> Option<(&'static str, bool)> {
+        match self {
+            Self::Direct => None,
+            Self::Through(proxy) => Some((proxy.variable, true)),
+            Self::Invalid(variable) => Some((variable, false)),
+        }
     }
 }
 
@@ -100,13 +118,17 @@ pub enum TunnelError {
     /// The proxy could not be reached, sent a malformed reply, or the target
     /// host cannot be sent to it.
     Connection,
-    /// The proxy answered, and refused the target host.
+    /// The proxy answered, and refused the target host because of its
+    /// allowlist (CONNECT `403`, SOCKS5 reply `0x02`).
     Refused,
+    /// The proxy asked for credentials, or rejected the ones sent (CONNECT
+    /// `407`, SOCKS5 method `0xFF` or a failed RFC 1929 login).
+    Auth,
 }
 
 /// Parses a proxy URL: `[scheme://][user[:password]@]host[:port][/]`.
 /// `None` for anything else, including an unknown scheme.
-fn parse(value: &str) -> Option<Proxy> {
+fn parse(value: &str, variable: &'static str) -> Option<Proxy> {
     let (kind, rest, default_port) = match value.split_once("://") {
         Some((scheme, rest)) => match scheme.to_ascii_lowercase().as_str() {
             "http" => (ProxyKind::Connect, rest, 80),
@@ -157,6 +179,7 @@ fn parse(value: &str) -> Option<Proxy> {
         host,
         port,
         auth,
+        variable,
     })
 }
 
@@ -277,11 +300,17 @@ async fn connect_handshake(
         .split(|&b| b == b'\r')
         .next()
         .ok_or(TunnelError::Connection)?;
-    match status_code(status_line) {
+    status_result(status_code(status_line))
+}
+
+/// What a CONNECT reply status means. The reason phrase is never kept.
+fn status_result(code: Option<u16>) -> Result<(), TunnelError> {
+    match code {
         Some(200..=299) => Ok(()),
-        // The proxy refused this target, e.g. 403 for a host not on its
-        // allowlist, or 407 for missing or wrong credentials.
-        Some(400..=499) => Err(TunnelError::Refused),
+        // The host is not on the proxy's allowlist.
+        Some(403) => Err(TunnelError::Refused),
+        // Missing or wrong proxy credentials.
+        Some(407) => Err(TunnelError::Auth),
         _ => Err(TunnelError::Connection),
     }
 }
@@ -317,8 +346,9 @@ async fn socks5_handshake(
     if choice[0] != 0x05 {
         return Err(TunnelError::Connection);
     }
+    // No acceptable method: the proxy wants credentials we did not offer.
     if choice[1] == 0xFF {
-        return Err(TunnelError::Refused);
+        return Err(TunnelError::Auth);
     }
     if choice[1] != method {
         return Err(TunnelError::Connection);
@@ -338,7 +368,7 @@ async fn socks5_handshake(
             return Err(TunnelError::Connection);
         }
         if status[1] != 0x00 {
-            return Err(TunnelError::Refused);
+            return Err(TunnelError::Auth);
         }
     }
 
@@ -473,6 +503,30 @@ mod tests {
         assert_eq!(status_code(b"HTTP/2 200 OK"), None);
         assert_eq!(status_code(b"HTTP/1.1 20 OK"), None);
         assert_eq!(status_code(b"garbage"), None);
+    }
+
+    #[test]
+    fn connect_statuses_map_to_tunnel_errors() {
+        assert_eq!(status_result(Some(200)), Ok(()));
+        assert_eq!(status_result(Some(403)), Err(TunnelError::Refused));
+        assert_eq!(status_result(Some(407)), Err(TunnelError::Auth));
+        for code in [400, 404, 429, 502] {
+            assert_eq!(
+                status_result(Some(code)),
+                Err(TunnelError::Connection),
+                "{code}"
+            );
+        }
+        assert_eq!(status_result(None), Err(TunnelError::Connection));
+    }
+
+    #[test]
+    fn summary_names_the_variable_only() {
+        assert_eq!(ProxySetting::Direct.summary(), None);
+        let setting = ProxySetting::from_env(&env(&[("https_proxy", "http://u:p@127.0.0.1:9")]));
+        assert_eq!(setting.summary(), Some(("https_proxy", true)));
+        let setting = ProxySetting::from_env(&env(&[("all_proxy", "ftp://127.0.0.1:1")]));
+        assert_eq!(setting.summary(), Some(("all_proxy", false)));
     }
 
     #[test]

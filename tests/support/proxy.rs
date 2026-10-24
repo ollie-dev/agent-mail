@@ -1,6 +1,7 @@
 //! Minimal in-process HTTP CONNECT and SOCKS5 proxies on real TCP ports on
 //! 127.0.0.1. Each records the targets asked for and any credentials
-//! received, and can be told to refuse a host. All values here are fake.
+//! received, and can be told to refuse a host, require credentials or
+//! answer a fixed CONNECT status. All values here are fake.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -27,6 +28,10 @@ pub struct Seen {
 struct Shared {
     seen: Vec<Seen>,
     refused: Vec<String>,
+    /// The user and password every client must present, if any.
+    credentials: Option<(String, String)>,
+    /// The status line every CONNECT is answered with, if set.
+    status: Option<u16>,
 }
 
 /// Which protocol a [`FakeProxy`] speaks.
@@ -69,6 +74,18 @@ impl FakeProxy {
         self.shared.lock().unwrap().refused.push(host.to_string());
     }
 
+    /// Requires `user` and `password`: CONNECT answers `407` when
+    /// `Proxy-Authorization` is missing or wrong; SOCKS5 answers method
+    /// `0xFF` when `0x02` is not offered, and status `0x01` for wrong ones.
+    pub fn require_credentials(&self, user: &str, password: &str) {
+        self.shared.lock().unwrap().credentials = Some((user.to_string(), password.to_string()));
+    }
+
+    /// Answers every CONNECT with status `code` (CONNECT proxy only).
+    pub fn answer_status(&self, code: u16) {
+        self.shared.lock().unwrap().status = Some(code);
+    }
+
     /// What every accepted connection asked for, in order.
     pub fn seen(&self) -> Vec<Seen> {
         self.shared.lock().unwrap().seen.clone()
@@ -92,6 +109,22 @@ fn update(state: &Mutex<Shared>, index: usize, seen: &Seen) {
 
 fn is_refused(state: &Mutex<Shared>, host: &str) -> bool {
     state.lock().unwrap().refused.iter().any(|h| h == host)
+}
+
+fn required(state: &Mutex<Shared>) -> Option<(String, String)> {
+    state.lock().unwrap().credentials.clone()
+}
+
+fn reason_phrase(code: u16) -> &'static str {
+    match code {
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        407 => "Proxy Authentication Required",
+        429 => "Too Many Requests",
+        502 => "Bad Gateway",
+        _ => "Status",
+    }
 }
 
 fn serve_connect(mut client: TcpStream, state: &Mutex<Shared>) {
@@ -120,6 +153,28 @@ fn serve_connect(mut client: TcpStream, state: &Mutex<Shared>) {
             .then(|| value.trim().to_string())
     });
     update(state, index, &seen);
+    let status = state.lock().unwrap().status;
+    if let Some(code) = status {
+        let line = format!(
+            "HTTP/1.1 {code} {}\r\nContent-Length: 0\r\n\r\n",
+            reason_phrase(code)
+        );
+        let _ = client.write_all(line.as_bytes());
+        return;
+    }
+    if let Some((user, password)) = required(state) {
+        use base64::Engine;
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+        );
+        if seen.authorization.as_deref() != Some(expected.as_str()) {
+            let _ = client.write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"fake\"\r\nContent-Length: 0\r\n\r\n",
+            );
+            return;
+        }
+    }
     let host = seen
         .target
         .rsplit_once(':')
@@ -155,9 +210,10 @@ fn serve_socks5(mut client: TcpStream, state: &Mutex<Shared>) {
     }
     seen.methods = methods.clone();
     update(state, index, &seen);
+    let needs_credentials = required(state).is_some();
     let method = if methods.contains(&0x02) {
         0x02
-    } else if methods.contains(&0x00) {
+    } else if methods.contains(&0x00) && !needs_credentials {
         0x00
     } else {
         let _ = client.write_all(&[5, 0xFF]);
@@ -170,8 +226,12 @@ fn serve_socks5(mut client: TcpStream, state: &Mutex<Shared>) {
         let Some(credentials) = read_rfc1929(&mut client) else {
             return;
         };
-        seen.credentials = Some(credentials);
+        seen.credentials = Some(credentials.clone());
         update(state, index, &seen);
+        if required(state).is_some_and(|expected| expected != credentials) {
+            let _ = client.write_all(&[1, 1]);
+            return;
+        }
         if client.write_all(&[1, 0]).is_err() {
             return;
         }

@@ -28,7 +28,7 @@ Never send mail: agent-mail cannot. `draft` saves a draft that the human reviews
 
 ## Commands
 
-- `agent-mail whoami`: the presented Mandates, each with `id`, `name`, `accounts` (`login`, `host`, `port`, `tls`) and `grants` (`operation`, `account`, `mailboxes`), plus `invalid_tokens`. Needs no Grant and makes no connection.
+- `agent-mail whoami`: the presented Mandates, each with `id`, `name`, `accounts` (`login`, `host`, `port`, `tls`) and `grants` (`operation`, `account`, `mailboxes`), plus `invalid_tokens` and, with a proxy set, `proxy` (`variable`, `usable`). Needs no Grant and makes no connection.
 - `agent-mail list [--account LOGIN]`: the mailboxes you may use, as `{"account":...,"mailboxes":[{"name":...}]}`.
 - `agent-mail search [--account LOGIN] [--mailbox NAME] [--from S] [--to S] [--subject S] [--text S] [--since YYYY-MM-DD] [--before YYYY-MM-DD] [--unseen] [--flagged] [--limit N]`: newest first. Mailbox defaults to `INBOX`, limit to 20 (at most 1000).
 - `agent-mail search [--account LOGIN] [--mailbox NAME] --gmail QUERY [--limit N]`: Gmail's own search syntax, such as `--gmail "has:attachment newer_than:7d"`. Only on Gmail; elsewhere it fails with `unsupported`. It cannot be combined with the other criteria.
@@ -64,6 +64,7 @@ With an invalid token among valid ones, stderr first gets a warning with `"code"
 - `draft_refused`: the server refused to store the draft, and no draft was created. Retry once later; if it fails again, tell the human the error's `mailbox`.
 - `stale_reference`: the mailbox was renumbered. Search again for a fresh `ref`. `message_not_found`: the message is gone.
 - `proxy_refused`: the sandbox does not allow the mail host. Tell the human to add the error's `host` to the sandbox's allowed domains.
+- `proxy_auth_failed`: the proxy rejected or asked for proxy credentials. Tell the human the proxy variable the message names; do not change it yourself.
 - `missing_token`, `invalid_token`: ask the human to set a valid token in `AGENT_MAIL_TOKEN` and restart the host, as above.
 - `login_failed`, `connection_failed`, `store_unavailable`, `hardened_runtime_missing`: tell the human; you cannot fix these.
 

@@ -479,6 +479,9 @@ fn failure_reason(error: &ImapError) -> String {
             "the proxy refused the connection to {}:{port}; allow that host in the proxy, or unset the proxy variable",
             escape_controls(host)
         ),
+        ImapError::ProxyAuthFailed { variable, .. } => format!(
+            "the proxy asked for or rejected the proxy credentials in {variable}; check the proxy user and password in {variable}"
+        ),
         ImapError::InvalidProxy { variable } => {
             format!("{variable} is not a usable proxy URL; fix or unset it")
         }
