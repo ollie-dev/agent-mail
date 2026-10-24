@@ -121,15 +121,6 @@ impl<S: MandateStore> MandateStore for GuardedStore<S> {
     }
 }
 
-#[cfg(target_os = "macos")]
-impl GuardedStore<KeychainStore> {
-    /// [`KeychainStore::keys`], after the self-check.
-    pub fn keys(&self) -> Result<Vec<Vec<u8>>, StoreError> {
-        GuardedStore::check(self)?;
-        self.inner.keys()
-    }
-}
-
 /// The store a release build uses: the Keychain on macOS.
 #[cfg(target_os = "macos")]
 pub type RuntimeStore = KeychainStore;

@@ -389,6 +389,7 @@ fn error_samples() -> Vec<CoreError> {
     let seeds = vec![
         CoreError::MissingToken,
         CoreError::InvalidToken,
+        CoreError::TooManyTokens,
         CoreError::Denied {
             operation: Operation::Read,
             account: account(),
@@ -485,6 +486,7 @@ fn error_samples() -> Vec<CoreError> {
         match seed {
             CoreError::MissingToken
             | CoreError::InvalidToken
+            | CoreError::TooManyTokens
             | CoreError::SameMailbox { .. }
             | CoreError::MoveUnsupported { .. }
             | CoreError::Unsupported { .. }
@@ -905,4 +907,51 @@ fn job020_ac10_in_process_mcp_is_refused_as_json_or_text() {
     assert_eq!(out.code, 2);
     assert_eq!(out.stdout, "");
     assert_eq!(out.stderr, format!("error: invalid_arguments: {message}\n"));
+}
+
+// ---------------------------------------------------- job 022: parse once
+
+#[test]
+fn job022_ac7_run_cli_on_a_parsed_cli_matches_run() {
+    use clap::Parser;
+    let store = InMemoryStore::new();
+    let context = agent_mail::Context::trusting_only(&store, Vec::new());
+    let env = std::collections::HashMap::new();
+    for args in [
+        &["agent-mail", "whoami"][..],
+        &["agent-mail", "--text", "whoami"],
+        &["agent-mail", "mandate", "list"],
+    ] {
+        let cli = agent_mail::Cli::try_parse_from(args).unwrap();
+        let parsed = agent_mail::run_cli(cli, &env, &context);
+        let whole = agent_mail::run(args, &env, &context);
+        assert_eq!(parsed.stdout, whole.stdout, "{args:?}");
+        assert_eq!(parsed.stderr, whole.stderr, "{args:?}");
+        assert_eq!(parsed.code, whole.code, "{args:?}");
+    }
+
+    let Err(bogus) = agent_mail::parse(["agent-mail", "--bogus"]) else {
+        panic!("--bogus parsed");
+    };
+    assert_eq!(bogus.code, 2);
+    assert_eq!(bogus.stdout, "");
+    assert_eq!(bogus.stderr.lines().count(), 1, "{bogus:?}");
+    let line: serde_json::Value = serde_json::from_str(&bogus.stderr).unwrap();
+    assert_eq!(line["error"]["code"], "invalid_arguments");
+
+    let Err(help) = agent_mail::parse(["agent-mail", "--help"]) else {
+        panic!("--help parsed");
+    };
+    assert_eq!(help.code, 0);
+    assert_eq!(help.stderr, "");
+    assert!(help.stdout.contains("Usage: agent-mail"), "{help:?}");
+}
+
+#[test]
+fn job022_ac8_main_parses_its_arguments_once() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let main = std::fs::read_to_string(path).unwrap();
+    assert_eq!(main.matches("agent_mail::parse(").count(), 1, "{main}");
+    assert!(!main.contains("try_parse_from"), "{main}");
+    assert!(!main.contains("Cli::parse"), "{main}");
 }

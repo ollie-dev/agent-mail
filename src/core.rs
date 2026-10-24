@@ -27,6 +27,11 @@ use crate::utf7;
 /// comma-separated.
 pub const TOKEN_VAR: &str = "AGENT_MAIL_TOKEN";
 
+/// The most distinct tokens `AGENT_MAIL_TOKEN` may hold. Each one can cost
+/// a store lookup, and so a Keychain prompt, so more fail with
+/// `too_many_tokens` before any is opened.
+pub const MAX_TOKENS: usize = 8;
+
 /// Where agent-mail releases are published; the place to reinstall from.
 pub const RELEASES_URL: &str = "https://github.com/ollie-dev/agent-mail/releases";
 
@@ -305,6 +310,9 @@ pub enum CoreError {
     /// No presented token is valid: each is malformed, unknown, or its
     /// record does not open.
     InvalidToken,
+    /// `AGENT_MAIL_TOKEN` holds more than [`MAX_TOKENS`] distinct tokens.
+    /// Checked before any token is opened.
+    TooManyTokens,
     /// The Policy has no Grant for the operation on the Account.
     Denied {
         /// The operation that was refused.
@@ -564,6 +572,7 @@ impl CoreError {
         match self {
             Self::MissingToken => "missing_token",
             Self::InvalidToken => "invalid_token",
+            Self::TooManyTokens => "too_many_tokens",
             Self::Denied { .. } | Self::Uncovered { .. } => "denied",
             Self::MailboxNotFound { .. } => "mailbox_not_found",
             Self::StaleReference { .. } => "stale_reference",
@@ -896,6 +905,13 @@ impl CoreError {
             ),
             Self::InvalidToken => (None, None, "no agent token in AGENT_MAIL_TOKEN is valid; check AGENT_MAIL_TOKEN or ask the human for a new token"
                     .to_string()),
+            Self::TooManyTokens => (
+                None,
+                None,
+                format!(
+                    "AGENT_MAIL_TOKEN holds more than {MAX_TOKENS} distinct tokens; set AGENT_MAIL_TOKEN to at most {MAX_TOKENS} tokens"
+                ),
+            ),
             Self::Denied {
                 operation, account, ..
             } => (
@@ -1351,7 +1367,10 @@ fn run_command(
                 messages.push(new_ref);
             }
             // The recipients the Agent gave, unless one is invalid: a
-            // rejected value is never logged.
+            // rejected value is never logged. Both adapters (the CLI's clap
+            // `value_parser` and the MCP `draft` tool) reject a bad address
+            // as `invalid_arguments` before the core runs, so the empty list
+            // is only reached by in-process core callers.
             let recipients = if to.iter().all(|a| draft::is_valid_address(a)) {
                 to.clone()
             } else {
@@ -1579,24 +1598,31 @@ pub fn no_token_presented(env: &HashMap<String, String>) -> bool {
 /// `store_unavailable` when the store cannot be read. Any other failure to
 /// open a token only records its 1-based field position.
 fn open_presented(raw: Option<&str>, context: &Context<'_>) -> Result<Presented, CoreError> {
-    let mut seen: Vec<&str> = Vec::new();
+    // The distinct non-empty fields with their 1-based positions, counted
+    // before any is opened, so an over-long list causes no store lookup.
+    let mut fields: Vec<(usize, &str)> = Vec::new();
+    for (index, field) in raw.unwrap_or_default().split(',').enumerate() {
+        let text = field.trim_matches(|c: char| c.is_ascii_whitespace());
+        if text.is_empty() || fields.iter().any(|(_, seen)| *seen == text) {
+            continue;
+        }
+        fields.push((index + 1, text));
+    }
+    if fields.is_empty() {
+        return Err(CoreError::MissingToken);
+    }
+    if fields.len() > MAX_TOKENS {
+        return Err(CoreError::TooManyTokens);
+    }
     let mut presented = Presented {
         mandates: Vec::new(),
         invalid: Vec::new(),
     };
-    for (index, field) in raw.unwrap_or_default().split(',').enumerate() {
-        let text = field.trim_matches(|c: char| c.is_ascii_whitespace());
-        if text.is_empty() || seen.contains(&text) {
-            continue;
-        }
-        seen.push(text);
+    for (position, text) in fields {
         match open_token(text, context)? {
             Some(mandate) => presented.mandates.push(mandate),
-            None => presented.invalid.push(index + 1),
+            None => presented.invalid.push(position),
         }
-    }
-    if seen.is_empty() {
-        return Err(CoreError::MissingToken);
     }
     Ok(presented)
 }
@@ -2294,6 +2320,7 @@ mod tests {
         let errors = [
             CoreError::MissingToken,
             CoreError::InvalidToken,
+            CoreError::TooManyTokens,
             CoreError::Denied {
                 operation: Operation::List,
                 account: account.clone(),

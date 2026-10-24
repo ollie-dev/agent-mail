@@ -614,13 +614,165 @@ fn ac5_every_agent_command_warns_and_still_succeeds() {
             "B",
         ],
     ] {
+        let before = env.audit().len();
         let out = env.run(args, Some(&tokens));
         assert_eq!(out.code, 0, "{args:?}: {out:?}");
         assert_eq!(out.stderr.lines().count(), 1, "{args:?}");
         let warning = warning_of(&out.stderr);
         assert_eq!(warning["code"], "invalid_token");
         assert_eq!(warning["positions"], json!([1]));
+        // Exactly one new audit line, naming the Mandate that ran it.
+        let audit = env.audit();
+        assert_eq!(audit.len(), before + 1, "{args:?}: {audit:?}");
+        let line = &audit[before];
+        assert_eq!(line["mandate"], "aaaa1111", "{args:?}: {line}");
+        assert_eq!(line["operation"], args[0], "{args:?}: {line}");
+        assert_eq!(line["outcome"], "allowed", "{args:?}: {line}");
     }
+}
+
+/// Nine valid tokens, each for its own Mandate with a `list` Grant on
+/// `INBOX` for `LOGIN`.
+fn nine_tokens(env: &Env) -> String {
+    (1..=9)
+        .map(|i| {
+            env.add(
+                &format!("cccc000{i}"),
+                &[LOGIN],
+                vec![grant(Operation::List, &["INBOX"])],
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[test]
+fn ac1_at_most_eight_distinct_tokens_are_accepted() {
+    assert_eq!(agent_mail::core::MAX_TOKENS, 8);
+    let env = Env::new();
+    let t = env.add(
+        "aaaa1111",
+        &[LOGIN],
+        vec![grant(Operation::List, &["INBOX"])],
+    );
+    let garbage: Vec<String> = (1..=7).map(|i| format!("garbage{i}")).collect();
+    let tokens = format!("{t},{}", garbage.join(","));
+    let out = env.run(&["list"], Some(&tokens));
+    assert_eq!(out.code, 0, "{out:?}");
+    assert_eq!(out.stderr.lines().count(), 1, "{out:?}");
+    let warning = warning_of(&out.stderr);
+    assert_eq!(warning["code"], "invalid_token");
+    assert_eq!(warning["positions"], json!([2, 3, 4, 5, 6, 7, 8]));
+
+    // Repeats count once.
+    let repeated = vec![t.as_str(); 20].join(",");
+    let out = env.run(&["list"], Some(&repeated));
+    assert_eq!(out.code, 0, "{out:?}");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn ac2_more_than_eight_distinct_tokens_is_too_many_tokens() {
+    let env = Env::new();
+    let tokens = nine_tokens(&env);
+    let out = env.run(&["list"], Some(&tokens));
+    assert_eq!(out.code, 1, "{out:?}");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr.lines().count(), 1, "{out:?}");
+    let error = stderr_error(&out);
+    assert_eq!(error["code"], "too_many_tokens");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("AGENT_MAIL_TOKEN"), "{message}");
+    assert!(message.contains('8'), "{message}");
+    assert!(message.len() <= 300, "{message}");
+    assert!(error.get("account").is_none(), "{error}");
+    assert!(error.get("operation").is_none(), "{error}");
+    assert_eq!(env.server.connections(), 0);
+
+    let mut last = env.last_audit();
+    assert!(last.as_object_mut().unwrap().remove("time").is_some());
+    assert_eq!(
+        last,
+        json!({"operation": "list", "outcome": "denied", "reason": "too_many_tokens"})
+    );
+    let log = std::fs::read_to_string(&env.log).unwrap();
+    for token in tokens.split(',') {
+        for stream in [&out.stdout, &out.stderr, &log] {
+            assert!(!stream.contains(token), "a token leaked");
+        }
+    }
+
+    let out = env.run(&["list", "--text"], Some(&tokens));
+    assert_eq!(out.code, 1, "{out:?}");
+    assert!(
+        out.stderr.starts_with("error: too_many_tokens: "),
+        "{:?}",
+        out.stderr
+    );
+    assert_eq!(env.server.connections(), 0);
+}
+
+/// An [`InMemoryStore`] that counts its `get` calls.
+struct CountingStore {
+    inner: InMemoryStore,
+    gets: std::cell::Cell<usize>,
+}
+
+impl MandateStore for CountingStore {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, agent_mail::store::StoreError> {
+        self.gets.set(self.gets.get() + 1);
+        self.inner.get(key)
+    }
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), agent_mail::store::StoreError> {
+        self.inner.put(key, value)
+    }
+    fn delete(&self, key: &[u8]) -> Result<bool, agent_mail::store::StoreError> {
+        self.inner.delete(key)
+    }
+    fn entries(&self) -> Result<Vec<agent_mail::store::Entry>, agent_mail::store::StoreError> {
+        MandateStore::entries(&self.inner)
+    }
+}
+
+#[test]
+fn ac3_the_cap_is_checked_before_any_store_lookup() {
+    let env = Env::new();
+    let store = CountingStore {
+        inner: InMemoryStore::new(),
+        gets: std::cell::Cell::new(0),
+    };
+    let malformed = (1..=9)
+        .map(|i| format!("garbage{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for args in [&["list"][..], &["whoami"]] {
+        let out = run_raw_tokens(args, Some(&malformed), &store, &env.server, &env.log);
+        assert_eq!(out.code, 1, "{args:?}: {out:?}");
+        assert_eq!(stderr_error(&out)["code"], "too_many_tokens", "{args:?}");
+        assert_eq!(store.gets.get(), 0, "{args:?}");
+    }
+
+    // Eight well-formed but unknown tokens: one lookup each.
+    let unknown = (0..8)
+        .map(|_| unknown_token())
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = run_raw_tokens(&["list"], Some(&unknown), &store, &env.server, &env.log);
+    assert_eq!(out.code, 1, "{out:?}");
+    assert_eq!(stderr_error(&out)["code"], "invalid_token");
+    assert_eq!(store.gets.get(), 8);
+}
+
+#[test]
+fn ac4_whoami_applies_the_same_cap_and_is_not_audited() {
+    let env = Env::new();
+    let tokens = nine_tokens(&env);
+    let out = env.run(&["whoami"], Some(&tokens));
+    assert_eq!(out.code, 1, "{out:?}");
+    assert_eq!(out.stdout, "");
+    assert_eq!(stderr_error(&out)["code"], "too_many_tokens");
+    assert!(env.audit().is_empty(), "whoami is not audited");
+    assert_eq!(env.server.connections(), 0);
 }
 
 #[test]
