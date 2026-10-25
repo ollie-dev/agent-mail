@@ -4,10 +4,11 @@
 //! input and the output, handling one request at a time. Each `tools/call`
 //! checks its arguments with the CLI's validators, builds the same
 //! [`Command`] the CLI builds and runs it through
-//! [`core::execute_reporting`], so Mandate selection, Grant checks and the
-//! audit entry happen on every call, exactly as on the CLI. Results are the
-//! CLI's JSON lines. Nothing opened is kept between calls, and the adapter
-//! never builds a Mandate management command.
+//! [`core::execute_reporting`], or on Windows sends it to the Broker over a
+//! new connection, so Mandate selection, Grant checks and the audit entry
+//! happen on every call, exactly as on the CLI. Results are the CLI's JSON
+//! lines. Nothing opened is kept between calls, and the adapter never
+//! builds a Mandate management command.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -436,9 +437,15 @@ fn call_tool(
     };
     let command = arguments.and_then(|args| build_command(tool, args));
     match command {
-        Ok(command) => Ok(render_report(core::execute_reporting(
-            env, &command, context,
-        ))),
+        // On the Broker route (Windows) the call runs in the Broker, over
+        // its own connection.
+        Ok(command) => Ok(match &context.broker {
+            Some(route) => {
+                let (main, warning, is_error) = crate::client::tool_lines(route, command, env);
+                render_lines(&main, warning.as_deref(), is_error)
+            }
+            None => render_report(core::execute_reporting(env, &command, context)),
+        }),
         // Without any token the call fails as every Agent command does,
         // whatever the arguments hold; there is no command to audit. The
         // argument mistake is reported too, so one retry can fix both. It
@@ -463,13 +470,23 @@ fn render_report(report: Report) -> Value {
         Ok(outcome) => (line(crate::render_outcome(outcome, false)), false),
         Err(error) => (line(crate::render_error(error, false)), true),
     };
-    let structured: Value = serde_json::from_str(&main).expect("the CLI prints JSON");
+    render_lines(&main, warning.as_deref(), is_error)
+}
+
+/// The tool result for the CLI's JSON lines: `main` (the result or the
+/// error) and the `warning`, first for an error and second for a success.
+fn render_lines(main: &str, warning: Option<&str>, is_error: bool) -> Value {
+    let Ok(structured) = serde_json::from_str::<Value>(main) else {
+        // Only a Broker reply can be malformed here.
+        let error = core::CoreError::BrokerUnavailable;
+        return tool_error(error.code(), &error.body().message);
+    };
     let mut content = Vec::new();
-    if is_error && let Some(w) = &warning {
+    if is_error && let Some(w) = warning {
         content.push(text_item(w));
     }
-    content.push(text_item(&main));
-    if !is_error && let Some(w) = &warning {
+    content.push(text_item(main));
+    if !is_error && let Some(w) = warning {
         content.push(text_item(w));
     }
     json!({

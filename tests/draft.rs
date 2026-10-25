@@ -653,7 +653,8 @@ fn ac7_no_command_edits_or_deletes_a_draft() {
     assert_eq!(
         names,
         [
-            "list", "search", "read", "flag", "move", "draft", "whoami", "mcp", "mandate", "help"
+            "list", "search", "read", "flag", "move", "draft", "whoami", "mcp", "mandate", "audit",
+            "help"
         ]
     );
 

@@ -16,6 +16,13 @@ fn main() {
     // Binary tests must not write to the user's audit log.
     #[cfg(feature = "test-support")]
     let context = context.with_audit_log(agent_mail::audit::AuditLog::for_test_binary());
+    // On Windows every command runs in the Broker (ADR-0004); elsewhere
+    // there is no Broker and everything runs here.
+    let connector = agent_mail::client::platform_connector();
+    let context = match &connector {
+        Some(connector) => context.with_broker(connector.as_ref()),
+        None => context,
+    };
     let output = match agent_mail::parse(std::env::args_os()) {
         Err(output) => output,
         Ok(Cli {

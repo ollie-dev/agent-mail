@@ -336,13 +336,23 @@ const UNKNOWN_WHOAMI: &str = "{\"mandates\":[],\"invalid_tokens\":[1]}\n";
 fn ac9_debug_binary_reaches_the_store() {
     let unknown = AgentToken::mint();
     let log = temp_audit_log();
+    // On Windows the binary reaches the store through the Broker, served
+    // here from this test.
+    #[cfg(windows)]
+    let pipe = support::broker::TestPipe::start(
+        std::sync::Arc::new(agent_mail::store::InMemoryStore::new()),
+        agent_mail::audit::AuditLog::at(&log),
+        agent_mail::imap::Network::platform(),
+    );
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_agent-mail"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-mail"));
+        command
             .args(args)
             .env(agent_mail::TOKEN_VAR, unknown.expose())
-            .env(agent_mail::audit::TEST_LOG_VAR, &log)
-            .output()
-            .expect("failed to run agent-mail")
+            .env(agent_mail::audit::TEST_LOG_VAR, &log);
+        #[cfg(windows)]
+        command.env(agent_mail::client::TEST_PIPE_VAR, &pipe.name);
+        command.output().expect("failed to run agent-mail")
     };
     let whoami = run(&["whoami"]);
     let stderr = String::from_utf8_lossy(&whoami.stderr);

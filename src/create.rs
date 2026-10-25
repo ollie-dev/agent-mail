@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::{Context, CoreError};
+use crate::broker::{CreateAccount, CreateRequest, ProxyVars, Request, RunRequest, Secret};
+use crate::client::{Failure, Route, Session};
+use crate::core::{Command, Context, CoreError};
 use crate::export::{FileAccount, InvalidFile, MandateFile};
 use crate::imap::{self, ImapError};
 use crate::mandate::{
@@ -129,6 +131,129 @@ pub(crate) fn run(
     }
     offer_export(terminal, &mandate);
     Ok(())
+}
+
+/// Runs the guided setup on the Broker route (Windows): the same refusals,
+/// then the elevation check, before any prompt, connection or file read.
+/// The live login of each Account runs here as in-process; the finished
+/// Mandate goes to the Broker in one `create` request, which seals and
+/// stores it for this user and returns the new Agent Token. The local
+/// store is never touched.
+pub(crate) fn run_via_broker(
+    env: &HashMap<String, String>,
+    from: Option<&Path>,
+    context: &Context<'_>,
+    route: &Route<'_>,
+) -> Result<(), Failure> {
+    let terminal = context.terminal;
+    if !terminal.is_interactive() {
+        return Err(CoreError::InteractiveTerminalRequired.into());
+    }
+    if sandbox_indicator(env).is_some() {
+        return Err(CoreError::SandboxDetected.into());
+    }
+    if !route.elevated() {
+        return Err(CoreError::ElevationRequired.into());
+    }
+    let file = match from {
+        None => None,
+        Some(path) => Some(
+            MandateFile::load(path)
+                .map_err(|InvalidFile(problem)| CoreError::InvalidMandateFile { problem })?,
+        ),
+    };
+    let mut mandate = match guided(context, file.as_ref()) {
+        Ok(mandate) => mandate,
+        Err(error) => {
+            terminal.message(NOTHING_STORED);
+            return Err(error.into());
+        }
+    };
+    let request = Request::Create(CreateRequest {
+        name: mandate.name.clone(),
+        accounts: mandate
+            .accounts
+            .iter()
+            .map(|a| CreateAccount {
+                login: a.login.clone(),
+                host: a.host.clone(),
+                port: a.port,
+                tls: a.tls,
+                credential: a.credential.clone(),
+            })
+            .collect(),
+        grants: mandate.policy.grants.clone(),
+    });
+    let sent = Session::open(route)
+        .map_err(Failure::from)
+        .and_then(|mut session| {
+            let answer = session.call(&request)?;
+            Ok((session, answer))
+        });
+    drop(request);
+    let (mut session, answer) = match sent {
+        Ok(sent) => sent,
+        Err(failure) => {
+            terminal.message(NOTHING_STORED);
+            return Err(failure);
+        }
+    };
+    let created = match answer.result {
+        Ok(result) => {
+            let created = serde_json::from_str::<Created>(result.get()).ok();
+            crate::client::wipe(result);
+            created
+        }
+        Err(body) => {
+            terminal.message(NOTHING_STORED);
+            return Err(Failure::Remote(body));
+        }
+    };
+    let Some(created) = created else {
+        // Without a readable reply there is no ID to take back.
+        terminal.message(NOTHING_STORED);
+        return Err(CoreError::BrokerUnavailable.into());
+    };
+    let reveal = Zeroizing::new(format!(
+        "Mandate \"{}\" (ID {}) is sealed and stored.
+
+         Agent Token, shown only this once (it cannot be shown again):
+
+    {}
+
+         Give it to the Agent in the AGENT_MAIL_TOKEN environment variable.",
+        escape_controls(&created.name),
+        escape_controls(&created.id),
+        created.token.expose()
+    ));
+    if terminal.reveal(&reveal).is_err() {
+        // A Mandate whose token nobody saw is unusable: take it back out.
+        let delete = Request::Run(Box::new(RunRequest {
+            command: Command::MandateDelete {
+                id: created.id.clone(),
+            },
+            tokens: None,
+            proxy: ProxyVars::default(),
+            text: false,
+        }));
+        let _ = session.call(&delete);
+        terminal.message(&format!(
+            "The Agent Token could not be shown on the terminal. {NOTHING_STORED}"
+        ));
+        return Err(CoreError::Aborted.into());
+    }
+    drop(session);
+    mandate.id = created.id.clone();
+    offer_export(terminal, &mandate);
+    Ok(())
+}
+
+/// The Broker's reply to `create`.
+#[derive(serde::Deserialize)]
+struct Created {
+    id: String,
+    name: String,
+    token: Secret,
 }
 
 /// Offers to save the stored Mandate's Accounts and Grants as TOML. The

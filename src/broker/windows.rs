@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_CALL_NOT_IMPLEMENTED,
     ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_NO_DATA,
-    ERROR_PATH_NOT_FOUND, ERROR_PIPE_CONNECTED, ERROR_SERVICE_SPECIFIC_ERROR, GENERIC_READ,
-    GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, NO_ERROR, WAIT_OBJECT_0,
+    ERROR_PATH_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_SERVICE_SPECIFIC_ERROR,
+    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, NO_ERROR,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
@@ -28,7 +29,8 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, OWNER_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
+    TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenElevation,
+    TokenIntegrityLevel, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_APPEND_DATA,
@@ -41,9 +43,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
-    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
-    PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+    ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
@@ -53,8 +55,8 @@ use windows_sys::Win32::System::Services::{
     StartServiceCtrlDispatcherW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenProcessToken, OpenThreadToken,
-    SetEvent, WaitForMultipleObjects,
+    CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, WaitForMultipleObjects,
 };
 use windows_sys::core::PWSTR;
 
@@ -749,6 +751,161 @@ pub fn create_test_pipe_for(name: &str, broker_sid: &str, first: bool) -> io::Re
     create_pipe(name, broker_sid, first)
 }
 
+/// Whether this process runs elevated: the `TokenElevation` of its token.
+/// `false` if the token cannot be read.
+pub fn process_elevated() -> bool {
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: the pseudo handle needs no closing; `token` receives a handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let Ok(token) = owned(token) else {
+        return false;
+    };
+    match token_information(raw(&token), TokenElevation) {
+        // SAFETY: the buffer holds a TOKEN_ELEVATION.
+        Ok(buf) => unsafe { (*buf.as_ptr().cast::<TOKEN_ELEVATION>()).TokenIsElevated != 0 },
+        Err(_) => false,
+    }
+}
+
+/// The user SID of the process `pid`, read from its token. A standard
+/// user usually cannot open a service's process or token, and then this
+/// fails.
+pub fn process_user_sid(pid: u32) -> io::Result<String> {
+    // SAFETY: no pointers; the handle is checked by `owned`.
+    let process = owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })?;
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: a valid process handle; `token` receives a handle.
+    if unsafe { OpenProcessToken(raw(&process), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_error());
+    }
+    let token = owned(token)?;
+    token_user(raw(&token))
+}
+
+/// The process ID of the server of the pipe client `pipe`.
+pub fn pipe_server_pid(pipe: &File) -> io::Result<u32> {
+    let mut pid = 0u32;
+    // SAFETY: a valid pipe handle; `pid` receives the server's process ID.
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } == 0 {
+        return Err(last_error());
+    }
+    Ok(pid)
+}
+
+/// The owner SID of the pipe the client handle `pipe` is connected to: the
+/// account whose process created the pipe. Nobody but that account (or an
+/// administrator) can make another account the owner.
+pub fn pipe_owner(pipe: &File) -> io::Result<String> {
+    object_security(pipe.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT)?.owner()
+}
+
+/// Whether the pipe client `pipe` is connected to a pipe created by the
+/// account `server_sid` and served by a process of that account. The
+/// owner is always checked. The server process (`GetNamedPipeServerProcessId`)
+/// is checked too whenever its token can be read, which a standard user
+/// usually cannot do for a service.
+pub fn served_by(pipe: &File, server_sid: &str) -> bool {
+    if !pipe_owner(pipe).is_ok_and(|owner| owner == server_sid) {
+        return false;
+    }
+    let Ok(pid) = pipe_server_pid(pipe) else {
+        return false;
+    };
+    match process_user_sid(pid) {
+        Ok(user) => user == server_sid,
+        Err(_) => true,
+    }
+}
+
+/// Connects to the Broker's pipe for the Broker clients: waits while every
+/// instance is busy, then checks with [`served_by`] that the pipe belongs
+/// to the expected account, `NT SERVICE\agent-mail`, before anything is
+/// sent. A pipe squatted by another user's process while the Broker is
+/// stopped is refused with `broker_unavailable`.
+#[derive(Debug, Clone)]
+pub struct PipeConnector {
+    name: String,
+    server_sid: String,
+}
+
+impl PipeConnector {
+    /// The Broker's pipe, [`PIPE_NAME`], served by `NT SERVICE\agent-mail`.
+    pub fn broker() -> Self {
+        Self {
+            name: PIPE_NAME.to_string(),
+            server_sid: super::service_sid(SERVICE_NAME),
+        }
+    }
+
+    /// The pipe `name`, served by the account `server_sid`. Test builds
+    /// only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(name: &str, server_sid: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            server_sid: server_sid.to_string(),
+        }
+    }
+
+    /// Opens the pipe and checks its server, as
+    /// [`crate::client::Connector::connect`] does.
+    pub fn open(&self) -> Result<File, CoreError> {
+        let pipe = connect_waiting(&self.name).map_err(|_| CoreError::BrokerUnavailable)?;
+        if served_by(&pipe, &self.server_sid) {
+            Ok(pipe)
+        } else {
+            Err(CoreError::BrokerUnavailable)
+        }
+    }
+}
+
+impl crate::client::Connector for PipeConnector {
+    fn connect(&self) -> Result<Box<dyn crate::client::Transport + '_>, CoreError> {
+        Ok(Box::new(self.open()?))
+    }
+}
+
+/// [`connect`], waiting up to 5 seconds while every instance of the pipe
+/// is busy.
+fn connect_waiting(name: &str) -> io::Result<File> {
+    let wide_name = wide(name);
+    let mut tries = 0;
+    loop {
+        match connect(name) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && tries < 5 => {
+                tries += 1;
+                // SAFETY: `wide_name` is NUL-terminated.
+                unsafe { WaitNamedPipeW(wide_name.as_ptr(), 1000) };
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Creates the pipe `name` as [`create_test_pipe`] does, calls `ready`,
+/// waits for one client and returns every byte it sent before it closed.
+/// Test builds only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_one_client(name: &str, ready: impl FnOnce()) -> io::Result<Vec<u8>> {
+    let pipe = create_test_pipe(name)?;
+    let stop = StopSignal::new()?;
+    let event = new_event()?;
+    ready();
+    if !accept(&pipe, &event, &stop)? {
+        return Ok(Vec::new());
+    }
+    let mut stream = PipeStream {
+        pipe,
+        event,
+        stop: &stop,
+    };
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Connects to the pipe `name` as a client, at identification level: the
 /// server can read the client's identity but not act as it.
 pub fn connect(name: &str) -> io::Result<File> {
@@ -820,6 +977,7 @@ fn serve_client(
         terminal: &NoTerminal,
         audit: audit.clone(),
         owner: None,
+        broker: None,
     };
     super::serve_session(&mut stream, |stream| stream.caller(), &context)
 }
