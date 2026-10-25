@@ -28,6 +28,10 @@ _Avoid_: API key, password
 The set of Grants inside one Mandate; anything not granted is denied.
 _Avoid_: Access rights, permissions, profile
 
+**Broker**:
+The always-running Windows service, under its own OS account, that holds the Mandates and carries out every Agent's requests itself, so no Credential leaves it.
+_Avoid_: Service, server, daemon, vault
+
 **Grant**:
 One permission inside a Policy, naming an operation and the Account and mailboxes it applies to.
 _Avoid_: Right, permission, rule
