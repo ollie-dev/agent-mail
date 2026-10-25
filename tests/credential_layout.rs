@@ -81,3 +81,25 @@ fn job024_ac1c_names_that_do_not_decode_are_foreign_and_parts_are_not_records() 
     }
     assert_eq!(classify("other:AAAA"), None);
 }
+
+#[test]
+fn job024_ac1c_store_writes_generic_credentials_persisted_local_machine() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
+    )
+    .unwrap();
+    let windows = source
+        .split("mod credential_manager {")
+        .nth(1)
+        .expect("no credential_manager module");
+    assert!(windows.contains("Type: CRED_TYPE_GENERIC,"));
+    assert!(windows.contains("Persist: CRED_PERSIST_LOCAL_MACHINE,"));
+    assert!(source.contains("#[cfg(windows)]\npub type RuntimeStore = CredentialManagerStore;"));
+    // Add-only: every target name is read before anything is written.
+    let put = windows.split("fn put(").nth(1).unwrap();
+    let check = put
+        .find("read(name)?.is_some()")
+        .expect("no existence check");
+    let first_write = put.find("write(").expect("no write");
+    assert!(check < first_write, "put writes before checking");
+}
