@@ -138,6 +138,7 @@ fn ac3_workflow_checks_the_tag_against_cargo_toml() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn ac3_scripts_are_executable_and_parse() {
     use std::os::unix::fs::PermissionsExt;

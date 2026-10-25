@@ -570,3 +570,31 @@ mod release {
         assert_eq!(code_of(&missing), "missing_token");
     }
 }
+
+// ---------------------------------------------------------------- job 024
+
+#[cfg(windows)]
+#[test]
+fn job024_ac2a_self_check_passes_on_windows_and_the_guard_forwards() {
+    assert!(selfcheck::check());
+    let store = GuardedStore::new(InMemoryStore::new());
+    assert_eq!(store.put(b"key", b"value"), Ok(()));
+    assert_eq!(store.get(b"key"), Ok(Some(b"value".to_vec())));
+}
+
+#[test]
+fn job024_ac2b_self_check_is_macos_release_only_and_main_always_guards() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("src/selfcheck.rs")).unwrap();
+    let active = "#[cfg(all(target_os = \"macos\", not(debug_assertions)))]\nfn evaluate() -> bool {\n    hardened_runtime_ok(process_status())\n}";
+    let fallback = "#[cfg(not(all(target_os = \"macos\", not(debug_assertions))))]\nfn evaluate() -> bool {\n    true\n}";
+    assert!(source.contains(active), "active evaluate changed");
+    assert!(source.contains(fallback), "fallback evaluate changed");
+    assert_eq!(source.matches("fn evaluate()").count(), 2);
+
+    let main = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(main.contains("GuardedStore::new(RuntimeStore::default())"));
+    // No cfg in main picks another store or skips the guard.
+    assert!(!main.contains("target_os"), "main.rs is OS-specific");
+    assert!(!main.contains("cfg(windows)"), "main.rs is OS-specific");
+}

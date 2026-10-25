@@ -554,3 +554,44 @@ fn list_refuses_a_symlinked_log_and_fails_closed() {
     assert_eq!(error_of(&out)["code"], "audit_unavailable");
     assert_eq!(fs::read_to_string(&target).unwrap(), "victim\n");
 }
+
+// ---------------------------------------------------------------- job 024
+
+#[test]
+fn job024_ac1d_windows_log_is_under_local_app_data() {
+    use agent_mail::audit::{Platform, log_path};
+    let base = Path::new(r"C:\Users\alice\AppData\Local");
+    let path = log_path(Platform::Windows, base, None);
+    assert_eq!(path, base.join("agent-mail").join("audit.log"));
+    // XDG_DATA_HOME plays no part on Windows.
+    assert_eq!(
+        log_path(
+            Platform::Windows,
+            base,
+            Some(std::ffi::OsStr::new(r"D:\data"))
+        ),
+        path
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        path,
+        Path::new(r"C:\Users\alice\AppData\Local\agent-mail\audit.log")
+    );
+}
+
+#[test]
+fn job024_ac1d_windows_base_is_the_known_folder_not_an_environment_variable() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/audit.rs")).unwrap();
+    assert!(source.contains("SHGetKnownFolderPath(&FOLDERID_LocalAppData"));
+    assert!(!source.contains("\"LOCALAPPDATA\""));
+    assert!(!source.contains("\"APPDATA\""));
+}
+
+#[cfg(windows)]
+#[test]
+fn job024_ac1d_platform_path_on_windows_ends_in_agent_mail_audit_log() {
+    let path = agent_mail::audit::platform_path().expect("Local AppData is known");
+    assert!(path.is_absolute(), "{path:?}");
+    assert!(path.ends_with(r"agent-mail\audit.log"), "{path:?}");
+}

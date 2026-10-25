@@ -131,14 +131,55 @@ impl Terminal for NoTerminal {
 
 /// The controlling terminal, opened directly so nothing goes through the
 /// process's stdout or stderr.
+#[cfg(unix)]
 const TTY_PATH: &str = "/dev/tty";
 
+/// The console's screen buffer, opened directly so nothing goes through the
+/// process's stdout or stderr.
+#[cfg(windows)]
+const TTY_PATH: &str = "CONOUT$";
+
+#[cfg(unix)]
 fn write_tty(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut tty = std::fs::OpenOptions::new().write(true).open(TTY_PATH)?;
     tty.write_all(text.as_bytes())?;
     tty.write_all(b"\n")?;
     tty.flush()
+}
+
+/// Writes UTF-16 with `WriteConsoleW`, so any text shows correctly whatever
+/// the console's code page.
+#[cfg(windows)]
+fn write_tty(text: &str) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::WriteConsoleW;
+    let tty = std::fs::OpenOptions::new().write(true).open(TTY_PATH)?;
+    let wide: Vec<u16> = text.encode_utf16().chain("\n".encode_utf16()).collect();
+    let mut rest = &wide[..];
+    while !rest.is_empty() {
+        let chunk = u32::try_from(rest.len().min(8192)).unwrap_or(8192);
+        let mut written = 0u32;
+        // SAFETY: the handle is open for writing and `rest` holds at least
+        // `chunk` UTF-16 units.
+        let ok = unsafe {
+            WriteConsoleW(
+                tty.as_raw_handle(),
+                rest.as_ptr(),
+                chunk,
+                &mut written,
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        rest = &rest[(written as usize).min(rest.len())..];
+    }
+    Ok(())
 }
 
 /// The real terminal, drawn with `inquire`.
@@ -216,12 +257,14 @@ impl Terminal for InquireTerminal {
             .map_err(|_| Cancelled)
     }
 
-    /// Messages go to `/dev/tty`, never to stdout or stderr.
+    /// Messages go to the controlling terminal (`/dev/tty`, or `CONOUT$` on
+    /// Windows), never to stdout or stderr.
     fn message(&self, text: &str) {
         let _ = write_tty(text);
     }
 
-    /// Writes to `/dev/tty` only, so a wrapper that captures fd 1 or fd 2
+    /// Writes to the controlling terminal only, so a wrapper that captures
+    /// fd 1 or fd 2
     /// (even through a pty) never sees the secret.
     fn reveal(&self, text: &str) -> Result<(), Cancelled> {
         write_tty(text).map_err(|_| Cancelled)
