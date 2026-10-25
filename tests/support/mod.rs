@@ -2,6 +2,7 @@
 //! the CLI adapter in-process. All values here are fake.
 #![allow(dead_code)]
 
+pub mod broker;
 pub mod proxy;
 
 use std::collections::HashMap;
@@ -27,6 +28,9 @@ pub const OTHER_LOGIN: &str = "other@example.test";
 pub const KNOWN_LOGINS: [&str; 2] = [LOGIN, OTHER_LOGIN];
 /// Fake Credential.
 pub const CREDENTIAL: &str = "fake-app-password-123";
+/// A second fake Credential the server accepts, used by the Broker's
+/// `create` tests to check that no reply carries it.
+pub const BROKER_CREDENTIAL: &str = "Cred-7f3a-secret";
 /// Mailboxes the fake server lists, raw, in this order.
 pub const SERVER_MAILBOXES: [&str; 5] =
     ["INBOX", "Archive", "Sent", "Spam", "[Gmail]/Entw&APw-rfe"];
@@ -1357,11 +1361,12 @@ fn fetch_response(seq: usize, message: &mut FakeMessage, items: &str) -> String 
     format!("* {seq} FETCH ({})\r\n", parts.join(" "))
 }
 
-/// Whether `LOGIN` arguments name a known login with the fake Credential.
+/// Whether `LOGIN` arguments name a known login with a fake Credential.
 fn login_accepted(args: &str) -> bool {
     let fields = imap_strings(args);
     matches!(fields.as_slice(), [login, credential]
-        if KNOWN_LOGINS.contains(&login.as_str()) && credential == CREDENTIAL)
+        if KNOWN_LOGINS.contains(&login.as_str())
+            && (credential == CREDENTIAL || credential == BROKER_CREDENTIAL))
 }
 
 /// Splits IMAP atoms and quoted strings (with `\` escapes).

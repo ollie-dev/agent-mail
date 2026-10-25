@@ -35,6 +35,11 @@ fn main() {
             }
             std::process::exit(0);
         }
+        // The Broker builds its own store, audit log and network.
+        Ok(Cli {
+            command: CliCommand::Broker,
+            text,
+        }) => agent_mail::broker::run_service(text),
         Ok(cli) => agent_mail::run_cli(cli, &env, &context),
     };
     let _ = std::io::stdout().write_all(output.stdout.as_bytes());

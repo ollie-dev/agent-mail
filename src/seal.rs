@@ -193,6 +193,13 @@ pub struct Listing {
     pub accounts: Vec<ListedAccount>,
     /// The Policy's Grants.
     pub grants: Vec<Grant>,
+    /// The SID of the Windows user who created the Mandate through the
+    /// Broker (ADR-0004), which serves it to that user only. `None` for
+    /// records written in-process, and then left out of the JSON, so those
+    /// records keep their bytes. Bound to the record by the AEAD like every
+    /// other listing field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// An Account as listed: everything but its Credential.
@@ -227,6 +234,7 @@ impl Listing {
                 })
                 .collect(),
             grants: mandate.policy.grants.clone(),
+            owner: None,
         }
     }
 }
@@ -295,10 +303,20 @@ fn aad(store_key: &[u8], listing: &[u8]) -> Vec<u8> {
     .concat()
 }
 
-/// Seals `mandate` under `token`.
+/// Seals `mandate` under `token`, with no owner.
 pub fn seal(token: &AgentToken, mandate: &Mandate) -> SealedRecord {
+    seal_for(token, mandate, None)
+}
+
+/// Seals `mandate` under `token`, recording `owner` (a SID string) in the
+/// authenticated listing.
+pub fn seal_for(token: &AgentToken, mandate: &Mandate, owner: Option<&str>) -> SealedRecord {
     let key = token.store_key();
-    let listing = serde_json::to_vec(&Listing::of(mandate)).expect("a listing always serialises");
+    let listing = Listing {
+        owner: owner.map(str::to_string),
+        ..Listing::of(mandate)
+    };
+    let listing = serde_json::to_vec(&listing).expect("a listing always serialises");
     let plaintext = Plaintext {
         token_hash: token.hash(),
         mandate: mandate.clone(),
@@ -346,6 +364,15 @@ impl std::io::Write for ByteCounter {
 /// The clear listing must be byte-for-byte authentic, and must also match the
 /// Mandate sealed inside.
 pub fn open(token: &AgentToken, value: &[u8]) -> Result<Mandate, OpenError> {
+    open_with_owner(token, value).map(|(mandate, _)| mandate)
+}
+
+/// Like [`open`], also returning the owner recorded in the authenticated
+/// listing.
+pub fn open_with_owner(
+    token: &AgentToken,
+    value: &[u8],
+) -> Result<(Mandate, Option<String>), OpenError> {
     let parts = parts(value).map_err(|_| OpenError)?;
     let (nonce, ciphertext) = parts.sealed.split_at(aead::NONCE_LEN);
     let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| OpenError)?;
@@ -362,11 +389,13 @@ pub fn open(token: &AgentToken, value: &[u8]) -> Result<Mandate, OpenError> {
     if plaintext.token_hash != token.hash() {
         return Err(OpenError);
     }
-    let listed: Listing = serde_json::from_slice(parts.listing).map_err(|_| OpenError)?;
+    let mut listed: Listing = serde_json::from_slice(parts.listing).map_err(|_| OpenError)?;
+    // The owner lives only in the listing, which the AEAD authenticates.
+    let owner = listed.owner.take();
     if listed != Listing::of(&plaintext.mandate) {
         return Err(OpenError);
     }
-    Ok(plaintext.mandate)
+    Ok((plaintext.mandate, owner))
 }
 
 #[cfg(test)]

@@ -12,6 +12,21 @@ pub enum StoreError {
     /// The binary is not signed with the hardened runtime, so the store was
     /// not accessed at all (see [`crate::selfcheck`]).
     HardenedRuntimeMissing,
+    /// Credential Manager has no logon session to work in
+    /// (`ERROR_NO_SUCH_LOGON_SESSION`), e.g. when called while impersonating.
+    NoLogonSession,
+}
+
+/// `ERROR_NO_SUCH_LOGON_SESSION`.
+pub const ERROR_NO_SUCH_LOGON_SESSION: u32 = 1312;
+
+/// The store error for the Win32 error `code` of a failed Credential
+/// Manager call. Pure, so it is tested on every OS.
+pub fn from_win32(code: u32) -> StoreError {
+    match code {
+        ERROR_NO_SUCH_LOGON_SESSION => StoreError::NoLogonSession,
+        _ => StoreError::Unavailable,
+    }
 }
 
 /// One stored record: its key and its value.
@@ -289,12 +304,14 @@ mod credential_manager {
         TARGET_PREFIX, Target, classify, join, part_count, part_target, split, target_name,
         target_names,
     };
-    use super::{Entry, MandateStore, StoreError};
+    use super::{Entry, MandateStore, StoreError, from_win32};
 
     /// Windows Credential Manager: one generic credential per Mandate,
     /// persisted `CRED_PERSIST_LOCAL_MACHINE`, laid out as
-    /// [`super::credential_layout`] describes. Any program running as the
-    /// same user can read these credentials (ADR-0002).
+    /// [`super::credential_layout`] describes. The credentials belong to the
+    /// account the process runs as: in the Broker (ADR-0004) that is the
+    /// service account `NT SERVICEgent-mail`, out of reach of the user's
+    /// own processes; in-process, any program of the same user can read them.
     #[derive(Debug, Default, Clone, Copy)]
     pub struct CredentialManagerStore;
 
@@ -332,7 +349,7 @@ mod credential_manager {
             // SAFETY: no preconditions.
             return match unsafe { GetLastError() } {
                 ERROR_NOT_FOUND => Ok(None),
-                _ => Err(StoreError::Unavailable),
+                code => Err(from_win32(code)),
             };
         }
         // SAFETY: on success `credential` points to a valid CREDENTIALW whose
@@ -366,7 +383,8 @@ mod credential_manager {
         };
         // SAFETY: every pointer in `credential` is valid for the call.
         if unsafe { CredWriteW(&credential, 0) } == 0 {
-            Err(StoreError::Unavailable)
+            // SAFETY: no preconditions.
+            Err(from_win32(unsafe { GetLastError() }))
         } else {
             Ok(())
         }
@@ -382,7 +400,7 @@ mod credential_manager {
         // SAFETY: no preconditions.
         match unsafe { GetLastError() } {
             ERROR_NOT_FOUND => Ok(false),
-            _ => Err(StoreError::Unavailable),
+            code => Err(from_win32(code)),
         }
     }
 
@@ -399,7 +417,7 @@ mod credential_manager {
             // SAFETY: no preconditions.
             return match unsafe { GetLastError() } {
                 ERROR_NOT_FOUND => Ok(Vec::new()),
-                _ => Err(StoreError::Unavailable),
+                code => Err(from_win32(code)),
             };
         }
         let mut names = Vec::new();

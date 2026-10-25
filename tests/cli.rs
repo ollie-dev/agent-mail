@@ -480,6 +480,14 @@ fn error_samples() -> Vec<CoreError> {
             account: account(),
             mailbox: mailbox(),
         },
+        CoreError::StoreNoLogonSession,
+        CoreError::InvalidRequest,
+        CoreError::BrokerVersionMismatch {
+            broker: "0.1.0".to_string(),
+        },
+        CoreError::ElevationRequired,
+        CoreError::ServiceRequired,
+        CoreError::BrokerUnsupported,
     ];
     let mut samples = Vec::new();
     for seed in seeds {
@@ -512,7 +520,13 @@ fn error_samples() -> Vec<CoreError> {
             | CoreError::InvalidMandateFile { .. }
             | CoreError::NotFound { .. }
             | CoreError::RevocationIncomplete { .. }
-            | CoreError::AuditUnavailable => samples.push(seed),
+            | CoreError::AuditUnavailable
+            | CoreError::StoreNoLogonSession
+            | CoreError::InvalidRequest
+            | CoreError::BrokerVersionMismatch { .. }
+            | CoreError::ElevationRequired
+            | CoreError::ServiceRequired
+            | CoreError::BrokerUnsupported => samples.push(seed),
             CoreError::Denied { .. } => {
                 for operation in ops {
                     samples.push(CoreError::Denied {

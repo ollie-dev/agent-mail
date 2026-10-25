@@ -25,7 +25,8 @@ ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# raw_value: Broker replies carry the CLI's JSON byte for byte.
+serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 toml = "1.1.8"
@@ -49,13 +50,22 @@ security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 # Credential Manager (CredReadW, CredWriteW, CredDeleteW, CredEnumerateW) for
-# the Mandate store, the Local AppData known folder for the audit log, and
-# WriteConsoleW for the console messages of `mandate create`.
+# the Mandate store, the Local AppData and ProgramData known folders for the
+# audit logs, WriteConsoleW for the console messages of `mandate create`,
+# and for the Broker the service control manager, the named pipe,
+# impersonation, tokens, access lists and overlapped I/O.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Services",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
 ] }
 

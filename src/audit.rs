@@ -1,9 +1,11 @@
 //! The audit log: one metadata-only JSON line per Agent mail operation,
-//! appended to a file in the mail owner's per-user data directory.
+//! appended to a file in the mail owner's per-user data directory, or, for
+//! the Windows Broker (ADR-0004), to `%ProgramData%\agent-mail\audit.log`.
 //!
 //! An [`Entry`] has only the fields below, none of which can hold a
-//! Credential, an Agent Token, a token hash or a message body. No
-//! agent-mail command reads the log back; the human opens the file.
+//! Credential, an Agent Token, a token hash or a message body. In-process,
+//! no agent-mail command reads the log back; the human opens the file. The
+//! Broker returns each caller the entries carrying the caller's own SID.
 
 use std::ffi::OsStr;
 use std::fs::{DirBuilder, OpenOptions};
@@ -66,6 +68,10 @@ pub struct Entry {
     /// The stable error code if the call failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// The SID of the Broker's pipe client the call was made for. `None`
+    /// in-process, and then left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl Entry {
@@ -101,13 +107,45 @@ pub const TEST_LOG_VAR: &str = "AGENT_MAIL_TEST_AUDIT_LOG";
 pub struct AuditLog {
     /// `None` when the platform location could not be determined.
     path: Option<PathBuf>,
+    /// The Broker's own SID when this is the Broker's log, whose folder
+    /// gets the Broker's access list and is checked before each use.
+    #[cfg(windows)]
+    broker_sid: Option<String>,
 }
 
 impl AuditLog {
     /// The log at the platform's per-user location; see [`platform_path`].
     pub fn platform() -> Self {
+        Self::with_path(platform_path())
+    }
+
+    fn with_path(path: Option<PathBuf>) -> Self {
         Self {
-            path: platform_path(),
+            path,
+            #[cfg(windows)]
+            broker_sid: None,
+        }
+    }
+
+    /// The Broker's log, `%ProgramData%\agent-mail\audit.log`, with
+    /// `%ProgramData%` from the known folder (`FOLDERID_ProgramData`), not
+    /// an environment variable. Its folder is created with
+    /// [`crate::broker::audit_dir_sddl`] for `broker_sid`.
+    #[cfg(windows)]
+    pub fn broker(broker_sid: &str) -> Self {
+        Self {
+            path: program_data().map(|base| base.join(APP_DIR).join(FILE_NAME)),
+            broker_sid: Some(broker_sid.to_string()),
+        }
+    }
+
+    /// The Broker's log under `program_data` instead of the known folder.
+    /// Test builds only.
+    #[cfg(all(windows, any(test, feature = "test-support")))]
+    pub fn broker_at(program_data: &Path, broker_sid: &str) -> Self {
+        Self {
+            path: Some(program_data.join(APP_DIR).join(FILE_NAME)),
+            broker_sid: Some(broker_sid.to_string()),
         }
     }
 
@@ -115,9 +153,7 @@ impl AuditLog {
     /// pointed elsewhere.
     #[cfg(any(test, feature = "test-support"))]
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: Some(path.into()),
-        }
+        Self::with_path(Some(path.into()))
     }
 
     /// A log at a fresh file in a new directory under the system temporary
@@ -161,8 +197,20 @@ impl AuditLog {
     /// directory nor the file may be a symbolic link (`O_NOFOLLOW`), and the
     /// file must be a regular file. Existing content is never rewritten: the
     /// file is opened in append mode and the line goes out in one write.
+    ///
+    /// The Broker's log is checked instead as
+    /// [`crate::broker::windows::open_audit_log`] describes.
     pub fn append(&self, entry: &Entry) -> Result<(), AuditUnavailable> {
         let path = self.path.as_deref().ok_or(AuditUnavailable)?;
+        #[cfg(windows)]
+        if let Some(sid) = &self.broker_sid {
+            let mut file =
+                crate::broker::windows::open_audit_log(path, sid, true)?.ok_or(AuditUnavailable)?;
+            return file
+                .write_all(entry.to_line().as_bytes())
+                .and_then(|()| file.flush())
+                .map_err(|_| AuditUnavailable);
+        }
         let dir = path.parent().ok_or(AuditUnavailable)?;
         let mut builder = DirBuilder::new();
         builder.recursive(true);
@@ -202,6 +250,39 @@ impl AuditLog {
         file.write_all(entry.to_line().as_bytes())
             .and_then(|()| file.flush())
             .map_err(|_| AuditUnavailable)
+    }
+}
+
+impl AuditLog {
+    /// Every line of the log, without its `\n`, in file order; empty when
+    /// the log does not exist yet. The Broker's log is checked as for
+    /// [`AuditLog::append`].
+    pub fn lines(&self) -> Result<Vec<String>, AuditUnavailable> {
+        use std::io::Read;
+        let path = self.path.as_deref().ok_or(AuditUnavailable)?;
+        #[cfg(windows)]
+        let opened = match &self.broker_sid {
+            Some(sid) => crate::broker::windows::open_audit_log(path, sid, false)?,
+            None => open_existing(path)?,
+        };
+        #[cfg(not(windows))]
+        let opened = open_existing(path)?;
+        let Some(mut file) = opened else {
+            return Ok(Vec::new());
+        };
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|_| AuditUnavailable)?;
+        Ok(text.lines().map(str::to_string).collect())
+    }
+}
+
+/// The file at `path` opened for reading, or `None` if it does not exist.
+fn open_existing(path: &Path) -> Result<Option<std::fs::File>, AuditUnavailable> {
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(AuditUnavailable),
     }
 }
 
@@ -285,15 +366,41 @@ pub fn platform_path() -> Option<PathBuf> {
 /// The Local AppData known folder (`FOLDERID_LocalAppData`).
 #[cfg(windows)]
 fn local_app_data() -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
 
     let mut raw: *mut u16 = std::ptr::null_mut();
-    // SAFETY: valid pointers; the returned string is freed below with
-    // CoTaskMemFree, which the API requires even on failure.
+    // SAFETY: valid pointers; the returned string is freed by
+    // `known_folder`, as the API requires even on failure.
     let hr =
         unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut raw) };
+    // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
+    unsafe { known_folder(hr, raw) }
+}
+
+/// The ProgramData known folder (`FOLDERID_ProgramData`), for the Broker's
+/// audit log.
+#[cfg(windows)]
+fn program_data() -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+
+    let mut raw: *mut u16 = std::ptr::null_mut();
+    // SAFETY: as in `local_app_data`.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw) };
+    // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
+    unsafe { known_folder(hr, raw) }
+}
+
+/// The path `SHGetKnownFolderPath` returned in `raw` with result `hr`, if
+/// it succeeded and is absolute. Frees `raw`.
+///
+/// # Safety
+/// `raw` is null or was allocated by `SHGetKnownFolderPath`.
+#[cfg(windows)]
+unsafe fn known_folder(hr: i32, raw: *mut u16) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+
     let path = if hr >= 0 && !raw.is_null() {
         let mut len = 0;
         // SAFETY: on success `raw` is a NUL-terminated UTF-16 string.
@@ -410,6 +517,7 @@ mod tests {
             results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),
+            sid: None,
         }
     }
 
@@ -518,6 +626,7 @@ mod tests {
             results: Some(2),
             outcome: Decision::Denied,
             reason: Some("denied"),
+            sid: None,
         };
         let line = entry.to_line();
         assert_eq!(line.matches('\n').count(), 1);
@@ -547,6 +656,7 @@ mod tests {
             results: None,
             outcome: Decision::Denied,
             reason: Some("missing_token"),
+            sid: None,
         };
         log.append(&entry).unwrap();
         log.append(&entry).unwrap();
