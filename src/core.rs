@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditLog, Decision};
 use crate::draft::{self, DraftResult};
@@ -42,6 +42,10 @@ pub struct Context<'a> {
     pub(crate) network: Network,
     pub(crate) terminal: &'a dyn Terminal,
     pub(crate) audit: AuditLog,
+    /// The Broker's pipe client SID (ADR-0004). When set, only Mandates
+    /// whose authenticated listing names this owner open or are listed or
+    /// deleted, and every audit entry carries it. `None` in-process.
+    pub(crate) owner: Option<String>,
 }
 
 impl<'a> Context<'a> {
@@ -53,6 +57,23 @@ impl<'a> Context<'a> {
             network: Network::platform(),
             terminal: &NoTerminal,
             audit: AuditLog::platform(),
+            owner: None,
+        }
+    }
+
+    /// The same context, serving only the Mandates owned by the SID `owner`.
+    pub(crate) fn for_owner(self, owner: &str) -> Self {
+        Self {
+            owner: Some(owner.to_string()),
+            ..self
+        }
+    }
+
+    /// Whether `listing` may be served under this context's owner rule.
+    fn owns(&self, listing_owner: Option<&str>) -> bool {
+        match &self.owner {
+            None => true,
+            Some(owner) => listing_owner == Some(owner.as_str()),
         }
     }
 
@@ -99,8 +120,11 @@ impl<'a> Context<'a> {
     }
 }
 
-/// A command an Agent can run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A command an Agent can run. Serialisable, so the Broker's clients can
+/// send it; every value deserialised is untrusted and checked again by the
+/// core, as for the CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     /// List the mailboxes the Policy grants.
     List {
@@ -473,6 +497,24 @@ pub enum CoreError {
     },
     /// The Mandate store could not be read or written.
     StoreUnavailable,
+    /// Credential Manager had no logon session to work in
+    /// (`ERROR_NO_SUCH_LOGON_SESSION`).
+    StoreNoLogonSession,
+    /// A Broker request is malformed, too large, out of order or not
+    /// allowed (such as `mandate_create` inside `run`). The connection is
+    /// closed.
+    InvalidRequest,
+    /// The client and the Broker are different versions.
+    BrokerVersionMismatch {
+        /// The Broker's version.
+        broker: String,
+    },
+    /// `create` came from a client token below high integrity.
+    ElevationRequired,
+    /// `agent-mail broker` was not started by the service control manager.
+    ServiceRequired,
+    /// `agent-mail broker` was run on an OS without the Broker.
+    BrokerUnsupported,
     /// The binary is not signed with the hardened runtime, so the Keychain
     /// was not accessed (ADR-0002).
     HardenedRuntimeMissing,
@@ -526,6 +568,7 @@ impl From<StoreError> for CoreError {
         match error {
             StoreError::Unavailable => Self::StoreUnavailable,
             StoreError::HardenedRuntimeMissing => Self::HardenedRuntimeMissing,
+            StoreError::NoLogonSession => Self::StoreNoLogonSession,
         }
     }
 }
@@ -594,6 +637,12 @@ impl CoreError {
             Self::LoginFailed { .. } => "login_failed",
             Self::Protocol { .. } => "server_error",
             Self::StoreUnavailable => "store_unavailable",
+            Self::StoreNoLogonSession => "store_no_logon_session",
+            Self::InvalidRequest => "invalid_request",
+            Self::BrokerVersionMismatch { .. } => "broker_version_mismatch",
+            Self::ElevationRequired => "elevation_required",
+            Self::ServiceRequired => "service_required",
+            Self::BrokerUnsupported => "unsupported",
             Self::HardenedRuntimeMissing => "hardened_runtime_missing",
             Self::AccountRequired { .. } => "account_required",
             Self::AmbiguousMandate { .. } => "ambiguous_mandate",
@@ -974,6 +1023,43 @@ impl CoreError {
                 "the credential store could not be read or written; retry, or ask the human to check the credential store"
                     .to_string(),
             ),
+            Self::StoreNoLogonSession => (
+                None,
+                None,
+                "the credential store has no logon session to work in, so nothing was read or written; retry, or ask the human to restart the agent-mail service"
+                    .to_string(),
+            ),
+            Self::InvalidRequest => (
+                None,
+                None,
+                "the request to the agent-mail service is malformed, too large or not allowed, so it was refused; run the same agent-mail binary as the service, or ask the human to reinstall agent-mail"
+                    .to_string(),
+            ),
+            Self::BrokerVersionMismatch { broker } => (
+                None,
+                None,
+                format!(
+                    "this agent-mail binary and the agent-mail service (version {broker}) are different versions, so the request was refused; ask the human to reinstall agent-mail from {RELEASES_URL}"
+                ),
+            ),
+            Self::ElevationRequired => (
+                None,
+                None,
+                "mandate create needs an elevated (Run as administrator) terminal, so nothing was stored; ask the human to run `agent-mail mandate create` in an elevated terminal"
+                    .to_string(),
+            ),
+            Self::ServiceRequired => (
+                None,
+                None,
+                "agent-mail broker runs only as the Windows service agent-mail, started by the service control manager; run `sc.exe start agent-mail` in an elevated terminal instead"
+                    .to_string(),
+            ),
+            Self::BrokerUnsupported => (
+                None,
+                None,
+                "agent-mail broker exists only on Windows; run the agent-mail commands directly instead"
+                    .to_string(),
+            ),
             Self::HardenedRuntimeMissing => (
                 None,
                 None,
@@ -1147,6 +1233,7 @@ pub fn execute_reporting(
         network: context.network.clone().with_proxy_from_env(env),
         terminal: context.terminal,
         audit: context.audit.clone(),
+        owner: context.owner.clone(),
     };
     let mut invalid_tokens = Vec::new();
     let result = run_command(env, command, context, &mut invalid_tokens);
@@ -1186,6 +1273,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1221,6 +1309,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1254,6 +1343,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1292,6 +1382,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1330,6 +1421,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1393,6 +1485,7 @@ fn run_command(
                     Decision::Denied
                 },
                 reason: result.as_ref().err().map(CoreError::code),
+                sid: context.owner.clone(),
             };
             // Fail closed: no result leaves without its audit entry.
             context
@@ -1450,6 +1543,8 @@ fn mandate_list(context: &Context<'_>) -> Result<MandateListing, CoreError> {
     let mut unreadable = 0;
     for (_, value) in &entries {
         match seal::listing(value) {
+            // Another owner's Mandate is left out, and not counted.
+            Ok(listing) if !context.owns(listing.owner.as_deref()) => {}
             Ok(listing) => listings.push(listing),
             Err(_) => unreadable += 1,
         }
@@ -1486,6 +1581,8 @@ fn mandate_delete(id: &str, context: &Context<'_>) -> Result<DeletedMandate, Cor
     let mut unreadable = 0;
     for (key, value) in &entries {
         match seal::listing(value) {
+            // Another owner's Mandate looks like an unknown ID.
+            Ok(listing) if !context.owns(listing.owner.as_deref()) => {}
             Ok(listing) if listing.id == id => matches.push((key, listing.name)),
             Ok(_) => {}
             Err(_) => unreadable += 1,
@@ -1627,8 +1724,9 @@ fn open_presented(raw: Option<&str>, context: &Context<'_>) -> Result<Presented,
     Ok(presented)
 }
 
-/// The Mandate `text` opens, or `None` if it is malformed, unknown or its
-/// record does not open.
+/// The Mandate `text` opens, or `None` if it is malformed, unknown, its
+/// record does not open, or the context serves only another owner: a
+/// Mandate of someone else is treated exactly as an unknown token.
 fn open_token(text: &str, context: &Context<'_>) -> Result<Option<Mandate>, CoreError> {
     let Ok(token) = AgentToken::parse(text) else {
         return Ok(None);
@@ -1640,7 +1738,10 @@ fn open_token(text: &str, context: &Context<'_>) -> Result<Option<Mandate>, Core
     else {
         return Ok(None);
     };
-    Ok(seal::open(&token, &record).ok())
+    match seal::open_with_owner(&token, &record) {
+        Ok((mandate, owner)) if context.owns(owner.as_deref()) => Ok(Some(mandate)),
+        _ => Ok(None),
+    }
 }
 
 /// The presented tokens for an Agent command: at least one must open, or
@@ -1766,7 +1867,7 @@ fn list(
 
 /// The structured error for a connector failure of `operation` on
 /// `account`, and on `mailbox` for operations on one mailbox.
-fn connector_error(
+pub(crate) fn connector_error(
     error: ImapError,
     operation: Operation,
     account: &str,
@@ -2480,6 +2581,14 @@ mod tests {
                 unreadable: 1,
             },
             CoreError::AuditUnavailable,
+            CoreError::StoreNoLogonSession,
+            CoreError::InvalidRequest,
+            CoreError::BrokerVersionMismatch {
+                broker: "0.1.0".to_string(),
+            },
+            CoreError::ElevationRequired,
+            CoreError::ServiceRequired,
+            CoreError::BrokerUnsupported,
         ];
         for error in errors {
             let message = error.body().message;

@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Results returned when no `--limit` is given.
 pub const DEFAULT_LIMIT: u32 = 20;
@@ -29,7 +29,9 @@ impl fmt::Display for InvalidValue {
 impl std::error::Error for InvalidValue {}
 
 /// A string criterion or mailbox name: any UTF-8 without CR, LF or NUL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Deserialising checks the value again, through [`SearchText::new`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct SearchText(String);
 
 impl SearchText {
@@ -62,8 +64,24 @@ impl SearchText {
     }
 }
 
-/// A calendar date, parsed from `YYYY-MM-DD`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl TryFrom<String> for SearchText {
+    type Error = InvalidValue;
+
+    fn try_from(value: String) -> Result<Self, InvalidValue> {
+        Self::new(value)
+    }
+}
+
+impl From<SearchText> for String {
+    fn from(value: SearchText) -> Self {
+        value.0
+    }
+}
+
+/// A calendar date, parsed from `YYYY-MM-DD`. Serialised in that form, and
+/// deserialising checks it again, through [`Date::parse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct Date {
     year: u16,
     month: u8,
@@ -108,6 +126,20 @@ impl Date {
     }
 }
 
+impl TryFrom<String> for Date {
+    type Error = InvalidValue;
+
+    fn try_from(value: String) -> Result<Self, InvalidValue> {
+        Self::parse(&value)
+    }
+}
+
+impl From<Date> for String {
+    fn from(value: Date) -> Self {
+        format!("{:04}-{:02}-{:02}", value.year, value.month, value.day)
+    }
+}
+
 fn days_in(year: u16, month: u8) -> u8 {
     match month {
         2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
@@ -119,8 +151,10 @@ fn days_in(year: u16, month: u8) -> u8 {
     }
 }
 
-/// How many results a search returns at most: `1..=1000`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How many results a search returns at most: `1..=1000`. Deserialising
+/// checks it again, through [`Limit::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
 pub struct Limit(u32);
 
 impl Limit {
@@ -150,6 +184,20 @@ impl Limit {
     }
 }
 
+impl TryFrom<u32> for Limit {
+    type Error = InvalidValue;
+
+    fn try_from(value: u32) -> Result<Self, InvalidValue> {
+        Self::new(value)
+    }
+}
+
+impl From<Limit> for u32 {
+    fn from(value: Limit) -> Self {
+        value.0
+    }
+}
+
 impl Default for Limit {
     fn default() -> Self {
         Self(DEFAULT_LIMIT)
@@ -157,7 +205,8 @@ impl Default for Limit {
 }
 
 /// One search: a mailbox and criteria, combined with AND.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
     /// The decoded UTF-8 mailbox name, as `list` prints it.
     pub mailbox: SearchText,
@@ -291,7 +340,11 @@ pub struct MessageSummary {
 /// the UTF-8 (including `%`, `/`, `[`, `]`, space and every byte outside
 /// printable ASCII) becomes `%XX` with upper-case hex. So the form always
 /// has exactly three unencoded `/`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialised as its four fields. A deserialised reference is untrusted:
+/// the core checks it again with [`crate::read::is_valid_reference`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageRef {
     /// Login name of the Account.
     pub account: String,

@@ -5,7 +5,7 @@
 //! one of two fixed values; only their canonical IMAP names ever reach the
 //! server, never the Agent's text.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A flag an Agent may set or clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,8 @@ impl Flag {
 }
 
 /// Whether a flag is set or cleared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FlagAction {
     /// Add the flag (`+FLAGS`).
     Set,

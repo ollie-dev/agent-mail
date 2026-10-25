@@ -4,6 +4,7 @@
 //! drive them in-process.
 
 pub mod audit;
+pub mod broker;
 pub mod core;
 pub mod create;
 pub mod draft;
@@ -201,6 +202,9 @@ pub enum CliCommand {
     /// Mandate management is not offered over MCP: the human creates, lists
     /// and deletes Mandates with `agent-mail mandate` in their own terminal.
     Mcp,
+    /// Run as the Windows Broker service; started only by the service control manager
+    #[command(hide = true)]
+    Broker,
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -629,6 +633,7 @@ pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -
                 code: 2,
             };
         }
+        CliCommand::Broker => return crate::broker::run_service(text),
         CliCommand::Mandate {
             text: mandate_text,
             command,
