@@ -45,10 +45,16 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The SID of the built-in Administrators group.
 pub const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
 
-/// The pipe's security descriptor: generic read and write for
-/// authenticated users, full access for the Broker, nothing inherited.
+/// The rights authenticated users get on the pipe: `FILE_GENERIC_READ |
+/// FILE_GENERIC_WRITE` without `FILE_CREATE_PIPE_INSTANCE` (0x4), so they
+/// can talk to the Broker but cannot add a server instance of its pipe.
+pub const PIPE_CLIENT_RIGHTS: u32 = 0x0012_019b;
+
+/// The pipe's security descriptor: read and write, but not creating
+/// instances, for authenticated users ([`PIPE_CLIENT_RIGHTS`]), full access
+/// for the Broker, nothing inherited.
 pub fn pipe_sddl(broker_sid: &str) -> String {
-    format!("D:P(A;;GRGW;;;AU)(A;;GA;;;{broker_sid})")
+    format!("D:P(A;;0x12019b;;;AU)(A;;GA;;;{broker_sid})")
 }
 
 /// The audit folder's security descriptor: owned by the Broker, full

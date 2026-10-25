@@ -456,6 +456,12 @@ pub fn open_audit_log(
     if owner != broker_sid && owner != ADMINISTRATORS_SID {
         return Err(AuditUnavailable);
     }
+    let dacl = object_security(raw(&dir_handle), SE_FILE_OBJECT)
+        .and_then(|s| s.dacl())
+        .map_err(|_| AuditUnavailable)?;
+    if !only_broker_writes(&dacl, broker_sid) {
+        return Err(AuditUnavailable);
+    }
     let (access, disposition) = if append {
         (
             FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
@@ -470,7 +476,9 @@ pub fn open_audit_log(
         CreateFileW(
             name.as_ptr(),
             access,
-            FILE_SHARE_READ,
+            // Other Broker threads append and read at the same time. No
+            // FILE_SHARE_DELETE: the open file cannot be renamed away.
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             disposition,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -493,6 +501,35 @@ pub fn open_audit_log(
         return Err(AuditUnavailable);
     }
     Ok(Some(File::from(file)))
+}
+
+/// Rights on a folder that let a trustee change what it holds or who may
+/// use it: write or append data (add a file or subfolder), write extended
+/// attributes or attributes, delete a child, delete, `WRITE_DAC`,
+/// `WRITE_OWNER`, and the generic write and all rights.
+const FOLDER_WRITE_RIGHTS: u32 = 0x0002
+    | 0x0004
+    | 0x0010
+    | 0x0040
+    | 0x0100
+    | 0x0001_0000
+    | 0x0004_0000
+    | 0x0008_0000
+    | 0x1000_0000
+    | 0x4000_0000;
+
+/// Whether `dacl` lets only `broker_sid` change the audit folder: it is
+/// protected from inheritance, holds only allow and deny entries, and no
+/// allow entry for another SID grants any of [`FOLDER_WRITE_RIGHTS`]. A
+/// folder created under `%ProgramData%` by anyone else inherits entries
+/// that let users add files, so it is refused.
+fn only_broker_writes(dacl: &Dacl, broker_sid: &str) -> bool {
+    dacl.protected
+        && dacl.aces.iter().all(|ace| match ace.kind {
+            ACCESS_DENIED => true,
+            ACCESS_ALLOWED => ace.sid == broker_sid || ace.mask & FOLDER_WRITE_RIGHTS == 0,
+            _ => false,
+        })
 }
 
 /// A manual-reset event that tells the pipe server, and every connection,
@@ -703,6 +740,13 @@ fn create_pipe(name: &str, broker_sid: &str, first: bool) -> io::Result<OwnedHan
 #[cfg(any(test, feature = "test-support"))]
 pub fn create_test_pipe(name: &str) -> io::Result<OwnedHandle> {
     create_pipe(name, &current_user_sid()?, true)
+}
+
+/// Creates an instance of the pipe `name` with the Broker's access list for
+/// `broker_sid`, as the first instance or as a later one. Test builds only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn create_test_pipe_for(name: &str, broker_sid: &str, first: bool) -> io::Result<OwnedHandle> {
+    create_pipe(name, broker_sid, first)
 }
 
 /// Connects to the pipe `name` as a client, at identification level: the

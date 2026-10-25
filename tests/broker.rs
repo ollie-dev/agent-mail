@@ -92,7 +92,7 @@ fn ac1_broker_outside_the_service_manager_prints_one_json_error() {
 fn ac2_pipe_sddl_is_exact() {
     assert_eq!(
         broker::pipe_sddl("S-1-5-80-1-2-3-4-5"),
-        "D:P(A;;GRGW;;;AU)(A;;GA;;;S-1-5-80-1-2-3-4-5)"
+        "D:P(A;;0x12019b;;;AU)(A;;GA;;;S-1-5-80-1-2-3-4-5)"
     );
 }
 
@@ -523,8 +523,8 @@ mod windows {
     use super::*;
     use agent_mail::audit::{Decision, Entry};
     use agent_mail::broker::windows::{
-        self as win, StopSignal, connect, create_test_pipe, current_user_sid, path_dacl,
-        path_owner, pipe_dacl,
+        self as win, StopSignal, connect, create_test_pipe, create_test_pipe_for, current_user_sid,
+        path_dacl, path_owner, pipe_dacl,
     };
     use agent_mail::imap::Network;
     use std::path::{Path, PathBuf};
@@ -587,8 +587,6 @@ mod windows {
     const FILE_GENERIC_READ: u32 = 0x0012_0089;
     const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
     const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
-    const GENERIC_READ: u32 = 0x8000_0000;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
     const GENERIC_ALL: u32 = 0x1000_0000;
 
     #[test]
@@ -633,12 +631,12 @@ mod windows {
             (users.kind, users.sid.as_str()),
             (win::ACCESS_ALLOWED, "S-1-5-11")
         );
-        assert!(
-            [
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE
-            ]
-            .contains(&users.mask),
+        // Read and write, but never FILE_CREATE_PIPE_INSTANCE (0x4).
+        assert_eq!(users.mask, broker::PIPE_CLIENT_RIGHTS, "{users:?}");
+        assert_eq!(users.mask & 0x4, 0, "{users:?}");
+        assert_eq!(
+            users.mask,
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE) & !0x4,
             "{users:?}"
         );
         let own = &dacl.aces[1];
@@ -652,6 +650,66 @@ mod windows {
         );
         // FILE_FLAG_FIRST_PIPE_INSTANCE: a second server cannot create it.
         assert!(create_test_pipe(&name).is_err());
+    }
+
+    #[test]
+    fn ac2_authenticated_users_cannot_add_an_instance_of_the_pipe() {
+        // With a foreign Broker SID this process is only an authenticated
+        // user on the pipe, as any other local user would be.
+        let name = test_pipe();
+        let foreign = "S-1-5-80-1-2-3-4-5";
+        let _broker = create_test_pipe_for(&name, foreign, true).unwrap();
+        let error = create_test_pipe_for(&name, foreign, false)
+            .expect_err("an authenticated user added a pipe instance");
+        assert_eq!(error.raw_os_error(), Some(5), "{error:?}");
+
+        // The Broker itself, with full access, can add its instances.
+        let own = test_pipe();
+        let sid = current_user_sid().unwrap();
+        let _first = create_test_pipe_for(&own, &sid, true).unwrap();
+        assert!(create_test_pipe_for(&own, &sid, false).is_ok());
+    }
+
+    #[test]
+    fn ac8_concurrent_appends_and_reads_of_the_broker_log_all_succeed() {
+        let base = program_data();
+        let sid = current_user_sid().unwrap();
+        let log = AuditLog::broker_at(&base, &sid);
+        log.append(&entry()).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..10 {
+                        log.append(&entry()).unwrap();
+                        assert!(log.lines().is_ok());
+                    }
+                });
+            }
+        });
+        // A read and another append while an appender holds its handle.
+        let path = base.join("agent-mail").join("audit.log");
+        let held = win::open_audit_log(&path, &sid, true).unwrap().unwrap();
+        log.append(&entry()).unwrap();
+        let lines = log.lines().unwrap();
+        drop(held);
+        assert_eq!(lines.len(), 82);
+        assert!(lines.iter().all(|l| *l == entry().to_line().trim_end()));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ac8_a_folder_with_an_inherited_dacl_is_refused() {
+        // A folder anyone else made under %ProgramData% inherits entries
+        // that let users add files, whoever owns it.
+        let base = program_data();
+        let dir = base.join("agent-mail");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(!path_dacl(&dir).unwrap().protected);
+        let log = AuditLog::broker_at(&base, &current_user_sid().unwrap());
+        assert!(log.append(&entry()).is_err());
+        assert!(log.lines().is_err());
+        assert!(!dir.join("audit.log").exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

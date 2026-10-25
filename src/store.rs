@@ -310,7 +310,7 @@ mod credential_manager {
     /// persisted `CRED_PERSIST_LOCAL_MACHINE`, laid out as
     /// [`super::credential_layout`] describes. The credentials belong to the
     /// account the process runs as: in the Broker (ADR-0004) that is the
-    /// service account `NT SERVICEgent-mail`, out of reach of the user's
+    /// service account `NT SERVICE\agent-mail`, out of reach of the user's
     /// own processes; in-process, any program of the same user can read them.
     #[derive(Debug, Default, Clone, Copy)]
     pub struct CredentialManagerStore;
