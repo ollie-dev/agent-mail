@@ -125,9 +125,13 @@ impl<S: MandateStore> MandateStore for GuardedStore<S> {
 #[cfg(target_os = "macos")]
 pub type RuntimeStore = KeychainStore;
 
+/// The store a release build uses: Credential Manager on Windows.
+#[cfg(windows)]
+pub type RuntimeStore = CredentialManagerStore;
+
 /// The store a release build uses: none yet on this OS, so every token is
 /// unknown and storing fails with `store_unavailable`.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub type RuntimeStore = EmptyStore;
 
 /// A store that holds nothing and refuses writes. Used where no OS credential
@@ -150,6 +154,352 @@ impl MandateStore for EmptyStore {
 
     fn entries(&self) -> Result<Vec<Entry>, StoreError> {
         Ok(Vec::new())
+    }
+}
+
+/// How the Windows Credential Manager store lays out a record. Pure
+/// functions, compiled on every OS so they are tested everywhere.
+///
+/// One generic credential per record, target name `agent-mail:` followed by
+/// the base64url (no padding) store key. A credential blob holds at most
+/// [`BLOB_LIMIT`] bytes, so a longer value is split: the first part under
+/// `agent-mail:<key>`, later parts under `agent-mail:<key>#1`,
+/// `agent-mail:<key>#2`, and so on. The first part starts with the number of
+/// parts as a big-endian `u16`.
+pub mod credential_layout {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    use super::StoreError;
+
+    /// Every agent-mail target name starts with this.
+    pub const TARGET_PREFIX: &str = "agent-mail:";
+    /// Credential Manager's blob limit (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).
+    pub const BLOB_LIMIT: usize = 2560;
+    /// Bytes at the start of the first part holding the part count.
+    pub const HEADER_LEN: usize = 2;
+
+    /// The target name of a record's first part.
+    pub fn target_name(key: &[u8]) -> String {
+        format!("{TARGET_PREFIX}{}", URL_SAFE_NO_PAD.encode(key))
+    }
+
+    /// The target name of part `index` (0 is the first part).
+    pub fn part_target(key: &[u8], index: usize) -> String {
+        let first = target_name(key);
+        if index == 0 {
+            first
+        } else {
+            format!("{first}#{index}")
+        }
+    }
+
+    /// The target names of a record of `parts` parts, in order.
+    pub fn target_names(key: &[u8], parts: usize) -> Vec<String> {
+        (0..parts).map(|i| part_target(key, i)).collect()
+    }
+
+    /// Splits `value` into blobs of at most [`BLOB_LIMIT`] bytes, the first
+    /// starting with the part count. Fails if the value needs more parts
+    /// than the count can record.
+    pub fn split(value: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+        let first_len = value.len().min(BLOB_LIMIT - HEADER_LEN);
+        let (head, rest) = value.split_at(first_len);
+        let count = 1 + rest.len().div_ceil(BLOB_LIMIT);
+        let count = u16::try_from(count).map_err(|_| StoreError::Unavailable)?;
+        let mut first = count.to_be_bytes().to_vec();
+        first.extend_from_slice(head);
+        let mut parts = vec![first];
+        parts.extend(rest.chunks(BLOB_LIMIT).map(<[u8]>::to_vec));
+        Ok(parts)
+    }
+
+    /// The part count recorded in a first part.
+    pub fn part_count(first: &[u8]) -> Result<usize, StoreError> {
+        match first {
+            [high, low, ..] if first.len() <= BLOB_LIMIT => {
+                match usize::from(u16::from_be_bytes([*high, *low])) {
+                    0 => Err(StoreError::Unavailable),
+                    count => Ok(count),
+                }
+            }
+            _ => Err(StoreError::Unavailable),
+        }
+    }
+
+    /// Joins the parts [`split`] made back into the value. Fails if a part
+    /// is missing, extra or too long.
+    pub fn join(parts: &[Vec<u8>]) -> Result<Vec<u8>, StoreError> {
+        let first = parts.first().ok_or(StoreError::Unavailable)?;
+        if part_count(first)? != parts.len() || parts.iter().any(|p| p.len() > BLOB_LIMIT) {
+            return Err(StoreError::Unavailable);
+        }
+        let mut value = first[HEADER_LEN..].to_vec();
+        for part in &parts[1..] {
+            value.extend_from_slice(part);
+        }
+        Ok(value)
+    }
+
+    /// What a target name under [`TARGET_PREFIX`] is.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Target {
+        /// The first part of the record filed under this store key.
+        Record(Vec<u8>),
+        /// A later part of a record.
+        Part,
+        /// A name that does not decode: not filed by agent-mail.
+        Foreign,
+    }
+
+    /// Classifies a target name; `None` if it is not under the prefix.
+    pub fn classify(name: &str) -> Option<Target> {
+        let rest = name.strip_prefix(TARGET_PREFIX)?;
+        let decodes = |encoded: &str| URL_SAFE_NO_PAD.decode(encoded).ok();
+        Some(match rest.split_once('#') {
+            None => decodes(rest).map_or(Target::Foreign, Target::Record),
+            Some((encoded, index)) => {
+                let index_ok = !index.starts_with('0')
+                    && !index.is_empty()
+                    && index.bytes().all(|b| b.is_ascii_digit());
+                if index_ok && decodes(encoded).is_some() {
+                    Target::Part
+                } else {
+                    Target::Foreign
+                }
+            }
+        })
+    }
+}
+
+#[cfg(windows)]
+pub use credential_manager::CredentialManagerStore;
+
+#[cfg(windows)]
+mod credential_manager {
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
+    use windows_sys::Win32::Security::Credentials::{
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredEnumerateW,
+        CredFree, CredReadW, CredWriteW,
+    };
+
+    use super::credential_layout::{
+        TARGET_PREFIX, Target, classify, join, part_count, part_target, split, target_name,
+        target_names,
+    };
+    use super::{Entry, MandateStore, StoreError};
+
+    /// Windows Credential Manager: one generic credential per Mandate,
+    /// persisted `CRED_PERSIST_LOCAL_MACHINE`, laid out as
+    /// [`super::credential_layout`] describes. Any program running as the
+    /// same user can read these credentials (ADR-0002).
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct CredentialManagerStore;
+
+    /// `s` as a NUL-terminated UTF-16 string.
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// The NUL-terminated UTF-16 string at `p`.
+    ///
+    /// # Safety
+    /// `p` is null or points to a NUL-terminated UTF-16 string.
+    unsafe fn from_wide(p: *const u16) -> String {
+        if p.is_null() {
+            return String::new();
+        }
+        let mut len = 0;
+        // SAFETY: the string is NUL-terminated, so every read up to and
+        // including the NUL is in bounds.
+        while unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` units were just read.
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
+    }
+
+    /// The blob of the generic credential `target`, if it exists.
+    fn read(target: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let name = wide(target);
+        let mut credential: *mut CREDENTIALW = ptr::null_mut();
+        // SAFETY: `name` is NUL-terminated; `credential` receives a buffer
+        // freed below with CredFree.
+        let ok = unsafe { CredReadW(name.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+        if ok == 0 {
+            // SAFETY: no preconditions.
+            return match unsafe { GetLastError() } {
+                ERROR_NOT_FOUND => Ok(None),
+                _ => Err(StoreError::Unavailable),
+            };
+        }
+        // SAFETY: on success `credential` points to a valid CREDENTIALW whose
+        // blob holds `CredentialBlobSize` bytes.
+        let blob = unsafe {
+            let c = &*credential;
+            if c.CredentialBlob.is_null() || c.CredentialBlobSize == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec()
+            }
+        };
+        // SAFETY: the buffer came from CredReadW and is freed once.
+        unsafe { CredFree(credential.cast()) };
+        Ok(Some(blob))
+    }
+
+    /// Writes the generic credential `target`. Callers check first that it
+    /// does not exist: CredWriteW itself would replace it.
+    fn write(target: &str, blob: &[u8]) -> Result<(), StoreError> {
+        let mut name = wide(target);
+        let size = u32::try_from(blob.len()).map_err(|_| StoreError::Unavailable)?;
+        let credential = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: name.as_mut_ptr(),
+            CredentialBlobSize: size,
+            // CredWriteW only reads the blob.
+            CredentialBlob: blob.as_ptr().cast_mut(),
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            ..Default::default()
+        };
+        // SAFETY: every pointer in `credential` is valid for the call.
+        if unsafe { CredWriteW(&credential, 0) } == 0 {
+            Err(StoreError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Deletes the generic credential `target`. Returns whether it existed.
+    fn remove(target: &str) -> Result<bool, StoreError> {
+        let name = wide(target);
+        // SAFETY: `name` is NUL-terminated.
+        if unsafe { CredDeleteW(name.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
+            return Ok(true);
+        }
+        // SAFETY: no preconditions.
+        match unsafe { GetLastError() } {
+            ERROR_NOT_FOUND => Ok(false),
+            _ => Err(StoreError::Unavailable),
+        }
+    }
+
+    /// The target name of every generic credential under `agent-mail:`.
+    /// Reads no blob.
+    fn target_names_under_prefix() -> Result<Vec<String>, StoreError> {
+        let filter = wide(&format!("{TARGET_PREFIX}*"));
+        let mut count = 0u32;
+        let mut credentials: *mut *mut CREDENTIALW = ptr::null_mut();
+        // SAFETY: `filter` is NUL-terminated; `credentials` receives an
+        // array of `count` pointers freed below with CredFree.
+        let ok = unsafe { CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut credentials) };
+        if ok == 0 {
+            // SAFETY: no preconditions.
+            return match unsafe { GetLastError() } {
+                ERROR_NOT_FOUND => Ok(Vec::new()),
+                _ => Err(StoreError::Unavailable),
+            };
+        }
+        let mut names = Vec::new();
+        for i in 0..count as usize {
+            // SAFETY: the array holds `count` valid CREDENTIALW pointers.
+            let credential = unsafe { &**credentials.add(i) };
+            if credential.Type == CRED_TYPE_GENERIC {
+                // SAFETY: TargetName is a NUL-terminated string.
+                names.push(unsafe { from_wide(credential.TargetName) });
+            }
+        }
+        // SAFETY: the array came from CredEnumerateW and is freed once.
+        unsafe { CredFree(credentials.cast()) };
+        Ok(names)
+    }
+
+    impl CredentialManagerStore {
+        /// The target name of every generic credential whose name starts
+        /// with `agent-mail:` (`CredEnumerateW`), including later parts and
+        /// names that do not decode. Reads no value.
+        pub fn target_names(&self) -> Result<Vec<String>, StoreError> {
+            target_names_under_prefix()
+        }
+    }
+
+    impl MandateStore for CredentialManagerStore {
+        /// Reads the first part, then each later part it records. A missing
+        /// part is an error.
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+            let Some(first) = read(&target_name(key))? else {
+                return Ok(None);
+            };
+            let count = part_count(&first)?;
+            let mut parts = vec![first];
+            for index in 1..count {
+                parts.push(read(&part_target(key, index))?.ok_or(StoreError::Unavailable)?);
+            }
+            join(&parts).map(Some)
+        }
+
+        /// Add-only: fails without writing if any of the record's target
+        /// names already exists, so no item is ever replaced. Later parts are
+        /// written first and the first part last, so a record is only found
+        /// once complete; on failure the parts written are removed.
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+            let parts = split(value)?;
+            let names = target_names(key, parts.len());
+            for name in &names {
+                if read(name)?.is_some() {
+                    return Err(StoreError::Unavailable);
+                }
+            }
+            let mut written: Vec<&str> = Vec::new();
+            let order = (1..parts.len()).chain(std::iter::once(0));
+            for index in order {
+                if let Err(e) = write(&names[index], &parts[index]) {
+                    for name in written {
+                        let _ = remove(name);
+                    }
+                    return Err(e);
+                }
+                written.push(&names[index]);
+            }
+            Ok(())
+        }
+
+        /// Removes the later parts, then the first part.
+        fn delete(&self, key: &[u8]) -> Result<bool, StoreError> {
+            let Some(first) = read(&target_name(key))? else {
+                return Ok(false);
+            };
+            // A first part whose count is unreadable has no parts we know of.
+            let count = part_count(&first).unwrap_or(1);
+            for index in (1..count).rev() {
+                remove(&part_target(key, index))?;
+            }
+            remove(&target_name(key))
+        }
+
+        /// Every record under `agent-mail:`. A record that cannot be read
+        /// (e.g. a part is missing) is returned with an empty value, and a
+        /// name that does not decode is returned as its raw bytes with an
+        /// empty value, so both are counted as unreadable, never dropped
+        /// and never targeted. Later parts are not records.
+        fn entries(&self) -> Result<Vec<Entry>, StoreError> {
+            let mut entries = Vec::new();
+            for name in target_names_under_prefix()? {
+                match classify(&name) {
+                    Some(Target::Record(key)) => match self.get(&key) {
+                        Ok(Some(value)) => entries.push((key, value)),
+                        // Deleted since the enumeration: no longer held.
+                        Ok(None) => {}
+                        Err(_) => entries.push((key, Vec::new())),
+                    },
+                    Some(Target::Foreign) => entries.push((name.into_bytes(), Vec::new())),
+                    Some(Target::Part) | None => {}
+                }
+            }
+            Ok(entries)
+        }
     }
 }
 

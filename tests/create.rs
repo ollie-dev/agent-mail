@@ -793,15 +793,14 @@ fn ac11_real_terminal_writes_the_token_to_dev_tty_only() {
         .split("\n}\n")
         .next()
         .unwrap();
-    let writer = source
+    // One writer per OS (Unix and Windows).
+    let writers: Vec<&str> = source
         .split("fn write_tty(")
-        .nth(1)
-        .expect("write_tty")
-        .split("\n}\n")
-        .next()
-        .unwrap();
+        .skip(1)
+        .map(|w| w.split("\n}\n").next().unwrap())
+        .collect();
+    assert_eq!(writers.len(), 2, "write_tty");
     assert!(source.contains("const TTY_PATH: &str = \"/dev/tty\";"));
-    assert!(writer.contains(".open(TTY_PATH)"));
     let reveal = real
         .split("fn reveal(")
         .nth(1)
@@ -809,6 +808,40 @@ fn ac11_real_terminal_writes_the_token_to_dev_tty_only() {
     assert!(reveal.contains("write_tty("));
     for forbidden in ["stdout", "stderr", "print!", "println!", "eprint"] {
         assert!(!reveal.contains(forbidden), "reveal uses {forbidden}");
-        assert!(!writer.contains(forbidden), "write_tty uses {forbidden}");
     }
+    for writer in writers {
+        assert!(writer.contains(".open(TTY_PATH)"));
+        for forbidden in ["stdout", "stderr", "print!", "println!", "eprint"] {
+            assert!(!writer.contains(forbidden), "write_tty uses {forbidden}");
+        }
+    }
+}
+
+#[test]
+fn job024_ac1e_controlling_terminal_is_conout_on_windows_and_dev_tty_on_unix() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terminal.rs"),
+    )
+    .unwrap();
+    let after_cfg = |cfg: &str, item: &str| {
+        source
+            .split(cfg)
+            .skip(1)
+            .any(|rest| rest.lines().next() == Some(item))
+    };
+    for (cfg, item) in [
+        ("#[cfg(unix)]\n", "const TTY_PATH: &str = \"/dev/tty\";"),
+        ("#[cfg(windows)]\n", "const TTY_PATH: &str = \"CONOUT$\";"),
+        (
+            "#[cfg(unix)]\n",
+            "fn write_tty(text: &str) -> std::io::Result<()> {",
+        ),
+        (
+            "#[cfg(windows)]\n",
+            "fn write_tty(text: &str) -> std::io::Result<()> {",
+        ),
+    ] {
+        assert!(after_cfg(cfg, item), "{item} is not under {cfg:?}");
+    }
+    assert_eq!(source.matches("const TTY_PATH").count(), 2);
 }

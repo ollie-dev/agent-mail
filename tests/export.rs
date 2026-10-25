@@ -789,17 +789,18 @@ fn export_never_overwrites_or_follows_a_symlink() {
     let dir = TempDir::new();
     let existing = dir.write("existing.toml", "keep me");
     let target = dir.write("target.txt", "untouched");
-    let link = dir.join("link.toml");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
     let fresh = dir.join("fresh.toml");
 
     let mut answers = ac1_answers(server.port);
-    answers.extend([
-        yes(),
-        Answer::text(existing.to_str().unwrap()),
-        Answer::text(link.to_str().unwrap()),
-        Answer::text(fresh.to_str().unwrap()),
-    ]);
+    answers.extend([yes(), Answer::text(existing.to_str().unwrap())]);
+    // Creating a symbolic link needs extra rights on Windows.
+    #[cfg(unix)]
+    {
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        answers.push(Answer::text(link.to_str().unwrap()));
+    }
+    answers.push(Answer::text(fresh.to_str().unwrap()));
     let session = create(None, answers, &store, &[&server]);
     session.assert_completed();
 
@@ -810,7 +811,7 @@ fn export_never_overwrites_or_follows_a_symlink() {
         .iter()
         .filter(|e| e.kind == Kind::Message && e.text.contains("already exists"))
         .count();
-    assert_eq!(refusals, 2);
+    assert_eq!(refusals, if cfg!(unix) { 2 } else { 1 });
     assert!(MandateFile::from_toml(&std::fs::read_to_string(&fresh).unwrap()).is_ok());
 }
 
@@ -868,14 +869,17 @@ fn from_must_name_a_regular_file_and_is_never_opened_otherwise() {
     let dir = TempDir::new();
     assert_refused(&dir.0, &["is not a regular file"], &server);
     // Opening a FIFO for reading would block until a writer appears; the
-    // check before opening refuses it at once.
-    let fifo = dir.join("pipe.toml");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap();
-    assert!(made.success());
-    assert_refused(&fifo, &["is not a regular file"], &server);
+    // check before opening refuses it at once. FIFOs are Unix-only.
+    #[cfg(unix)]
+    {
+        let fifo = dir.join("pipe.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_refused(&fifo, &["is not a regular file"], &server);
+    }
 }
 
 #[test]

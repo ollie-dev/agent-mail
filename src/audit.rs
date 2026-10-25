@@ -235,10 +235,13 @@ pub enum Platform {
     MacOs,
     /// The XDG base directory convention.
     OtherUnix,
+    /// The Local AppData known folder; `home` is that folder.
+    Windows,
 }
 
 /// The log path under `home` on `platform`. On other Unix,
-/// `xdg_data_home` is used when it is set to an absolute path.
+/// `xdg_data_home` is used when it is set to an absolute path. On Windows
+/// `home` is the Local AppData folder.
 pub fn log_path(platform: Platform, home: &Path, xdg_data_home: Option<&OsStr>) -> PathBuf {
     let data = match platform {
         Platform::MacOs => home.join("Library").join("Application Support"),
@@ -246,6 +249,7 @@ pub fn log_path(platform: Platform, home: &Path, xdg_data_home: Option<&OsStr>) 
             Some(dir) if dir.is_absolute() => dir.to_path_buf(),
             _ => home.join(".local").join("share"),
         },
+        Platform::Windows => home.to_path_buf(),
     };
     data.join(APP_DIR).join(FILE_NAME)
 }
@@ -253,6 +257,7 @@ pub fn log_path(platform: Platform, home: &Path, xdg_data_home: Option<&OsStr>) 
 /// The log path for the running user. On macOS the home directory comes
 /// from the user database, never from `$HOME`, so it cannot be redirected
 /// through the environment.
+#[cfg(unix)]
 pub fn platform_path() -> Option<PathBuf> {
     let home = home_from_user_database()?;
     if cfg!(target_os = "macos") {
@@ -261,6 +266,49 @@ pub fn platform_path() -> Option<PathBuf> {
         let xdg = std::env::var_os("XDG_DATA_HOME");
         Some(log_path(Platform::OtherUnix, &home, xdg.as_deref()))
     }
+}
+
+/// The log path for the running user, under the Local AppData known folder
+/// (`SHGetKnownFolderPath`), not an environment variable.
+#[cfg(windows)]
+pub fn platform_path() -> Option<PathBuf> {
+    let base = local_app_data()?;
+    Some(log_path(Platform::Windows, &base, None))
+}
+
+/// No known per-user data directory on this OS.
+#[cfg(not(any(unix, windows)))]
+pub fn platform_path() -> Option<PathBuf> {
+    None
+}
+
+/// The Local AppData known folder (`FOLDERID_LocalAppData`).
+#[cfg(windows)]
+fn local_app_data() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
+
+    let mut raw: *mut u16 = std::ptr::null_mut();
+    // SAFETY: valid pointers; the returned string is freed below with
+    // CoTaskMemFree, which the API requires even on failure.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut raw) };
+    let path = if hr >= 0 && !raw.is_null() {
+        let mut len = 0;
+        // SAFETY: on success `raw` is a NUL-terminated UTF-16 string.
+        while unsafe { *raw.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` units were just read.
+        let wide = unsafe { std::slice::from_raw_parts(raw, len) };
+        Some(PathBuf::from(std::ffi::OsString::from_wide(wide)))
+    } else {
+        None
+    };
+    // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
+    unsafe { CoTaskMemFree(raw.cast_const().cast()) };
+    path.filter(|p| p.is_absolute())
 }
 
 /// The real user's home directory from the user database (`getpwuid_r`).
@@ -301,12 +349,6 @@ fn home_from_user_database() -> Option<PathBuf> {
     }
 }
 
-/// No user database outside Unix; the Windows location comes later.
-#[cfg(not(unix))]
-fn home_from_user_database() -> Option<PathBuf> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +370,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn other_unix_path_follows_xdg_data_home() {
         let home = Path::new("/home/alice");
@@ -352,6 +395,7 @@ mod tests {
         assert!(path.ends_with("agent-mail/audit.log"));
     }
 
+    #[cfg(unix)]
     fn sample() -> Entry {
         Entry {
             time: "2026-10-21T09:30:15Z".to_string(),

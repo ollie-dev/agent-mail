@@ -47,6 +47,18 @@ libc = "0.2"
 core-foundation = "0.10"
 security-framework = "3"
 
+[target.'cfg(windows)'.dependencies]
+# Credential Manager (CredReadW, CredWriteW, CredDeleteW, CredEnumerateW) for
+# the Mandate store, the Local AppData known folder for the audit log, and
+# WriteConsoleW for the console messages of `mandate create`.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_UI_Shell",
+] }
+
 [profile.release]
 # The hardened-runtime self-check is skipped when debug assertions are on:
 # keep them off in every release build.
