@@ -3,9 +3,9 @@
 //! the Windows Broker (ADR-0004), to `%ProgramData%\agent-mail\audit.log`.
 //!
 //! An [`Entry`] has only the fields below, none of which can hold a
-//! Credential, an Agent Token, a token hash or a message body. In-process,
-//! no agent-mail command reads the log back; the human opens the file. The
-//! Broker returns each caller the entries carrying the caller's own SID.
+//! Credential, an Agent Token, a token hash or a message body.
+//! `agent-mail audit` reads it back: in-process the whole per-user log,
+//! and through the Broker only the entries carrying the caller's own SID.
 
 use std::ffi::OsStr;
 use std::fs::{DirBuilder, OpenOptions};
@@ -277,12 +277,36 @@ impl AuditLog {
     }
 }
 
-/// The file at `path` opened for reading, or `None` if it does not exist.
+/// The file at `path` opened for reading, or `None` if it or its
+/// directory does not exist. On Unix, neither the log's own directory nor
+/// the file may be a symbolic link, and the file must be a regular file.
 fn open_existing(path: &Path) -> Result<Option<std::fs::File>, AuditUnavailable> {
-    match std::fs::File::open(path) {
-        Ok(file) => Ok(Some(file)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(AuditUnavailable),
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(AuditUnavailable);
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(AuditUnavailable),
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(AuditUnavailable),
+    };
+    match file.metadata() {
+        Ok(meta) if meta.is_file() => Ok(Some(file)),
+        _ => Err(AuditUnavailable),
     }
 }
 

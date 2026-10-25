@@ -958,3 +958,28 @@ fn job024_ac9_token_values_in_the_top_part_are_placeholders() {
         assert!(is_placeholder(&token), "README token value {token:?}");
     }
 }
+
+#[test]
+fn job026_ac6_readme_records_whether_the_sandbox_reaches_the_pipe() {
+    let section = readme_section("## Sandbox and proxies");
+    let pipe = paragraph_with(&section, r"`\\.\pipe\agent-mail`");
+    assert!(pipe.contains("broker_unavailable"), "{pipe}");
+    assert!(pipe.contains("agent-mail mcp"), "{pipe}");
+    for block in section.split("\n\n") {
+        // The section's code blocks hold no blank line.
+        if block.trim_start().starts_with("```") {
+            assert!(block.trim_end().ends_with("```"), "{block}");
+            continue;
+        }
+        // Each list item is its own paragraph.
+        for item in format!("\n{block}").split("\n- ") {
+            let joined: Vec<&str> = item.lines().map(str::trim).collect();
+            let text = joined.join(" ");
+            assert!(
+                text.trim().chars().count() <= 300,
+                "a paragraph of {} characters: {text}",
+                text.trim().chars().count()
+            );
+        }
+    }
+}

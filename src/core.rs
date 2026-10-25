@@ -46,6 +46,10 @@ pub struct Context<'a> {
     /// whose authenticated listing names this owner open or are listed or
     /// deleted, and every audit entry carries it. `None` in-process.
     pub(crate) owner: Option<String>,
+    /// The Broker route (ADR-0004): when set, every command is sent to the
+    /// Broker instead of running here, and the store is never touched.
+    /// Set only by Broker clients, never inside the Broker.
+    pub(crate) broker: Option<crate::client::Route<'a>>,
 }
 
 impl<'a> Context<'a> {
@@ -58,6 +62,7 @@ impl<'a> Context<'a> {
             terminal: &NoTerminal,
             audit: AuditLog::platform(),
             owner: None,
+            broker: None,
         }
     }
 
@@ -80,6 +85,26 @@ impl<'a> Context<'a> {
     /// The same context, talking to the human through `terminal`.
     pub fn with_terminal(self, terminal: &'a dyn Terminal) -> Self {
         Self { terminal, ..self }
+    }
+
+    /// The same context, sending every command to the Broker through
+    /// `connector` instead of running it here (the Windows clients).
+    pub fn with_broker(self, connector: &'a dyn crate::client::Connector) -> Self {
+        Self {
+            broker: Some(crate::client::Route::new(connector)),
+            ..self
+        }
+    }
+
+    /// The same context with a fixed answer to the client's elevation
+    /// check, instead of the process token's. Needs a Broker route. Test
+    /// builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_elevation(self, elevated: bool) -> Self {
+        Self {
+            broker: self.broker.map(|route| route.with_elevation(elevated)),
+            ..self
+        }
     }
 
     /// A test context trusting only `roots`, such as the fake server's CA,
@@ -506,9 +531,13 @@ pub enum CoreError {
     InvalidRequest,
     /// The client and the Broker are different versions.
     BrokerVersionMismatch {
-        /// The Broker's version.
-        broker: String,
+        /// The Broker's version, when known and safe to show.
+        broker: Option<String>,
     },
+    /// The client could not reach the Broker's pipe, the pipe's server is
+    /// not the Broker, or the Broker ended the connection or sent a reply
+    /// that cannot be read.
+    BrokerUnavailable,
     /// `create` came from a client token below high integrity.
     ElevationRequired,
     /// `agent-mail broker` was not started by the service control manager.
@@ -561,6 +590,8 @@ pub enum CoreError {
     },
     /// The audit entry could not be appended, so the result was withheld.
     AuditUnavailable,
+    /// `agent-mail audit` could not read the audit log.
+    AuditUnreadable,
 }
 
 impl From<StoreError> for CoreError {
@@ -640,6 +671,7 @@ impl CoreError {
             Self::StoreNoLogonSession => "store_no_logon_session",
             Self::InvalidRequest => "invalid_request",
             Self::BrokerVersionMismatch { .. } => "broker_version_mismatch",
+            Self::BrokerUnavailable => "broker_unavailable",
             Self::ElevationRequired => "elevation_required",
             Self::ServiceRequired => "service_required",
             Self::BrokerUnsupported => "unsupported",
@@ -652,7 +684,7 @@ impl CoreError {
             Self::NotFound { .. } => "not_found",
             Self::RevocationIncomplete { .. } => "revocation_incomplete",
             Self::InvalidMandateFile { .. } => "invalid_mandate_file",
-            Self::AuditUnavailable => "audit_unavailable",
+            Self::AuditUnavailable | Self::AuditUnreadable => "audit_unavailable",
         }
     }
 
@@ -1039,13 +1071,24 @@ impl CoreError {
                 None,
                 None,
                 format!(
-                    "this agent-mail binary and the agent-mail service (version {broker}) are different versions, so the request was refused; ask the human to reinstall agent-mail from {RELEASES_URL}"
+                    "this agent-mail binary (version {}) and the agent-mail service{} are different versions, so the request was refused; ask the human to rerun install.ps1 to install one version of both",
+                    crate::broker::VERSION,
+                    broker
+                        .as_deref()
+                        .map(|b| format!(" (version {b})"))
+                        .unwrap_or_default()
                 ),
+            ),
+            Self::BrokerUnavailable => (
+                None,
+                None,
+                "the agent-mail service could not be reached, so nothing was done; ask the human to start it with `sc.exe start agent-mail` in an elevated terminal, or to rerun install.ps1 if it is missing"
+                    .to_string(),
             ),
             Self::ElevationRequired => (
                 None,
                 None,
-                "mandate create needs an elevated (Run as administrator) terminal, so nothing was stored; ask the human to run `agent-mail mandate create` in an elevated terminal"
+                "mandate create needs an elevated terminal on Windows, so nothing was stored; run `agent-mail mandate create` again in an elevated (Run as administrator) terminal"
                     .to_string(),
             ),
             Self::ServiceRequired => (
@@ -1138,6 +1181,12 @@ impl CoreError {
                 None,
                 None,
                 "the call could not be recorded in the audit log, so no result is returned; ask the human to check that the agent-mail data directory is writable"
+                    .to_string(),
+            ),
+            Self::AuditUnreadable => (
+                None,
+                None,
+                "the audit log could not be read, so no entries are shown; check that the agent-mail data directory and its audit.log are readable and not symbolic links"
                     .to_string(),
             ),
         };
@@ -1234,6 +1283,7 @@ pub fn execute_reporting(
         terminal: context.terminal,
         audit: context.audit.clone(),
         owner: context.owner.clone(),
+        broker: context.broker,
     };
     let mut invalid_tokens = Vec::new();
     let result = run_command(env, command, context, &mut invalid_tokens);
@@ -2584,8 +2634,11 @@ mod tests {
             CoreError::StoreNoLogonSession,
             CoreError::InvalidRequest,
             CoreError::BrokerVersionMismatch {
-                broker: "0.1.0".to_string(),
+                broker: Some("0.1.0".to_string()),
             },
+            CoreError::BrokerVersionMismatch { broker: None },
+            CoreError::BrokerUnavailable,
+            CoreError::AuditUnreadable,
             CoreError::ElevationRequired,
             CoreError::ServiceRequired,
             CoreError::BrokerUnsupported,

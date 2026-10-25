@@ -366,7 +366,7 @@ fn ac5_entries_are_appended_never_rewritten() {
 }
 
 #[test]
-fn ac6_no_command_reads_or_returns_the_audit_log() {
+fn ac6_no_command_but_audit_reads_or_returns_the_audit_log() {
     let server = FakeImap::start(Mode::Implicit);
     let store = InMemoryStore::default();
     let token = store_mandate(&store, &allowed_mandate(server.port));
@@ -406,7 +406,8 @@ fn ac6_no_command_reads_or_returns_the_audit_log() {
             assert_clean(&out, &argv.join(" "));
         }
     }
-    for sub in ["audit", "log"] {
+    // `agent-mail audit` (job 026) is the one command that reads it.
+    for sub in ["log"] {
         for text in [false, true] {
             let mut argv: Vec<&str> = Vec::new();
             if text {
@@ -594,4 +595,195 @@ fn job024_ac1d_platform_path_on_windows_ends_in_agent_mail_audit_log() {
     let path = agent_mail::audit::platform_path().expect("Local AppData is known");
     assert!(path.is_absolute(), "{path:?}");
     assert!(path.ends_with(r"agent-mail\audit.log"), "{path:?}");
+}
+
+// ---------------------------------------- `agent-mail audit` (job 026, AC5)
+
+mod audit_command {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use agent_mail::audit::AuditLog;
+
+    use super::support::CountingStore;
+    use super::support::broker::{BrokerSetup, FakeBroker, caller};
+    use super::*;
+
+    const LIST_ENTRY: &str = r#"{"time":"2026-10-21T09:30:15Z","mandate":"ab12cd34","operation":"list","account":"a@example.com","outcome":"allowed"}"#;
+    const READ_ENTRY: &str = r#"{"time":"2026-10-21T09:31:00Z","mandate":"ab12cd34","operation":"read","account":"a@example.com","mailbox":"INBOX","messages":["a@example.com/INBOX/7/1"],"outcome":"denied","reason":"denied"}"#;
+    const X: &str = "S-1-5-21-1-2-3-1001";
+    const Y: &str = "S-1-5-21-1-2-3-1002";
+
+    /// A fresh log holding `lines`, each followed by `\n`.
+    fn log_with(lines: &[&str]) -> std::path::PathBuf {
+        let log = temp_audit_log();
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+        fs::write(&log, text).unwrap();
+        log
+    }
+
+    /// `agent-mail <args>` in-process with no token, logging to `log`.
+    fn audit_at(args: &[&str], log: &Path) -> RunOutput {
+        let store = CountingStore::default();
+        let context = Context::trusting_only(&store, Vec::new()).with_audit_log(AuditLog::at(log));
+        let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+        let out = agent_mail::run(argv, &HashMap::new(), &context);
+        assert_eq!(store.accesses(), 0, "audit touched the store");
+        out
+    }
+
+    #[test]
+    fn ac5_audit_prints_every_json_entry_in_file_order() {
+        let log = log_with(&[LIST_ENTRY, "not json", READ_ENTRY]);
+        let before = fs::read(&log).unwrap();
+        let out = audit_at(&["audit"], &log);
+        assert_eq!(out.code, 0, "{out:?}");
+        assert_eq!(out.stderr, "");
+        assert_eq!(
+            out.stdout,
+            format!("{{\"entries\":[{LIST_ENTRY},{READ_ENTRY}]}}\n")
+        );
+        let parsed: Value = serde_json::from_str(&out.stdout).unwrap();
+        let list: Value = serde_json::from_str(LIST_ENTRY).unwrap();
+        let read: Value = serde_json::from_str(READ_ENTRY).unwrap();
+        assert_eq!(parsed["entries"], json!([list, read]));
+        // Reading the log writes no entry.
+        assert_eq!(fs::read(&log).unwrap(), before);
+    }
+
+    #[test]
+    fn ac5_without_a_log_audit_prints_no_entries() {
+        let log = temp_audit_log();
+        let out = audit_at(&["audit"], &log);
+        assert_eq!(out.code, 0, "{out:?}");
+        assert_eq!(out.stdout, "{\"entries\":[]}\n");
+        let out = audit_at(&["audit", "--text"], &log);
+        assert_eq!(out.stdout, "No audit entries.\n");
+        assert!(!log.exists(), "audit created the log");
+    }
+
+    #[test]
+    fn ac5_text_prints_one_escaped_line_per_entry_without_the_sid() {
+        let full = json!({
+            "time": "2026-10-21T09:32:00Z",
+            "mandate": "ab12cd34",
+            "operation": "move",
+            "account": "a@example.com",
+            "mailbox": "IN\nBOX",
+            "target": "Archive",
+            "messages": ["r/1", "r/2"],
+            "recipients": ["b@example.com", "c@example.com"],
+            "change": "+\\Seen",
+            "results": 2,
+            "outcome": "allowed",
+            "reason": "x\u{1b}[31m",
+            "sid": X,
+        })
+        .to_string();
+        let log = log_with(&[LIST_ENTRY, &full]);
+        let expected = concat!(
+            "2026-10-21T09:30:15Z allowed list mandate=ab12cd34 account=a@example.com\n",
+            "2026-10-21T09:32:00Z allowed move mandate=ab12cd34 account=a@example.com ",
+            "mailbox=IN\\u{a}BOX target=Archive messages=r/1,r/2 ",
+            "recipients=b@example.com,c@example.com change=+\\Seen results=2 ",
+            "reason=x\\u{1b}[31m\n",
+        );
+        for args in [&["--text", "audit"][..], &["audit", "--text"]] {
+            let out = audit_at(args, &log);
+            assert_eq!(out.code, 0, "{out:?}");
+            assert_eq!(out.stdout, expected, "{args:?}");
+            assert!(!out.stdout.contains(X));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ac5_a_symlinked_log_or_directory_is_refused() {
+        let real = log_with(&[LIST_ENTRY]);
+        // The log itself is a link.
+        let linked_log = temp_audit_log();
+        fs::create_dir_all(linked_log.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &linked_log).unwrap();
+        // The log's directory is a link.
+        let dir_link = temp_audit_log().parent().unwrap().to_path_buf();
+        std::os::unix::fs::symlink(real.parent().unwrap(), &dir_link).unwrap();
+        let through_dir = dir_link.join(real.file_name().unwrap());
+        for log in [linked_log, through_dir] {
+            for text in [false, true] {
+                let args: &[&str] = if text {
+                    &["--text", "audit"]
+                } else {
+                    &["audit"]
+                };
+                let out = audit_at(args, &log);
+                assert_eq!(out.code, 1, "{out:?}");
+                assert_eq!(out.stdout, "");
+                assert!(out.stderr.contains("audit_unavailable"), "{out:?}");
+            }
+        }
+    }
+
+    /// `agent-mail <args>` on the Broker route for caller X, whose Broker
+    /// log holds entries for X, Y and one without `sid`; the client's own
+    /// log is `local`. Returns the output, the fake Broker and X's entry.
+    fn audit_via_broker(args: &[&str], local: &Path) -> (RunOutput, FakeBroker, String) {
+        let x_entry = format!(
+            r#"{{"time":"2026-10-21T09:30:15Z","mandate":"ab12cd34","operation":"list","account":"a@example.com","outcome":"allowed","sid":"{X}"}}"#
+        );
+        let y_entry = format!(
+            r#"{{"time":"2026-10-21T09:30:16Z","operation":"list","outcome":"denied","reason":"missing_token","sid":"{Y}"}}"#
+        );
+        let broker_log = log_with(&[&x_entry, &y_entry, READ_ENTRY]);
+        let mut setup = BrokerSetup::new(Arc::new(InMemoryStore::new()), caller(X, 0x2000));
+        setup.audit = AuditLog::at(&broker_log);
+        let fake = FakeBroker::serving(setup);
+        let store = CountingStore::default();
+        let context = Context::trusting_only(&store, Vec::new())
+            .with_audit_log(AuditLog::at(local))
+            .with_broker(&fake);
+        let argv = std::iter::once("agent-mail").chain(args.iter().copied());
+        let out = agent_mail::run(argv, &HashMap::new(), &context);
+        assert_eq!(store.accesses(), 0);
+        (out, fake, x_entry)
+    }
+
+    #[test]
+    fn ac5_on_the_broker_route_audit_shows_only_the_callers_entries() {
+        let local = log_with(&[LIST_ENTRY]);
+        let (out, fake, x_entry) = audit_via_broker(&["audit"], &local);
+        assert_eq!(out.code, 0, "{out:?}");
+        assert_eq!(out.stdout, format!("{{\"entries\":[{x_entry}]}}\n"));
+        let requests = fake.requests();
+        assert_eq!(requests[0].len(), 2, "{requests:?}");
+        assert_eq!(requests[0][1], json!({"audit": {}}));
+
+        let (out, _, _) = audit_via_broker(&["audit", "--text"], &local);
+        assert_eq!(
+            out.stdout,
+            "2026-10-21T09:30:15Z allowed list mandate=ab12cd34 account=a@example.com\n"
+        );
+        // The local log was neither read into the output nor written.
+        assert_eq!(
+            fs::read_to_string(&local).unwrap(),
+            format!("{LIST_ENTRY}\n")
+        );
+    }
+
+    #[test]
+    fn ac5_on_the_broker_route_the_local_log_is_not_read() {
+        let local_only =
+            r#"{"time":"2026-01-01T00:00:00Z","operation":"search","outcome":"allowed"}"#;
+        let local = log_with(&[local_only]);
+        for args in [&["audit"][..], &["--text", "audit"]] {
+            let (out, _, _) = audit_via_broker(args, &local);
+            assert_eq!(out.code, 0, "{out:?}");
+            assert!(!out.stdout.contains("2026-01-01T00:00:00Z"), "{out:?}");
+            assert!(!out.stdout.contains("search"), "{out:?}");
+        }
+    }
 }

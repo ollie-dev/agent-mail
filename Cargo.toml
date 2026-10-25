@@ -53,7 +53,8 @@ security-framework = "3"
 # the Mandate store, the Local AppData and ProgramData known folders for the
 # audit logs, WriteConsoleW for the console messages of `mandate create`,
 # and for the Broker the service control manager, the named pipe,
-# impersonation, tokens, access lists and overlapped I/O.
+# impersonation, tokens, access lists and overlapped I/O; for the Broker
+# clients the elevation check and the owner and server process of the pipe.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

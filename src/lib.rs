@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod broker;
+pub mod client;
 pub mod core;
 pub mod create;
 pub mod draft;
@@ -213,6 +214,19 @@ pub enum CliCommand {
 
         #[command(subcommand)]
         command: MandateCommand,
+    },
+    /// Show the audit entries of your own Mandates: what your agents did and whether it was allowed
+    ///
+    /// Prints one JSON object on stdout: entries, in the order they were
+    /// written, each with time, operation, outcome and the details recorded
+    /// (mandate, account, mailbox, messages, reason and more). With --text,
+    /// one line per entry.
+    ///
+    /// Needs no agent token and records nothing itself. On Windows the
+    /// entries come from the agent-mail service.
+    Audit {
+        #[command(flatten)]
+        output: TextOutput,
     },
 }
 
@@ -471,7 +485,8 @@ pub enum MandateCommand {
     /// Credential is still typed and live-checked.
     ///
     /// Refuses to run without a terminal or inside an agent sandbox. No
-    /// option can supply a Credential.
+    /// option can supply a Credential. On Windows it needs an elevated (Run
+    /// as administrator) terminal.
     Create {
         /// Pre-fill the setup from a Mandate file saved by an earlier `mandate create`
         #[arg(long, value_name = "FILE")]
@@ -634,6 +649,7 @@ pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -
             };
         }
         CliCommand::Broker => return crate::broker::run_service(text),
+        CliCommand::Audit { output } => return audit_command(text || output.text, context),
         CliCommand::Mandate {
             text: mandate_text,
             command,
@@ -646,6 +662,21 @@ pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -
             }
         }
     };
+    if let Some(route) = &context.broker {
+        return match command {
+            crate::core::Command::MandateCreate { from } => {
+                match crate::create::run_via_broker(env, from.as_deref(), context, route) {
+                    Ok(()) => RunOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        code: 0,
+                    },
+                    Err(failure) => crate::client::failed(String::new(), &failure, text),
+                }
+            }
+            command => crate::client::run_command(route, command, env, text),
+        };
+    }
     let report = crate::core::execute_reporting(env, &command, context);
     // The invalid-token warning comes first, before any error.
     let mut stderr = Warning::invalid_tokens(&report.invalid_tokens)
@@ -666,6 +697,102 @@ pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -
             }
         }
     }
+}
+
+/// Runs `agent-mail audit`: the Broker's entries for this caller on the
+/// Broker route, otherwise every entry of this context's own log. Lines
+/// that are not JSON objects are skipped. Reads no token and appends no
+/// entry.
+fn audit_command(text: bool, context: &Context<'_>) -> RunOutput {
+    let entries: Result<Vec<String>, crate::client::Failure> = match &context.broker {
+        Some(route) => crate::client::audit(route)
+            .map(|entries| entries.iter().map(|e| e.get().to_string()).collect()),
+        None => context
+            .audit
+            .lines()
+            .map(|lines| {
+                lines
+                    .into_iter()
+                    .filter(|line| {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .is_ok_and(|value| value.is_object())
+                    })
+                    .collect()
+            })
+            .map_err(|_| CoreError::AuditUnreadable.into()),
+    };
+    match entries {
+        Ok(entries) => RunOutput {
+            stdout: render_audit(&entries, text),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(failure) => crate::client::failed(String::new(), &failure, text),
+    }
+}
+
+/// The keys an audit `--text` line shows after time, outcome and
+/// operation, in this order.
+const AUDIT_TEXT_KEYS: [&str; 9] = [
+    "mandate",
+    "account",
+    "mailbox",
+    "target",
+    "messages",
+    "recipients",
+    "change",
+    "results",
+    "reason",
+];
+
+/// `entries` (each one JSON object) as `{"entries":[...]}`, or with `text`
+/// as one line per entry.
+fn render_audit(entries: &[String], text: bool) -> String {
+    if !text {
+        return format!(
+            "{{\"entries\":[{}]}}
+",
+            entries.join(",")
+        );
+    }
+    if entries.is_empty() {
+        return "No audit entries.
+"
+        .to_string();
+    }
+    let mut out = String::new();
+    for entry in entries {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(entry) else {
+            continue;
+        };
+        let field = |key: &str| value.get(key).map(audit_value);
+        let mut line: Vec<String> = ["time", "outcome", "operation"]
+            .iter()
+            .map(|key| field(key).unwrap_or_else(|| "-".to_string()))
+            .collect();
+        for key in AUDIT_TEXT_KEYS {
+            if let Some(shown) = field(key) {
+                line.push(format!("{key}={shown}"));
+            }
+        }
+        out.push_str(&line.join(" "));
+        out.push('\n');
+    }
+    out
+}
+
+/// One audit value for a `--text` line: lists joined with `,`, control
+/// characters escaped.
+fn audit_value(value: &serde_json::Value) -> String {
+    let plain = |value: &serde_json::Value| match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let text = match value {
+        serde_json::Value::Array(items) => items.iter().map(plain).collect::<Vec<_>>().join(","),
+        other => plain(other),
+    };
+    escape_controls(&text)
 }
 
 /// The `invalid_arguments` error of a command line clap refused, the same
@@ -908,7 +1035,7 @@ pub(crate) fn render_warning(warning: &Warning, text: bool) -> String {
     json_line(&Wrapped { warning })
 }
 
-fn json_line(value: &impl serde::Serialize) -> String {
+pub(crate) fn json_line(value: &impl serde::Serialize) -> String {
     let mut out = serde_json::to_string(value).expect("results always serialise");
     out.push('\n');
     out

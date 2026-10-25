@@ -50,10 +50,17 @@ pub const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
 /// can talk to the Broker but cannot add a server instance of its pipe.
 pub const PIPE_CLIENT_RIGHTS: u32 = 0x0012_019b;
 
-/// The pipe's security descriptor: read and write, but not creating
-/// instances, for authenticated users ([`PIPE_CLIENT_RIGHTS`]), full access
-/// for the Broker, nothing inherited.
+/// The pipe's security descriptor: owned by the Broker, read and write,
+/// but not creating instances, for authenticated users
+/// ([`PIPE_CLIENT_RIGHTS`]), full access for the Broker, nothing
+/// inherited. The explicit owner is what the clients check (see
+/// [`windows::served_by`]); no other user can set it.
 pub fn pipe_sddl(broker_sid: &str) -> String {
+    format!("O:{broker_sid}{}", pipe_dacl_sddl(broker_sid))
+}
+
+/// The DACL part of [`pipe_sddl`].
+pub fn pipe_dacl_sddl(broker_sid: &str) -> String {
     format!("D:P(A;;0x12019b;;;AU)(A;;GA;;;{broker_sid})")
 }
 
@@ -84,6 +91,11 @@ impl Secret {
     /// Wraps `text`.
     pub fn new(text: impl Into<String>) -> Self {
         Self(text.into())
+    }
+
+    /// The secret itself.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
     }
 }
 
@@ -129,6 +141,10 @@ pub struct RunRequest {
     /// The client's proxy variables.
     #[serde(default)]
     pub proxy: ProxyVars,
+    /// Whether the client prints `--text`: then `result` is a JSON string
+    /// holding the CLI's text output instead of its JSON.
+    #[serde(default)]
+    pub text: bool,
 }
 
 /// The client's proxy variables; each may hold proxy credentials.
@@ -337,7 +353,7 @@ pub fn serve_session<T: Read + Write>(
                     (Reply::ok(), false)
                 } else {
                     let error = CoreError::BrokerVersionMismatch {
-                        broker: VERSION.to_string(),
+                        broker: Some(VERSION.to_string()),
                     };
                     (Reply::error(&error), true)
                 }
@@ -363,6 +379,7 @@ fn context_for<'a>(context: &Context<'a>, caller: &Caller) -> Context<'a> {
         terminal: &NoTerminal,
         audit: context.audit.clone(),
         owner: None,
+        broker: None,
     }
     .for_owner(&caller.sid)
 }
@@ -390,6 +407,10 @@ fn handle_run(run: Box<RunRequest>, caller: &Caller, context: &Context<'_>) -> (
         value.zeroize();
     }
     let mut reply = match &report.result {
+        Ok(outcome) if run.text => {
+            let text = crate::render_outcome(outcome, true);
+            Reply::result(serde_json::to_string(&text).expect("strings serialise"))
+        }
         Ok(outcome) => {
             let line = crate::render_outcome(outcome, false);
             Reply::result(line.trim_end().to_string())
@@ -493,7 +514,7 @@ fn checked_mandate(create: CreateRequest) -> Option<Mandate> {
 /// The caller's own audit entries, in file order, as they are in the log.
 fn handle_audit(caller: &Caller, context: &Context<'_>) -> Reply {
     let Ok(lines) = context.audit.lines() else {
-        return Reply::error(&CoreError::AuditUnavailable);
+        return Reply::error(&CoreError::AuditUnreadable);
     };
     let own: Vec<&str> = lines
         .iter()
@@ -501,6 +522,24 @@ fn handle_audit(caller: &Caller, context: &Context<'_>) -> Reply {
         .filter(|line| entry_sid(line).as_deref() == Some(caller.sid.as_str()))
         .collect();
     Reply::result(format!("{{\"entries\":[{}]}}", own.join(",")))
+}
+
+/// The service SID of the Windows service `name`, as `NT SERVICE\<name>`
+/// has it: `S-1-5-80-` and the SHA-1 of the upper-cased name in UTF-16LE,
+/// read as five little-endian 32-bit numbers.
+pub fn service_sid(name: &str) -> String {
+    let bytes: Vec<u8> = name
+        .to_uppercase()
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &bytes);
+    let parts: Vec<String> = digest
+        .as_ref()
+        .chunks(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string())
+        .collect();
+    format!("S-1-5-80-{}", parts.join("-"))
 }
 
 /// The `sid` of one audit log line, if it is a JSON object with one.
@@ -605,6 +644,15 @@ mod tests {
             read_frame(&mut &[0u8, 0][..]),
             Err(FrameError::Io(_))
         ));
+    }
+
+    #[test]
+    fn service_sids_match_windows() {
+        // As `sc.exe showsid TrustedInstaller` prints it.
+        assert_eq!(
+            service_sid("TrustedInstaller"),
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+        );
     }
 
     #[test]

@@ -445,20 +445,26 @@ An entry without a port allows every port, so this covers port 993. For another 
 
 The sandbox applies to commands the Agent runs in the shell. The `agent-mail mcp` server is started by Claude Code itself and connects directly. Under an organisation's managed settings, ask your administrator to allow the host.
 
+**Windows named pipe.** Whether a command run in the Claude Code sandbox on Windows can open the service's pipe `\\.\pipe\agent-mail` is not yet verified. If it cannot, the command gets `broker_unavailable`; use the `agent-mail mcp` server, which Claude Code starts outside the sandbox.
+
 Inside the Claude Code sandbox there is no direct network: agent-mail reaches
 the mail server through the proxy named in the environment, and nothing
-changes in how an Agent calls it. The first non-empty one of `HTTPS_PROXY`,
+changes in how an Agent calls it.
+
+The first non-empty one of `HTTPS_PROXY`,
 `https_proxy`, `ALL_PROXY` and `all_proxy` is used (`HTTP_PROXY` and
 `NO_PROXY` are ignored):
 
 - `http://host:port` (or no scheme; default port 80) tunnels with HTTP
   CONNECT; `socks5://host:port` or `socks5h://host:port` (default port 1080)
-  uses SOCKS5. Credentials in the URL (`user:password@`, percent-encoded) are
+  uses SOCKS5.
+- Credentials in the URL (`user:password@`, percent-encoded) are
   sent as `Proxy-Authorization: Basic` or SOCKS5 username/password, and never
   appear in output or the audit log.
 - The mail server's host name is sent to the proxy unresolved.
 - TLS still runs end to end to the mail server (implicit TLS or mandatory
-  STARTTLS), so the proxy sees only ciphertext. Because the system
+  STARTTLS), so the proxy sees only ciphertext.
+- Because the system
   certificate verifier is unavailable in the sandbox, proxy mode verifies
   against built-in root certificates (webpki-roots). Without a proxy,
   agent-mail connects directly and uses the system verifier.
@@ -490,7 +496,7 @@ Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail fla
 - Other Unix: `$XDG_DATA_HOME/agent-mail/audit.log`, or `~/.local/share/agent-mail/audit.log` when `XDG_DATA_HOME` is unset
 - Windows: `%LOCALAPPDATA%\agent-mail\audit.log` (the folder comes from the Local AppData known folder, not from the environment variable)
 
-On Unix, the directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call. If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. On Windows the file gets the folder's default permissions. Entries are only ever appended; no agent-mail command reads the log, so open it yourself with a pager or `jq`. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
+On Unix, the directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call. If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. On Windows the file gets the folder's default permissions. Entries are only ever appended; `agent-mail audit` prints your own entries (`--text` for one line each), or open the log with a pager or `jq`. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
 
 Each line is one JSON object with these keys, in this order, absent keys left out:
 

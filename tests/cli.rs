@@ -101,6 +101,24 @@ fn run_list(token: Option<&str>, extra_env: &[(&str, &str)]) -> std::process::Ou
     for (key, value) in extra_env {
         command.env(key, value);
     }
+    // On Windows the binary sends every command to the Broker: serve it
+    // from this test, with an empty store and the log the test names.
+    #[cfg(windows)]
+    let _pipe = {
+        let audit = extra_env
+            .iter()
+            .find(|(key, _)| *key == agent_mail::audit::TEST_LOG_VAR)
+            .map_or_else(agent_mail::audit::AuditLog::temporary, |(_, path)| {
+                agent_mail::audit::AuditLog::at(path)
+            });
+        let pipe = support::broker::TestPipe::start(
+            std::sync::Arc::new(InMemoryStore::new()),
+            audit,
+            agent_mail::imap::Network::platform(),
+        );
+        command.env(agent_mail::client::TEST_PIPE_VAR, &pipe.name);
+        pipe
+    };
     command.output().expect("failed to run agent-mail")
 }
 
@@ -208,7 +226,7 @@ use agent_mail::mandate::Operation;
 use agent_mail::store::InMemoryStore;
 
 /// Every subcommand path whose help pages AC1 checks.
-const HELP_PATHS: [&[&str]; 13] = [
+const HELP_PATHS: [&[&str]; 14] = [
     &[],
     &["list"],
     &["search"],
@@ -222,6 +240,7 @@ const HELP_PATHS: [&[&str]; 13] = [
     &["mandate", "create"],
     &["mandate", "list"],
     &["mandate", "delete"],
+    &["audit"],
 ];
 
 /// Runs `agent-mail <args>` in-process with no token and an empty store.
@@ -282,12 +301,12 @@ fn ac1_no_help_paragraph_is_longer_than_300_characters() {
             }
         }
     }
-    assert_eq!(invocations, 26);
+    assert_eq!(invocations, 28);
 }
 
 #[test]
 fn ac2_help_keeps_the_facts_an_agent_depends_on() {
-    let cases: [(&[&str], &[&str]); 10] = [
+    let cases: [(&[&str], &[&str]); 11] = [
         (&[], &["AGENT_MAIL_TOKEN", "--account", "agent-mail whoami"]),
         (&["search"], &["X-GM-EXT-1", "unsupported"]),
         (&["read"], &["20,000", "stale_reference"]),
@@ -296,7 +315,8 @@ fn ac2_help_keeps_the_facts_an_agent_depends_on() {
         (&["draft"], &["drafts_not_found", "Re: "]),
         (&["whoami"], &["invalid_tokens"]),
         (&["mcp"], &["invalid_arguments", "agent-mail mandate"]),
-        (&["mandate", "create"], &["--from"]),
+        (&["mandate", "create"], &["--from", "elevated"]),
+        (&["audit"], &["your own Mandates", "JSON", "--text"]),
         (&["mandate", "delete"], &["revocation_incomplete"]),
     ];
     for (path, needles) in cases {
@@ -483,8 +503,11 @@ fn error_samples() -> Vec<CoreError> {
         CoreError::StoreNoLogonSession,
         CoreError::InvalidRequest,
         CoreError::BrokerVersionMismatch {
-            broker: "0.1.0".to_string(),
+            broker: Some("0.0.0-other".to_string()),
         },
+        CoreError::BrokerVersionMismatch { broker: None },
+        CoreError::BrokerUnavailable,
+        CoreError::AuditUnreadable,
         CoreError::ElevationRequired,
         CoreError::ServiceRequired,
         CoreError::BrokerUnsupported,
@@ -524,6 +547,8 @@ fn error_samples() -> Vec<CoreError> {
             | CoreError::StoreNoLogonSession
             | CoreError::InvalidRequest
             | CoreError::BrokerVersionMismatch { .. }
+            | CoreError::BrokerUnavailable
+            | CoreError::AuditUnreadable
             | CoreError::ElevationRequired
             | CoreError::ServiceRequired
             | CoreError::BrokerUnsupported => samples.push(seed),
@@ -968,4 +993,67 @@ fn job022_ac8_main_parses_its_arguments_once() {
     assert_eq!(main.matches("agent_mail::parse(").count(), 1, "{main}");
     assert!(!main.contains("try_parse_from"), "{main}");
     assert!(!main.contains("Cli::parse"), "{main}");
+}
+
+// ---- `agent-mail audit` help (job 026, AC7) ----
+
+#[test]
+fn ac7_top_level_help_lists_audit() {
+    let text = help(&[], "--help");
+    let commands = text
+        .split("Commands:")
+        .nth(1)
+        .expect("a Commands section")
+        .split("\n\n")
+        .next()
+        .unwrap();
+    assert!(
+        commands
+            .lines()
+            .any(|l| l.trim_start().starts_with("audit ")),
+        "{text}"
+    );
+    let binary = run_agent_mail(&["--help"]);
+    assert!(String::from_utf8_lossy(&binary.stdout).contains("\n  audit "));
+}
+
+/// The sentences of a help page's prose: every paragraph that is not a
+/// usage line or a list of commands, options or arguments.
+fn prose_sentences(text: &str) -> Vec<String> {
+    let mut blocks: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blocks.push(Vec::new());
+        } else {
+            blocks.last_mut().unwrap().push(line.trim());
+        }
+    }
+    blocks
+        .into_iter()
+        .filter(|b| !b.is_empty())
+        .filter(|b| !["Commands:", "Options:", "Arguments:"].contains(&b[0]))
+        .filter(|b| !b[0].starts_with("Usage:"))
+        .flat_map(|b| {
+            b.join(" ")
+                .split(". ")
+                .map(|s| s.trim().trim_end_matches('.').to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[test]
+fn ac7_audit_help_repeats_no_sentence_of_the_top_level_help() {
+    let top = prose_sentences(&help(&[], "--help"));
+    for flag in ["--help", "-h"] {
+        let audit = prose_sentences(&help(&["audit"], flag));
+        assert!(!audit.is_empty());
+        for sentence in &audit {
+            assert!(
+                !top.contains(sentence),
+                "`agent-mail audit {flag}` repeats {sentence:?}"
+            );
+        }
+    }
 }
