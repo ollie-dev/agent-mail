@@ -7,6 +7,8 @@
 # `gh release download`, checks the checksum, extracts the binary, checks
 # that it is signed ad hoc with the hardened runtime, verifies the build
 # attestation, and on the matching architecture runs `agent-mail --version`.
+# For the Windows x64 zip: checks the checksum, that the zip holds exactly
+# `agent-mail.exe`, and the build attestation (no signature check, no run).
 # Needs `gh` (authenticated) and, for the signature check, macOS.
 set -eu
 
@@ -57,5 +59,27 @@ for target in $targets; do
         }
     fi
 done
+
+# Windows x64: checksum, contents and attestation only. The binary is not
+# code-signed and is not run here.
+asset="agent-mail-x86_64-pc-windows-msvc.zip"
+dir="$work/windows"
+mkdir -p "$dir"
+echo "== $asset"
+gh release download "$tag" --repo "$repo" --dir "$dir" \
+    --pattern "$asset" --pattern "$asset.sha256"
+[ -f "$dir/$asset" ] || { echo "missing asset $asset" >&2; exit 1; }
+[ -f "$dir/$asset.sha256" ] || { echo "missing asset $asset.sha256" >&2; exit 1; }
+grep -Eqx "[0-9a-f]{64}  $asset" "$dir/$asset.sha256" || {
+    echo "$asset.sha256 is not in shasum -a 256 format" >&2
+    exit 1
+}
+(cd "$dir" && shasum -a 256 -c "$asset.sha256")
+members=$(unzip -Z1 "$dir/$asset")
+[ "$members" = "agent-mail.exe" ] || {
+    echo "$asset must hold exactly agent-mail.exe, holds: $members" >&2
+    exit 1
+}
+gh attestation verify "$dir/$asset" --repo "$repo"
 
 echo "release $tag verified"

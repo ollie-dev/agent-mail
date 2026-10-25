@@ -395,6 +395,7 @@ mod tests {
         assert!(path.ends_with("agent-mail/audit.log"));
     }
 
+    #[cfg(unix)]
     fn sample() -> Entry {
         Entry {
             time: "2026-10-21T09:30:15Z".to_string(),

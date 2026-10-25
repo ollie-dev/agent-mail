@@ -116,7 +116,7 @@ fn ac3_tests_run_in_a_read_only_job_that_publish_depends_on() {
 
     let publish = job(&workflow, "publish");
     assert!(
-        publish.contains("needs: test"),
+        publish.contains("needs: [test, build-windows]"),
         "publish does not need test"
     );
     assert!(
@@ -411,6 +411,335 @@ mod installer {
     }
 }
 
+// ---------------------------------------------------------------- job 024 AC4
+
+#[cfg(windows)]
+mod windows_installer {
+    use super::*;
+
+    const WINDOWS_ASSET: &str = "agent-mail-x86_64-pc-windows-msvc.zip";
+
+    /// The fake binary every test zip holds.
+    const FAKE_EXE: &[u8] = b"MZ fake agent-mail.exe for installer tests";
+
+    /// The PowerShell hosts to run the installer under: Windows PowerShell
+    /// 5.1 always, PowerShell 7 too where it is installed.
+    fn shells() -> Vec<&'static str> {
+        let mut shells = vec!["powershell.exe"];
+        let pwsh = Command::new("pwsh.exe")
+            .args(["-NoProfile", "-Command", "exit 0"])
+            .output();
+        if pwsh.is_ok_and(|o| o.status.success()) {
+            shells.push("pwsh.exe");
+        }
+        shells
+    }
+
+    fn powershell(command: &str) -> Output {
+        let out = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", command])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{command}: {out:?}");
+        out
+    }
+
+    /// The `.sha256` line for `digest`.
+    fn sum_line(digest: &str) -> String {
+        format!("{digest}  {WINDOWS_ASSET}\n")
+    }
+
+    /// A download directory holding a zip of `files` (name, bytes), built
+    /// with `Compress-Archive`, and its correct `.sha256`.
+    fn downloads_with(files: &[(&str, &[u8])]) -> PathBuf {
+        let dir = temp_dir("win-downloads");
+        let stage = temp_dir("win-stage");
+        for (name, bytes) in files {
+            std::fs::write(stage.join(name), bytes).unwrap();
+        }
+        let zip = dir.join(WINDOWS_ASSET);
+        powershell(&format!(
+            "Compress-Archive -Path '{}\\*' -DestinationPath '{}'",
+            stage.display(),
+            zip.display()
+        ));
+        let out = powershell(&format!(
+            "(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash.ToLowerInvariant()",
+            zip.display()
+        ));
+        let digest = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert_eq!(digest.len(), 64, "{digest}");
+        std::fs::write(
+            dir.join(format!("{WINDOWS_ASSET}.sha256")),
+            sum_line(&digest),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn downloads() -> PathBuf {
+        downloads_with(&[("agent-mail.exe", FAKE_EXE)])
+    }
+
+    /// A finished installer run: its output and the temporary directory it
+    /// was given.
+    struct Run {
+        output: Output,
+        tmp: PathBuf,
+    }
+
+    impl Run {
+        fn stdout(&self) -> String {
+            String::from_utf8_lossy(&self.output.stdout).into_owned()
+        }
+
+        fn stderr(&self) -> String {
+            String::from_utf8_lossy(&self.output.stderr).into_owned()
+        }
+    }
+
+    fn install_with(shell: &str, home: &Path, downloads: &Path, arch: &str) -> Run {
+        let tmp = temp_dir("win-tmp");
+        let url = format!(
+            "file:///{}",
+            downloads.display().to_string().replace('\\', "/")
+        );
+        let output = Command::new(shell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(Path::new(ROOT).join("install.ps1"))
+            .env("USERPROFILE", home)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
+            .env("PROCESSOR_ARCHITECTURE", arch)
+            .env("AGENT_MAIL_DOWNLOAD_URL", url)
+            .output()
+            .unwrap();
+        Run { output, tmp }
+    }
+
+    fn install(shell: &str, home: &Path, downloads: &Path) -> Run {
+        install_with(shell, home, downloads, "AMD64")
+    }
+
+    fn bin_dir(home: &Path) -> PathBuf {
+        home.join(".local").join("bin")
+    }
+
+    fn bin_files(home: &Path) -> Vec<String> {
+        match std::fs::read_dir(bin_dir(home)) {
+            Ok(entries) => entries
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn assert_refused(run: &Run, home: &Path) {
+        assert_ne!(run.output.status.code(), Some(0), "{:?}", run.output);
+        assert!(
+            bin_files(home).is_empty(),
+            "installed: {:?}",
+            bin_files(home)
+        );
+    }
+
+    #[test]
+    fn job024_ac4a_matching_checksum_installs_agent_mail_exe() {
+        for shell in shells() {
+            let home = temp_dir("win-home");
+            let run = install(shell, &home, &downloads());
+            assert_eq!(
+                run.output.status.code(),
+                Some(0),
+                "{shell}: {:?}",
+                run.output
+            );
+            let installed = bin_dir(&home).join("agent-mail.exe");
+            assert_eq!(std::fs::read(&installed).unwrap(), FAKE_EXE, "{shell}");
+            assert_eq!(bin_files(&home), ["agent-mail.exe"], "{shell}");
+            assert!(
+                run.stdout().contains(&installed.display().to_string()),
+                "{shell}: {}",
+                run.stdout()
+            );
+            assert!(
+                run.stdout().contains("not on your PATH"),
+                "{}",
+                run.stdout()
+            );
+            assert_eq!(
+                std::fs::read_dir(&run.tmp).unwrap().count(),
+                0,
+                "{shell}: temporary directory left"
+            );
+        }
+    }
+
+    #[test]
+    fn job024_ac4b_existing_install_is_replaced() {
+        for shell in shells() {
+            let home = temp_dir("win-home");
+            std::fs::create_dir_all(bin_dir(&home)).unwrap();
+            std::fs::write(bin_dir(&home).join("agent-mail.exe"), "old").unwrap();
+            let run = install(shell, &home, &downloads());
+            assert_eq!(
+                run.output.status.code(),
+                Some(0),
+                "{shell}: {:?}",
+                run.output
+            );
+            assert_eq!(
+                std::fs::read(bin_dir(&home).join("agent-mail.exe")).unwrap(),
+                FAKE_EXE
+            );
+            assert_eq!(bin_files(&home), ["agent-mail.exe"], "{shell}");
+        }
+    }
+
+    #[test]
+    fn job024_ac4c_checksum_mismatch_installs_nothing() {
+        for shell in shells() {
+            let home = temp_dir("win-home");
+            let downloads = downloads();
+            std::fs::write(
+                downloads.join(format!("{WINDOWS_ASSET}.sha256")),
+                sum_line(&"0".repeat(64)),
+            )
+            .unwrap();
+            let run = install(shell, &home, &downloads);
+            assert_refused(&run, &home);
+            assert!(
+                run.stderr().contains(
+                    "checksum mismatch for agent-mail-x86_64-pc-windows-msvc.zip; nothing was installed"
+                ),
+                "{shell}: {}",
+                run.stderr()
+            );
+            assert_eq!(std::fs::read_dir(&run.tmp).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn job024_ac4d_malformed_checksum_file_installs_nothing() {
+        for shell in shells() {
+            let digest = "a".repeat(64);
+            for malformed in [
+                format!("{digest}  {WINDOWS_ASSET}.sha256\n"),
+                format!("{digest} {WINDOWS_ASSET}\n"),
+                format!("{}  {WINDOWS_ASSET}\n", "A".repeat(64)),
+                format!("{digest}  {WINDOWS_ASSET}\r\n"),
+                format!("{digest}  {WINDOWS_ASSET}\n{digest}  {WINDOWS_ASSET}\n"),
+                String::new(),
+            ] {
+                let home = temp_dir("win-home");
+                let downloads = downloads();
+                std::fs::write(
+                    downloads.join(format!("{WINDOWS_ASSET}.sha256")),
+                    &malformed,
+                )
+                .unwrap();
+                let run = install(shell, &home, &downloads);
+                assert_refused(&run, &home);
+                assert!(
+                    run.stderr().contains("checksum file")
+                        && run.stderr().contains("malformed")
+                        && run.stderr().contains("nothing was installed"),
+                    "{shell} {malformed:?}: {}",
+                    run.stderr()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn job024_ac4e_missing_zip_installs_nothing() {
+        for shell in shells() {
+            let home = temp_dir("win-home");
+            let downloads = downloads();
+            std::fs::remove_file(downloads.join(WINDOWS_ASSET)).unwrap();
+            let run = install(shell, &home, &downloads);
+            assert_refused(&run, &home);
+            assert!(
+                run.stderr().contains("could not download"),
+                "{}",
+                run.stderr()
+            );
+        }
+    }
+
+    #[test]
+    fn job024_ac4f_zip_without_only_agent_mail_exe_installs_nothing() {
+        for shell in shells() {
+            for files in [
+                &[("other.exe", FAKE_EXE)][..],
+                &[("agent-mail.exe", FAKE_EXE), ("extra.dll", b"x")][..],
+            ] {
+                let home = temp_dir("win-home");
+                let run = install(shell, &home, &downloads_with(files));
+                assert_refused(&run, &home);
+                assert!(
+                    run.stderr().contains("must hold exactly agent-mail.exe"),
+                    "{shell}: {}",
+                    run.stderr()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn job024_ac4g_non_x64_is_refused_with_a_message_naming_x64() {
+        let home = temp_dir("win-home");
+        let run = install_with("powershell.exe", &home, &downloads(), "ARM64");
+        assert_refused(&run, &home);
+        assert!(run.stderr().contains("x64"), "{}", run.stderr());
+    }
+}
+
+#[test]
+fn job024_ac4g_installer_never_elevates_runs_the_binary_or_changes_path() {
+    let script = read("install.ps1");
+    let code: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    let code = code.join("\n");
+    for forbidden in [
+        "Start-Process",
+        "RunAs",
+        "Invoke-Expression",
+        "iex",
+        "SetEnvironmentVariable",
+        "$env:PATH =",
+        "$env:Path =",
+        "$env:PATH +=",
+        "$env:Path +=",
+        "setx",
+        "& $dest",
+        "& $binary",
+        "& $staged",
+        "Invoke-Item",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "install.ps1 contains {forbidden}"
+        );
+    }
+    assert!(code.contains("$arch -ne 'AMD64'"), "no AMD64 check");
+    assert!(code.contains("x64"), "the refusal does not name x64");
+    assert!(code.contains("not on your PATH"), "no PATH hint");
+    // Nothing is extracted before the checksum passes.
+    let mismatch = code.find("checksum mismatch").unwrap();
+    let extract = code.find("ExtractToFile").unwrap();
+    assert!(mismatch < extract, "extracts before the checksum check");
+}
+
 // ---------------------------------------------------------------- AC7
 
 #[test]
@@ -574,4 +903,254 @@ fn job023_ac7_readme_says_release_binary_tests_write_nothing_to_the_audit_log() 
         paragraph.contains("nothing") || paragraph.contains(" no "),
         "{paragraph}"
     );
+}
+
+// ---------------------------------------------------------------- job 024
+
+const WINDOWS_ONE_LINER: &str =
+    "irm https://github.com/ollie-dev/agent-mail/releases/latest/download/install.ps1 | iex";
+
+/// The trimmed scopes of the first `permissions:` block in `job`.
+fn scopes_of(job: &str) -> Vec<String> {
+    let block = job
+        .split("permissions:\n")
+        .nth(1)
+        .expect("job has no permissions block");
+    let indent = block.len() - block.trim_start().len();
+    block
+        .lines()
+        .take_while(|l| l.len() > indent && l[..indent].trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+#[test]
+fn job024_ac3a_build_windows_job_packages_and_checksums_the_exe() {
+    let workflow = read(".github/workflows/release.yml");
+    let build = job(&workflow, "build-windows");
+    assert!(build.contains("runs-on: windows-latest"));
+    assert!(build.contains("needs: test"));
+    assert_eq!(scopes_of(build), ["contents: read"]);
+    assert!(
+        !build.contains("write"),
+        "build-windows holds a write scope"
+    );
+    assert!(build.contains("cargo build --release --locked --target x86_64-pc-windows-msvc"));
+    assert!(build.contains(
+        "Compress-Archive -Path stage/agent-mail.exe -DestinationPath dist/agent-mail-x86_64-pc-windows-msvc.zip"
+    ));
+    assert!(build.contains(r#"printf '%s  %s\n' "$sum" "$asset" > "$asset.sha256""#));
+    assert!(build.contains("asset=agent-mail-x86_64-pc-windows-msvc.zip"));
+    assert!(build.contains("actions/upload-artifact@"));
+    assert!(build.contains("dist/agent-mail-x86_64-pc-windows-msvc.zip.sha256"));
+}
+
+#[test]
+fn job024_ac3b_publish_attests_and_releases_the_windows_zip_and_installer() {
+    let workflow = read(".github/workflows/release.yml");
+    let publish = job(&workflow, "publish");
+    assert!(publish.contains("needs: [test, build-windows]"));
+    assert!(publish.contains("actions/download-artifact@"));
+    assert!(publish.contains("path: dist/"));
+    assert!(publish.contains("cp install.ps1 dist/install.ps1"));
+    let subjects = publish
+        .split("subject-path: |\n")
+        .nth(1)
+        .expect("no subject-path");
+    let subjects: Vec<&str> = subjects
+        .lines()
+        .take_while(|l| l.starts_with("            "))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        subjects,
+        [
+            "dist/agent-mail-aarch64-apple-darwin.tar.gz",
+            "dist/agent-mail-x86_64-apple-darwin.tar.gz",
+            "dist/agent-mail-x86_64-pc-windows-msvc.zip",
+        ]
+    );
+    let create = publish
+        .split("gh release create")
+        .nth(1)
+        .expect("no gh release create");
+    for asset in [
+        "dist/agent-mail-x86_64-pc-windows-msvc.zip \\",
+        "dist/agent-mail-x86_64-pc-windows-msvc.zip.sha256 \\",
+        "dist/install.sh \\",
+        "dist/install.ps1",
+    ] {
+        assert!(create.contains(asset), "gh release create lacks {asset}");
+    }
+    // Only publish holds write scopes.
+    for name in ["test", "build-windows", "verify"] {
+        assert!(!job(&workflow, name).contains("write"), "{name} can write");
+    }
+    // Every action is pinned to a full commit SHA with a version comment.
+    for line in workflow.lines().filter(|l| l.contains("uses:")) {
+        let reference = line.split('@').nth(1).expect("action without a version");
+        let mut words = reference.split_whitespace();
+        let sha = words.next().unwrap();
+        assert!(
+            sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert_eq!(words.next(), Some("#"), "no version comment: {line}");
+        assert!(words.next().is_some_and(|v| v.starts_with('v')), "{line}");
+    }
+}
+
+#[test]
+fn job024_ac3c_verify_release_checks_the_windows_zip() {
+    let verify = read("scripts/verify-release.sh");
+    let marker = r#"asset="agent-mail-x86_64-pc-windows-msvc.zip""#;
+    let windows = verify
+        .split(marker)
+        .nth(1)
+        .expect("verify-release.sh does not name the Windows zip");
+    for needle in [
+        r#"gh release download "$tag" --repo "$repo" --dir "$dir""#,
+        r#"--pattern "$asset" --pattern "$asset.sha256""#,
+        r#"grep -Eqx "[0-9a-f]{64}  $asset" "$dir/$asset.sha256""#,
+        r#"(cd "$dir" && shasum -a 256 -c "$asset.sha256")"#,
+        r#"unzip -Z1 "$dir/$asset""#,
+        r#"[ "$members" = "agent-mail.exe" ]"#,
+        r#"gh attestation verify "$dir/$asset" --repo "$repo""#,
+    ] {
+        assert!(windows.contains(needle), "Windows check lacks {needle}");
+    }
+    assert!(
+        !windows.contains("sign-macos.sh"),
+        "signature check on Windows"
+    );
+    assert!(!windows.contains("--version"), "runs the Windows binary");
+    #[cfg(unix)]
+    {
+        let status = Command::new("sh")
+            .arg("-n")
+            .arg(Path::new(ROOT).join("scripts/verify-release.sh"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "verify-release.sh does not parse");
+    }
+}
+
+#[test]
+fn job024_ac3d_test_job_runs_on_macos_and_windows() {
+    let workflow = read(".github/workflows/release.yml");
+    let test = job(&workflow, "test");
+    assert!(test.contains("os: [macos-latest, windows-latest]"));
+    assert!(test.contains("runs-on: ${{ matrix.os }}"));
+    assert_eq!(scopes_of(test), ["contents: read"]);
+    // The version check is sh, so it must not run under PowerShell.
+    let check = test
+        .split("Tag matches the Cargo.toml version")
+        .nth(1)
+        .unwrap();
+    assert!(check.trim_start().starts_with("shell: bash"));
+}
+
+#[test]
+fn job024_ac2c_readme_says_the_hardened_runtime_check_is_macos_only() {
+    let install = readme_section("## Install");
+    assert!(
+        install.contains(
+            "The hardened-runtime check and `hardened_runtime_missing` apply to macOS only"
+        )
+    );
+}
+
+#[test]
+fn job024_ac5a_readme_windows_paragraph_says_a_hijacked_agent_can_read_credentials() {
+    let section = readme_section("## What each OS protects against");
+    let windows = section
+        .split("\n\n")
+        .find(|p| p.trim_start().starts_with("**Windows.**"))
+        .expect("no Windows paragraph");
+    for needle in [
+        "Credential Manager",
+        "hijacked Agent",
+        "same user",
+        "honest Agents",
+        "extract",
+    ] {
+        assert!(windows.contains(needle), "Windows paragraph lacks {needle}");
+    }
+    assert!(!windows.contains("no Windows release"));
+    assert!(!read("README.md").contains("no Windows release"));
+}
+
+#[test]
+fn job024_ac5b_readme_and_release_notes_give_the_windows_install() {
+    let install = readme_section("## Install");
+    for needle in [
+        WINDOWS_ONE_LINER,
+        r"%USERPROFILE%\.local\bin\agent-mail.exe",
+        "SHA-256 checksum",
+        "gh attestation verify agent-mail-x86_64-pc-windows-msvc.zip --repo ollie-dev/agent-mail",
+    ] {
+        assert!(install.contains(needle), "Install section lacks {needle}");
+    }
+    let audit = readme_section("## Audit log");
+    assert!(audit.contains(r"Windows: `%LOCALAPPDATA%\agent-mail\audit.log`"));
+    let notes = read(".github/release-notes.md");
+    assert!(notes.contains(WINDOWS_ONE_LINER));
+    assert!(notes.contains(ONE_LINER));
+}
+
+#[test]
+fn job024_ac6a_ci_workflow_tests_on_macos_and_windows() {
+    let ci = read(".github/workflows/ci.yml");
+    let on = ci.split("\non:\n").nth(1).expect("no on: block");
+    let on = on.split("\npermissions:").next().unwrap();
+    assert!(on.contains("push:\n    branches: [main]"), "{on}");
+    assert!(on.contains("pull_request:"), "{on}");
+    let top = ci.split("\njobs:\n").next().unwrap();
+    assert!(top.contains("\npermissions:\n  contents: read\n"));
+    assert!(!ci.contains("write"), "ci holds a write scope");
+    assert!(ci.contains("os: [macos-latest, windows-latest]"));
+    assert!(ci.contains("runs-on: ${{ matrix.os }}"));
+    assert!(ci.contains("run: cargo test --locked"));
+    let uses: Vec<&str> = ci.lines().filter(|l| l.contains("uses:")).collect();
+    assert!(!uses.is_empty());
+    for line in uses {
+        let sha = line
+            .split('@')
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        assert!(
+            sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert!(line.contains(" # v"), "no version comment: {line}");
+    }
+}
+
+#[test]
+fn job024_ac6b_gitattributes_checks_out_lf_everywhere() {
+    let attributes = read(".gitattributes");
+    assert!(attributes.lines().any(|l| l.trim() == "* text=auto eol=lf"));
+    // Text files are checked out with LF line endings, also on Windows.
+    for file in ["tests/release.rs", "README.md", "src/terminal.rs"] {
+        assert!(!read(file).contains('\r'), "{file} has CR line endings");
+    }
+}
+
+#[test]
+fn job024_claude_md_lists_the_windows_files() {
+    let claude = read("CLAUDE.md");
+    for needle in [
+        "install.ps1",
+        ".github/workflows/ci.yml",
+        "tests/credential_manager.rs",
+        "tests/credential_layout.rs",
+        "CredentialManagerStore",
+        ".gitattributes",
+        "x86_64-pc-windows-msvc",
+    ] {
+        assert!(claude.contains(needle), "CLAUDE.md lacks {needle}");
+    }
 }

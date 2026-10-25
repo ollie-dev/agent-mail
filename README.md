@@ -3,7 +3,7 @@ Agent Mail is a simple and secure way to configure access to your email for your
 
 ## Install
 
-agent-mail releases are built for macOS (Apple silicon and Intel). Install the latest release with:
+agent-mail releases are built for macOS (Apple silicon and Intel) and Windows x64. On macOS, install the latest release with:
 
 ```sh
 curl -fsSL https://github.com/ollie-dev/agent-mail/releases/latest/download/install.sh | sh
@@ -17,9 +17,23 @@ The checksum comes from the same release as the binary, so it catches a corrupte
 gh attestation verify agent-mail-aarch64-apple-darwin.tar.gz --repo ollie-dev/agent-mail
 ```
 
+On Windows x64, install the latest release from PowerShell (Windows PowerShell 5.1 or PowerShell 7):
+
+```powershell
+irm https://github.com/ollie-dev/agent-mail/releases/latest/download/install.ps1 | iex
+```
+
+It downloads the zip with its SHA-256 checksum file, verifies the checksum and only then installs `%USERPROFILE%\.local\bin\agent-mail.exe`. If the checksum does not match, it stops and installs nothing. It never asks for administrator rights and does not change your `PATH`; if `%USERPROFILE%\.local\bin` is not on it, it prints a hint. The Windows binary is not code-signed; verify its build attestation instead:
+
+```sh
+gh attestation verify agent-mail-x86_64-pc-windows-msvc.zip --repo ollie-dev/agent-mail
+```
+
+On Windows, Mandates are stored in Windows Credential Manager, where any program running as you can read them; see [What each OS protects against](#what-each-os-protects-against).
+
 On macOS the first Keychain access after an update prompts once, because each release has a new code signature; allow it. A Keychain prompt at any other time is a red flag: deny it.
 
-Release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A release binary checks its own signature before it touches the Keychain; if the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed. Reinstall from the releases page if you see it.
+macOS release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A macOS release binary checks its own signature before it touches the Keychain; if the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed. Reinstall from the releases page if you see it. The hardened-runtime check and `hardened_runtime_missing` apply to macOS only; Windows builds skip them.
 
 ## Creating a Mandate
 
@@ -31,7 +45,7 @@ agent-mail mandate create
 
 It asks for a name, then for each account its server, login and Credential (typed hidden; for Gmail an app password, see [Gmail app passwords](#gmail-app-passwords)). It checks a live login, then lets you tick mailboxes and operations.
 
-At the end it stores the Mandate in the Keychain and prints its Agent Token. The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
+At the end it stores the Mandate in the Keychain (in Windows Credential Manager on Windows) and prints its Agent Token. The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
 
 It then offers to save the Mandate's accounts and Grants (never its Credentials or token) as a TOML file. `agent-mail mandate create --from <FILE>` pre-fills a new setup from that file; every Credential is still typed and checked.
 
@@ -101,7 +115,7 @@ The Keychain prompts once after each agent-mail update; allow it. A Keychain pro
 
 So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. The audit log can also be read or changed by any program running as you.
 
-**Windows.** There is no Windows release yet. The Windows milestone, when it ships, protects only against honest Agents: any program running as the same user can read the Credentials, so a hijacked Agent could extract them.
+**Windows.** Credentials live in Windows Credential Manager. Any program running as the same user can read them, so a hijacked Agent can read (extract) the Credentials and use them without agent-mail, its Policy or its audit log. The Windows build therefore protects only against honest Agents: those that call agent-mail and stay within their Mandate.
 
 ## Several Mandates and whoami
 
@@ -416,8 +430,9 @@ Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail fla
 
 - macOS: `~/Library/Application Support/agent-mail/audit.log` (the home directory comes from the user database, not from `$HOME`)
 - Other Unix: `$XDG_DATA_HOME/agent-mail/audit.log`, or `~/.local/share/agent-mail/audit.log` when `XDG_DATA_HOME` is unset
+- Windows: `%LOCALAPPDATA%\agent-mail\audit.log` (the folder comes from the Local AppData known folder, not from the environment variable)
 
-The directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call. If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. Entries are only ever appended; no agent-mail command reads the log, so open it yourself with a pager or `jq`. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
+On Unix, the directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call. If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. On Windows the file gets the folder's default permissions. Entries are only ever appended; no agent-mail command reads the log, so open it yourself with a pager or `jq`. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
 
 Each line is one JSON object with these keys, in this order, absent keys left out:
 
@@ -453,4 +468,8 @@ The app password is held in memory only: the test keeps it in an in-memory Manda
 
 **Release-binary tests.** `tests/selfcheck.rs` holds opt-in macOS tests, ignored by default, that build the release binary, sign a copy with `scripts/sign-macos.sh` and another without the hardened runtime, and check that only the first reaches the Keychain, that it links only system libraries and that it runs without a Rust toolchain. They present a freshly minted token that no Keychain item matches, so they raise no prompt. They run no audited command, so they write nothing to your audit log. Run them with `cargo test --test selfcheck -- --ignored`.
 
-**Releasing.** Bump `version` in `Cargo.toml`, commit, then tag the commit `vX.Y.Z` with the same version and push the tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `release` workflow (`.github/workflows/release.yml`) checks that the tag matches `Cargo.toml` and runs the tests in a `test` job that only has read access to the repository; once it passes, the `publish` job builds both macOS targets, signs them with `scripts/sign-macos.sh`, attests them and publishes the release with `.github/release-notes.md` as its notes. A final `verify` job then runs `scripts/verify-release.sh vX.Y.Z` on a fresh runner, checking the checksums, signatures and attestations of the published assets; you can run the same script locally against any published tag.
+**Credential Manager tests.** `tests/credential_manager.rs` holds opt-in Windows tests, ignored by default, that write dummy Mandates with fake values to the real Windows Credential Manager through agent-mail's own store, run `mandate create` and `list` against it, and delete them again. Run them with `cargo test --test credential_manager -- --ignored`.
+
+**Releasing.** Bump `version` in `Cargo.toml`, commit, then tag the commit `vX.Y.Z` with the same version and push the tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `release` workflow (`.github/workflows/release.yml`) checks that the tag matches `Cargo.toml` and runs the tests on macOS and Windows in a `test` job that only has read access to the repository. Once they pass, a read-only `build-windows` job builds the Windows x64 zip, and the `publish` job builds both macOS targets, signs them with `scripts/sign-macos.sh`, attests all three archives and publishes the release with `.github/release-notes.md` as its notes.
+
+A final `verify` job then runs `scripts/verify-release.sh vX.Y.Z` on a fresh runner, checking the checksums, signatures and attestations of the published assets (the Windows zip has no signature to check); you can run the same script locally against any published tag. The `ci` workflow (`.github/workflows/ci.yml`) runs `cargo test --locked` on macOS and Windows for every push to `main` and every pull request.
