@@ -1,5 +1,63 @@
-# Agent Mail - Connects you agents securely to your E-Mails
-Agent Mail is a simple and secure way to configure access to your email for your agents. It securely stores your credentials hidden from your agents and allows you to configure what agents can access and do.
+<div align="center">
+
+<img src="assets/icon.png" width="128" alt="Agent Mail icon">
+
+<h1 align="center">Agent Mail</h1>
+
+<p align="center">Connects your agents securely to your email</p>
+
+<p align="center">
+<a href="https://github.com/ollie-dev/agent-mail/releases/latest"><img src="https://img.shields.io/github/v/release/ollie-dev/agent-mail" alt="Latest release"></a>
+<a href="#what-each-os-protects-against"><img src="https://img.shields.io/badge/platform-macOS-lightgrey" alt="Platform: macOS"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
+</p>
+
+</div>
+
+## Why Agent Mail
+
+- Your email Credentials stay in the macOS Keychain, hidden from your Agents.
+- Each Agent works under a Mandate you create: which accounts, which mailboxes, which operations.
+- Agents can search, read, flag and move mail, and draft replies for you to check.
+- Agent Mail never sends: a draft only lands in your Drafts mailbox.
+- Every mail call an Agent makes is written to an append-only audit log.
+- Works from the command line and as an MCP server for Claude Code and Claude Desktop.
+
+## Quick start
+
+Install the latest release:
+
+```sh
+curl -fsSL https://github.com/ollie-dev/agent-mail/releases/latest/download/install.sh | sh
+```
+
+Create a Mandate in your own terminal and note the Agent Token it prints:
+
+```sh
+agent-mail mandate create
+```
+
+Give the token to Claude Code or Claude Desktop as shown in [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop).
+
+## Contents
+
+- [Install](#install)
+- [Creating a Mandate](#creating-a-mandate)
+- [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)
+- [Claude Code plugin](#claude-code-plugin)
+- [Gmail app passwords](#gmail-app-passwords)
+- [What each OS protects against](#what-each-os-protects-against)
+- [Several Mandates and whoami](#several-mandates-and-whoami)
+- [Usage errors](#usage-errors)
+- [Search](#search)
+- [Read](#read)
+- [Flag](#flag)
+- [Move](#move)
+- [Draft](#draft)
+- [MCP server](#mcp-server)
+- [Sandbox and proxies](#sandbox-and-proxies)
+- [Audit log](#audit-log)
+- [Development](#development)
 
 ## Install
 

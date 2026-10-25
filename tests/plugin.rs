@@ -695,3 +695,266 @@ fn job023_ac3_mcp_server_section_warns_never_to_commit_a_token() {
         assert!(is_placeholder(&token), "README token value {token:?}");
     }
 }
+
+// Job 024: the README start page.
+
+/// The README text before its first line that starts with `## `.
+fn readme_header() -> String {
+    let readme = read("README.md");
+    let end = readme
+        .match_indices('\n')
+        .map(|(i, _)| i + 1)
+        .find(|&i| readme[i..].starts_with("## "))
+        .expect("README has no ## heading");
+    readme[..end].to_string()
+}
+
+/// The `## ` headings of the README, in order, without the `## `.
+fn readme_h2s() -> Vec<String> {
+    read("README.md")
+        .lines()
+        .filter_map(|l| l.strip_prefix("## "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The README text before the line `## Install`.
+fn readme_top() -> String {
+    let readme = read("README.md");
+    let end = readme
+        .find("\n## Install\n")
+        .expect("README has no ## Install");
+    readme[..end].to_string()
+}
+
+/// The GitHub anchor of a heading: lower-cased, spaces turned into `-`,
+/// punctuation other than `-` dropped.
+fn github_anchor(heading: &str) -> String {
+    let slug: String = heading
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            '-' | '_' => Some(c),
+            c if c.is_alphanumeric() => Some(c),
+            _ => None,
+        })
+        .collect();
+    format!("#{slug}")
+}
+
+/// Asserts that every needle appears in `text`, in the given order; panics if
+/// one is missing or out of order.
+fn assert_in_order(text: &str, needles: &[&str]) {
+    let mut from = 0;
+    for needle in needles {
+        let at = text[from..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing or out of order"));
+        from += at + needle.len();
+    }
+}
+
+#[test]
+fn job024_ac1_header_is_centred_with_icon_name_and_tagline() {
+    let header = readme_header();
+    assert!(header.contains("align=\"center\""), "{header}");
+    let img = header
+        .split("<img")
+        .skip(1)
+        .find(|t| t.contains("src=\"assets/icon.png\""))
+        .expect("no <img> with src=\"assets/icon.png\"");
+    let img = &img[..img.find('>').unwrap()];
+    assert!(img.contains("width=\"128\""), "{img}");
+    let alt = img
+        .split("alt=\"")
+        .nth(1)
+        .map(|a| &a[..a.find('"').unwrap()])
+        .expect("icon has no alt");
+    assert!(!alt.trim().is_empty(), "{img}");
+    assert!(
+        header.contains("<h1 align=\"center\">Agent Mail</h1>"),
+        "{header}"
+    );
+    assert!(header.contains("Connects your agents securely to your email"));
+    assert!(root().join("assets/icon.png").is_file());
+}
+
+#[test]
+fn job024_ac2_old_title_is_gone_and_first_line_is_not_a_markdown_heading() {
+    let readme = read("README.md");
+    for gone in ["Connects you agents", "E-Mails"] {
+        assert!(!readme.contains(gone), "README still holds {gone:?}");
+    }
+    assert!(!readme.lines().any(|l| l.starts_with("# Agent Mail -")));
+    let first = readme.lines().find(|l| !l.trim().is_empty()).unwrap();
+    assert!(!first.starts_with("# "), "{first}");
+}
+
+#[test]
+fn job024_ac3_header_has_release_platform_and_license_badges_in_links() {
+    let header = readme_header();
+    let links: Vec<(&str, &str)> = header
+        .split("<a href=\"")
+        .skip(1)
+        .map(|t| {
+            let href = &t[..t.find('"').unwrap()];
+            let inner = &t[..t.find("</a>").expect("unclosed <a>")];
+            (href, inner)
+        })
+        .collect();
+    let badge = |fragment: &str| {
+        links
+            .iter()
+            .find(|(_, inner)| inner.contains("<img") && inner.contains(fragment))
+            .map(|(href, _)| *href)
+            .unwrap_or_else(|| panic!("no linked badge with {fragment:?}"))
+    };
+    assert_eq!(
+        badge("img.shields.io/github/v/release/ollie-dev/agent-mail"),
+        "https://github.com/ollie-dev/agent-mail/releases/latest"
+    );
+    badge("img.shields.io/badge/platform-macOS");
+    assert_eq!(badge("img.shields.io/badge/license-Apache"), "LICENSE");
+}
+
+#[test]
+fn job024_ac4_why_section_has_short_bullets_covering_the_promises() {
+    let h2s = readme_h2s();
+    let why = h2s.iter().position(|h| h == "Why Agent Mail").unwrap();
+    let quick = h2s.iter().position(|h| h == "Quick start").unwrap();
+    assert_eq!(why, 0, "## Why Agent Mail must follow the header");
+    assert!(why < quick);
+    let section = readme_section("## Why Agent Mail");
+    let bullets: Vec<&str> = section.lines().filter(|l| l.starts_with("- ")).collect();
+    let others: Vec<&str> = section
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with("- "))
+        .collect();
+    assert!(others.is_empty(), "not a list: {others:?}");
+    assert!(!bullets.is_empty() && bullets.len() <= 6, "{bullets:?}");
+    for b in &bullets {
+        assert!(b.len() <= 120, "bullet too long: {b}");
+    }
+    let joined = bullets.join("\n");
+    for needle in ["Keychain", "Mandate", "audit", "draft", "never sends"] {
+        assert!(joined.contains(needle), "Why misses {needle:?}");
+    }
+    assert!(!read("README.md").contains("simple and secure way"));
+}
+
+#[test]
+fn job024_ac5_quick_start_lists_install_create_and_token_link_in_order() {
+    let h2s = readme_h2s();
+    let quick = h2s.iter().position(|h| h == "Quick start").unwrap();
+    let contents = h2s.iter().position(|h| h == "Contents").unwrap();
+    assert_eq!(h2s[quick - 1], "Why Agent Mail");
+    assert!(quick < contents);
+    let section = readme_section("## Quick start");
+    assert_in_order(&section, &[INSTALLER, "agent-mail mandate create"]);
+    let after = &section[section.find("agent-mail mandate create").unwrap()..];
+    let step = paragraph_with(after, "#agent-tokens-in-claude-code-and-claude-desktop");
+    assert!(step.contains("Claude Code"), "{step}");
+    assert!(step.contains("Claude Desktop"), "{step}");
+    assert!(
+        step.contains("](#agent-tokens-in-claude-code-and-claude-desktop)"),
+        "{step}"
+    );
+    assert!(!section.contains("{\"env\""), "{section}");
+    assert!(!section.contains("AGENT_MAIL_TOKEN="), "{section}");
+    let fences = section
+        .lines()
+        .filter(|l| l.trim_start().starts_with("```"))
+        .count();
+    assert!(fences / 2 <= 3, "{fences} fences");
+}
+
+#[test]
+fn job024_ac6_contents_links_every_later_heading_in_order() {
+    let h2s = readme_h2s();
+    let contents = h2s.iter().position(|h| h == "Contents").unwrap();
+    let install = h2s.iter().position(|h| h == "Install").unwrap();
+    assert_eq!(h2s[contents - 1], "Quick start");
+    assert!(contents < install);
+    let section = readme_section("## Contents");
+    assert_eq!(
+        github_anchor("What each OS protects against"),
+        "#what-each-os-protects-against"
+    );
+    let targets: Vec<String> = h2s[contents + 1..]
+        .iter()
+        .map(|h| format!("]({})", github_anchor(h)))
+        .collect();
+    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+    assert_in_order(&section, &targets);
+}
+
+#[test]
+fn job024_ac7_sections_after_contents_are_kept_in_place_and_order() {
+    let h2s = readme_h2s();
+    let contents = h2s.iter().position(|h| h == "Contents").unwrap();
+    assert_eq!(
+        h2s[contents + 1..],
+        [
+            "Install",
+            "Creating a Mandate",
+            "Agent Tokens in Claude Code and Claude Desktop",
+            "Claude Code plugin",
+            "Gmail app passwords",
+            "What each OS protects against",
+            "Several Mandates and whoami",
+            "Usage errors",
+            "Search",
+            "Read",
+            "Flag",
+            "Move",
+            "Draft",
+            "MCP server",
+            "Sandbox and proxies",
+            "Audit log",
+            "Development",
+        ]
+    );
+}
+
+#[test]
+fn job024_ac8_prose_paragraphs_before_install_are_short() {
+    let top = readme_top();
+    let mut in_fence = false;
+    let mut paragraphs = Vec::new();
+    let mut prose = String::new();
+    // Drop fenced code blocks first, keeping blank lines as separators.
+    for line in top.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            prose.push('\n');
+            continue;
+        }
+        if !in_fence {
+            prose.push_str(line);
+        }
+        prose.push('\n');
+    }
+    for block in prose.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() || block.starts_with('<') {
+            continue;
+        }
+        if block.starts_with("- ") || block.starts_with("* ") {
+            paragraphs.extend(block.split("\n- ").map(str::to_string));
+        } else {
+            paragraphs.push(block.to_string());
+        }
+    }
+    assert!(!paragraphs.is_empty());
+    for p in paragraphs {
+        assert!(p.chars().count() <= 300, "paragraph too long: {p}");
+    }
+}
+
+#[test]
+fn job024_ac9_token_values_in_the_top_part_are_placeholders() {
+    for token in token_values(&readme_top()) {
+        assert!(is_placeholder(&token), "README token value {token:?}");
+    }
+}
