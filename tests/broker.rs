@@ -919,11 +919,30 @@ mod windows {
 
     /// Runs `sc.exe` with `args`, returning its stdout.
     fn sc(args: &[&str]) -> String {
+        sc_status(args).1
+    }
+
+    /// Runs `sc.exe` with `args`, returning whether it exited with 0 and
+    /// its stdout. The `[SC]` result lines are localized, so success is
+    /// read from the exit code, never from the text.
+    fn sc_status(args: &[&str]) -> (bool, String) {
         let output = std::process::Command::new("sc.exe")
             .args(args)
             .output()
             .expect("sc.exe runs");
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        (output.status.success(), stdout)
+    }
+
+    /// Stops and deletes the test service when dropped, so a failed
+    /// assertion never leaves it registered.
+    struct ServiceGuard(&'static str);
+
+    impl Drop for ServiceGuard {
+        fn drop(&mut self) {
+            let _ = sc(&["stop", self.0]);
+            let _ = sc(&["delete", self.0]);
+        }
     }
 
     /// Polls `sc query` until the service is in `state`.
@@ -944,11 +963,12 @@ mod windows {
         let service = "agent-mail-broker-test";
         let bin = format!("\"{}\" broker", env!("CARGO_BIN_EXE_agent-mail"));
         let account = format!(r"NT SERVICE\{service}");
-        let created = sc(&[
+        let (created, output) = sc_status(&[
             "create", service, "binPath=", &bin, "obj=", &account, "type=", "own", "start=",
             "demand",
         ]);
-        assert!(created.contains("SUCCESS"), "{created}");
+        assert!(created, "{output}");
+        let _guard = ServiceGuard(service);
         let started = sc(&["start", service]);
         let running = wait_for_state(service, "RUNNING");
         // The running service's pipe is owned by its service SID, which
