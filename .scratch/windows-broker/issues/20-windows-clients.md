@@ -4,7 +4,7 @@
 
 **Blocked by:** 19
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] On Windows, all Agent commands and `mandate list`/`delete` go through the pipe, with results and errors identical to the in-process ones (shared tests compare them)
 - [ ] The MCP server forwards each tool call to the Broker and renders results as today

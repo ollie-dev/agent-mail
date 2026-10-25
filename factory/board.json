@@ -555,7 +555,7 @@
     {
       "id": "024-readme-start-page",
       "title": "README start page",
-      "feature": "README as a great-looking start page: open with a centred header showing the icon `assets/icon.png` (480\u00d7480 PNG, displayed at about 128px), the name, a one-line tagline (fix the current title's typos: \"Connects your agents securely to your email\"), and badges (latest release, platform macOS, license if one exists); then a short \"why\" (credentials stay in the Keychain, Agents get scoped Mandates, every call is audited, drafts only, never sends), a quick start (install, `mandate create`, give the token to Claude Code or Claude Desktop) of a few commands, and a table of contents. Move the long reference sections (Search, Read, Flag, Move, Draft, MCP server, Sandbox and proxies, Audit log, Several Mandates and whoami, Usage errors) below the quick start or into `docs/` with links, keeping their content accurate. Keep every heading and phrase that tests/plugin.rs and tests/release.rs check, or update those tests in the same change, and keep the README's placeholder-only token scan passing; follow the CLAUDE.md text convention (paragraphs of at most about 300 characters, each thing said once)",
+      "feature": "README as a great-looking start page: open with a centred header showing the icon `assets/icon.png` (480×480 PNG, displayed at about 128px), the name, a one-line tagline (fix the current title's typos: \"Connects your agents securely to your email\"), and badges (latest release, platform macOS, license if one exists); then a short \"why\" (credentials stay in the Keychain, Agents get scoped Mandates, every call is audited, drafts only, never sends), a quick start (install, `mandate create`, give the token to Claude Code or Claude Desktop) of a few commands, and a table of contents. Move the long reference sections (Search, Read, Flag, Move, Draft, MCP server, Sandbox and proxies, Audit log, Several Mandates and whoami, Usage errors) below the quick start or into `docs/` with links, keeping their content accurate. Keep every heading and phrase that tests/plugin.rs and tests/release.rs check, or update those tests in the same change, and keep the README's placeholder-only token scan passing; follow the CLAUDE.md text convention (paragraphs of at most about 300 characters, each thing said once)",
       "branch": "factory/024-readme-start-page",
       "stage": "merged",
       "round": 1,
@@ -595,6 +595,32 @@
       "nits": [],
       "reason": "",
       "updated": "2026-10-25T15:15:39Z"
+    },
+    {
+      "id": "026-windows-broker-clients",
+      "title": "Windows Broker clients",
+      "feature": "Ticket 20: CLI and MCP server as Broker clients on Windows (.scratch/windows-broker/issues/20-windows-clients.md)",
+      "branch": "factory/026-windows-broker-clients",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-25T19:54:08Z",
+      "builder": "abc11f7640b463044"
     }
   ],
   "updated": "2026-10-25T15:15:39Z"
