@@ -4,7 +4,7 @@
 
 **Blocked by:** 18
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The same binary has a service entry point that registers with the Windows service control manager and stops cleanly on a stop request
 - [ ] The pipe's access list allows authenticated local users and the Broker, and nothing else

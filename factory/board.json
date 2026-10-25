@@ -570,7 +570,32 @@
       "reason": "",
       "updated": "2026-10-25T09:56:25Z",
       "builder": "a624b8edcecbe97bd"
+    },
+    {
+      "id": "025-windows-broker-service",
+      "title": "Windows Broker service",
+      "feature": "Ticket 19 and Follow-ups F31, F33: Windows Broker service (.scratch/windows-broker/issues/19-broker.md, factory/follow-ups.md)",
+      "branch": "factory/025-windows-broker-service",
+      "stage": "merged",
+      "round": 2,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "CHANGES",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "CHANGES"
+        }
+      ],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-25T15:15:39Z"
     }
   ],
-  "updated": "2026-10-24T21:19:16Z"
+  "updated": "2026-10-25T15:15:39Z"
 }
