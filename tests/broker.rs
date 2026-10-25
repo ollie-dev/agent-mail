@@ -92,7 +92,7 @@ fn ac1_broker_outside_the_service_manager_prints_one_json_error() {
 fn ac2_pipe_sddl_is_exact() {
     assert_eq!(
         broker::pipe_sddl("S-1-5-80-1-2-3-4-5"),
-        "D:P(A;;0x12019b;;;AU)(A;;GA;;;S-1-5-80-1-2-3-4-5)"
+        "O:S-1-5-80-1-2-3-4-5D:P(A;;0x12019b;;;AU)(A;;GA;;;S-1-5-80-1-2-3-4-5)"
     );
 }
 
@@ -951,6 +951,18 @@ mod windows {
         assert!(created.contains("SUCCESS"), "{created}");
         let started = sc(&["start", service]);
         let running = wait_for_state(service, "RUNNING");
+        // The running service's pipe is owned by its service SID, which
+        // is what every client checks before sending anything.
+        let service_sid = broker::service_sid(service);
+        let owner = (0..200).find_map(|_| match connect(broker::PIPE_NAME) {
+            Ok(pipe) => Some(
+                win::pipe_owner(&pipe).map(|owner| (owner, win::served_by(&pipe, &service_sid))),
+            ),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(25));
+                None
+            }
+        });
         let _ = sc(&["stop", service]);
         let stopped = wait_for_state(service, "STOPPED");
         let _ = sc(&["delete", service]);
@@ -960,5 +972,10 @@ mod windows {
             .find(|l| l.contains("WIN32_EXIT_CODE"))
             .unwrap_or_default();
         assert!(exit_code.contains(": 0 "), "{stopped}");
+        let (owner, served) = owner
+            .expect("the service's pipe accepted no client")
+            .expect("the pipe owner is readable");
+        assert_eq!(owner, service_sid);
+        assert!(served, "served_by refused the service's pipe");
     }
 }

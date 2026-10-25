@@ -50,10 +50,17 @@ pub const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
 /// can talk to the Broker but cannot add a server instance of its pipe.
 pub const PIPE_CLIENT_RIGHTS: u32 = 0x0012_019b;
 
-/// The pipe's security descriptor: read and write, but not creating
-/// instances, for authenticated users ([`PIPE_CLIENT_RIGHTS`]), full access
-/// for the Broker, nothing inherited.
+/// The pipe's security descriptor: owned by the Broker, read and write,
+/// but not creating instances, for authenticated users
+/// ([`PIPE_CLIENT_RIGHTS`]), full access for the Broker, nothing
+/// inherited. The explicit owner is what the clients check (see
+/// [`windows::served_by`]); no other user can set it.
 pub fn pipe_sddl(broker_sid: &str) -> String {
+    format!("O:{broker_sid}{}", pipe_dacl_sddl(broker_sid))
+}
+
+/// The DACL part of [`pipe_sddl`].
+pub fn pipe_dacl_sddl(broker_sid: &str) -> String {
     format!("D:P(A;;0x12019b;;;AU)(A;;GA;;;{broker_sid})")
 }
 

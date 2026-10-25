@@ -711,7 +711,13 @@ impl Write for PipeStream<'_> {
 /// instance also has `FILE_FLAG_FIRST_PIPE_INSTANCE`, so it fails if the
 /// pipe already exists: a second Broker or a squatter cannot create it.
 fn create_pipe(name: &str, broker_sid: &str, first: bool) -> io::Result<OwnedHandle> {
-    let sd = security_descriptor(&super::pipe_sddl(broker_sid))?;
+    create_pipe_with(name, &super::pipe_sddl(broker_sid), first)
+}
+
+/// Creates one instance of the pipe `name` with the security descriptor
+/// `sddl`, as [`create_pipe`] describes.
+fn create_pipe_with(name: &str, sddl: &str, first: bool) -> io::Result<OwnedHandle> {
+    let sd = security_descriptor(sddl)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: sd.0,
@@ -745,10 +751,17 @@ pub fn create_test_pipe(name: &str) -> io::Result<OwnedHandle> {
 }
 
 /// Creates an instance of the pipe `name` with the Broker's access list for
-/// `broker_sid`, as the first instance or as a later one. Test builds only.
+/// `broker_sid`, as the first instance or as a later one. The owner is this
+/// process's user, since no other can be set without privileges. Test
+/// builds only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn create_test_pipe_for(name: &str, broker_sid: &str, first: bool) -> io::Result<OwnedHandle> {
-    create_pipe(name, broker_sid, first)
+    let sddl = format!(
+        "O:{}{}",
+        current_user_sid()?,
+        super::pipe_dacl_sddl(broker_sid)
+    );
+    create_pipe_with(name, &sddl, first)
 }
 
 /// Whether this process runs elevated: the `TokenElevation` of its token.
@@ -795,8 +808,9 @@ pub fn pipe_server_pid(pipe: &File) -> io::Result<u32> {
 }
 
 /// The owner SID of the pipe the client handle `pipe` is connected to: the
-/// account whose process created the pipe. Nobody but that account (or an
-/// administrator) can make another account the owner.
+/// Broker sets itself explicitly ([`super::pipe_sddl`]). A process can
+/// only name its own user as the owner (an administrator can name any), so
+/// a squatter's pipe never has the Broker's owner.
 pub fn pipe_owner(pipe: &File) -> io::Result<String> {
     object_security(pipe.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT)?.owner()
 }
