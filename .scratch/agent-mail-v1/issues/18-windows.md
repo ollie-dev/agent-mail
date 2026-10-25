@@ -4,7 +4,7 @@
 
 **Blocked by:** 03, 16
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] On Windows, `mandate create` stores the Mandate in Credential Manager and `list` with the printed token works (opt-in test, ignored by default)
 - [ ] The hardened-runtime self-check is macOS-only and does not block Windows

@@ -411,7 +411,7 @@ function markdown(src) {
 
 // ---------- backlog ----------
 function renderBacklog(src) {
-  const items = src.split('\n').map(l => l.match(/^\s*[-*]\s+\[ \]\s+(.*)$/)).filter(Boolean).map(m => {
+  const items = src.replace(/\r/g, '').split('\n').map(l => l.match(/^\s*[-*]\s+\[ \]\s+(.*)$/)).filter(Boolean).map(m => {
     const p = m[1].match(/^(.*?)\s*\(([^()\s]+\.md)\)\s*$/);
     return p ? { text: p[1], path: p[2] } : { text: m[1], path: '' };
   });
