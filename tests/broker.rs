@@ -518,6 +518,46 @@ fn ac10_no_reply_carries_a_credential_or_record_and_only_create_the_token() {
     }
 }
 
+// ---------------------------------------------------------------- job 027
+
+#[test]
+fn job027_ac3_purge_deletes_every_mandate_and_the_audit_folder() {
+    let store = InMemoryStore::new();
+    store_owned(&store, &listable("aaaa1111", 1), Some(X));
+    store_owned(&store, &listable("bbbb2222", 1), Some(Y));
+    assert_eq!(store.entries().len(), 2);
+    let log = support::temp_audit_log();
+    let dir = log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&log, "{\"sid\":\"S-1-5-21-1-2-3-1001\"}\n").unwrap();
+
+    let deleted = broker::purge(&store, &dir).unwrap();
+
+    assert_eq!(deleted, 2);
+    assert!(store.entries().is_empty());
+    assert!(!dir.exists(), "{} is still there", dir.display());
+    // Nothing left to delete is not a failure.
+    assert_eq!(broker::purge(&store, &dir).unwrap(), 0);
+}
+
+#[test]
+fn job027_ac3_purge_runs_only_for_the_single_start_argument_purge() {
+    assert!(broker::is_purge_start(&["purge"]));
+    for args in [
+        &[][..],
+        &["purge", "purge"][..],
+        &["purge", "x"][..],
+        &["x", "purge"][..],
+        &["PURGE"][..],
+        &[" purge"][..],
+        &["purge "][..],
+        &["broker"][..],
+        &[""][..],
+    ] {
+        assert!(!broker::is_purge_start(args), "{args:?}");
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;

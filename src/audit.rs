@@ -17,7 +17,7 @@ use serde::Serialize;
 /// Directory name under the platform's per-user data directory.
 const APP_DIR: &str = "agent-mail";
 /// File name of the log.
-const FILE_NAME: &str = "audit.log";
+pub const FILE_NAME: &str = "audit.log";
 
 /// Whether the Policy granted the operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,6 +137,13 @@ impl AuditLog {
             path: program_data().map(|base| base.join(APP_DIR).join(FILE_NAME)),
             broker_sid: Some(broker_sid.to_string()),
         }
+    }
+
+    /// The folder of the Broker's log, `%ProgramData%\agent-mail`, as
+    /// [`AuditLog::broker`] finds it; what the purge deletes.
+    #[cfg(windows)]
+    pub fn broker_dir() -> Option<PathBuf> {
+        program_data().map(|base| base.join(APP_DIR))
     }
 
     /// The Broker's log under `program_data` instead of the known folder.

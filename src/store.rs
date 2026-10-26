@@ -441,6 +441,20 @@ mod credential_manager {
         pub fn target_names(&self) -> Result<Vec<String>, StoreError> {
             target_names_under_prefix()
         }
+
+        /// Deletes every target under `agent-mail:` that is not the first
+        /// part of a record: later parts and names that do not decode, which
+        /// [`MandateStore::delete`] cannot reach. Returns how many it
+        /// deleted. Used by the Broker's purge before deleting the records.
+        pub fn delete_unfiled_targets(&self) -> Result<usize, StoreError> {
+            let mut deleted = 0;
+            for name in target_names_under_prefix()? {
+                if !matches!(classify(&name), Some(Target::Record(_))) && remove(&name)? {
+                    deleted += 1;
+                }
+            }
+            Ok(deleted)
+        }
     }
 
     impl MandateStore for CredentialManagerStore {

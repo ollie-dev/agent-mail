@@ -1115,7 +1115,52 @@ fn run_broker(stop: &StopSignal) -> io::Result<()> {
     serve(&store, &network, &audit, stop)
 }
 
-unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
+/// The service-specific exit code of a failed purge.
+pub const PURGE_FAILED: u32 = 2;
+
+/// Deletes every Mandate in the Broker's own Credential Manager store and
+/// the `%ProgramData%\agent-mail` audit folder ([`super::purge`]). Opens no
+/// pipe.
+fn run_purge() -> Result<usize, super::PurgeError> {
+    let store = CredentialManagerStore;
+    store
+        .delete_unfiled_targets()
+        .map_err(super::PurgeError::Store)?;
+    let dir = AuditLog::broker_dir()
+        .ok_or_else(|| super::PurgeError::Audit(io::Error::other("no ProgramData folder")))?;
+    super::purge(&store, &dir)
+}
+
+/// The service start arguments after the service name, `argv[1..argc]`.
+///
+/// # Safety
+/// `argv` holds `argc` NUL-terminated UTF-16 strings, as the service
+/// control manager passes them.
+unsafe fn start_arguments(argc: u32, argv: *mut PWSTR) -> Vec<String> {
+    if argv.is_null() {
+        return Vec::new();
+    }
+    (1..argc as usize)
+        .map(|i| {
+            // SAFETY: `i` is below `argc`.
+            let arg = unsafe { *argv.add(i) };
+            if arg.is_null() {
+                return String::new();
+            }
+            let mut len = 0;
+            // SAFETY: a NUL-terminated string.
+            while unsafe { *arg.add(len) } != 0 {
+                len += 1;
+            }
+            // SAFETY: `len` units were just read.
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(arg, len) })
+        })
+        .collect()
+}
+
+unsafe extern "system" fn service_main(argc: u32, argv: *mut PWSTR) {
+    // SAFETY: the arguments come from the service control manager.
+    let args = unsafe { start_arguments(argc, argv) };
     let name = wide(SERVICE_NAME);
     // SAFETY: `name` is NUL-terminated; the handler is a valid function.
     let handle =
@@ -1125,6 +1170,14 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     }
     STATUS.store(handle as usize, Ordering::SeqCst);
     report(SERVICE_START_PENDING, NO_ERROR, 0);
+    if super::is_purge_start(&args) {
+        report(SERVICE_RUNNING, NO_ERROR, 0);
+        match run_purge() {
+            Ok(_) => report(SERVICE_STOPPED, NO_ERROR, 0),
+            Err(_) => report(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, PURGE_FAILED),
+        }
+        return;
+    }
     let stop = match StopSignal::new() {
         Ok(signal) => STOP.get_or_init(|| signal),
         Err(_) => {

@@ -1,7 +1,11 @@
 //! The release files: the installer (AC5, macOS), the workflow (AC3, AC7)
-//! and the release notes and README (AC7, AC10). All values are fake.
+//! and the release notes and README (AC7, AC10), and the static checks and
+//! parsing of the Windows `install.ps1` and `uninstall.ps1` (job 027; they
+//! run for real in `tests/installers.rs`). All values are fake.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -16,6 +20,7 @@ fn read(path: &str) -> String {
 }
 
 /// A fresh, empty temporary directory.
+#[cfg(target_os = "macos")]
 fn temp_dir(label: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -409,335 +414,6 @@ mod installer {
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
     }
-}
-
-// ---------------------------------------------------------------- job 024 AC4
-
-#[cfg(windows)]
-mod windows_installer {
-    use super::*;
-
-    const WINDOWS_ASSET: &str = "agent-mail-x86_64-pc-windows-msvc.zip";
-
-    /// The fake binary every test zip holds.
-    const FAKE_EXE: &[u8] = b"MZ fake agent-mail.exe for installer tests";
-
-    /// The PowerShell hosts to run the installer under: Windows PowerShell
-    /// 5.1 always, PowerShell 7 too where it is installed.
-    fn shells() -> Vec<&'static str> {
-        let mut shells = vec!["powershell.exe"];
-        let pwsh = Command::new("pwsh.exe")
-            .args(["-NoProfile", "-Command", "exit 0"])
-            .output();
-        if pwsh.is_ok_and(|o| o.status.success()) {
-            shells.push("pwsh.exe");
-        }
-        shells
-    }
-
-    fn powershell(command: &str) -> Output {
-        let out = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", command])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{command}: {out:?}");
-        out
-    }
-
-    /// The `.sha256` line for `digest`.
-    fn sum_line(digest: &str) -> String {
-        format!("{digest}  {WINDOWS_ASSET}\n")
-    }
-
-    /// A download directory holding a zip of `files` (name, bytes), built
-    /// with `Compress-Archive`, and its correct `.sha256`.
-    fn downloads_with(files: &[(&str, &[u8])]) -> PathBuf {
-        let dir = temp_dir("win-downloads");
-        let stage = temp_dir("win-stage");
-        for (name, bytes) in files {
-            std::fs::write(stage.join(name), bytes).unwrap();
-        }
-        let zip = dir.join(WINDOWS_ASSET);
-        powershell(&format!(
-            "Compress-Archive -Path '{}\\*' -DestinationPath '{}'",
-            stage.display(),
-            zip.display()
-        ));
-        let out = powershell(&format!(
-            "(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash.ToLowerInvariant()",
-            zip.display()
-        ));
-        let digest = String::from_utf8(out.stdout).unwrap().trim().to_string();
-        assert_eq!(digest.len(), 64, "{digest}");
-        std::fs::write(
-            dir.join(format!("{WINDOWS_ASSET}.sha256")),
-            sum_line(&digest),
-        )
-        .unwrap();
-        dir
-    }
-
-    fn downloads() -> PathBuf {
-        downloads_with(&[("agent-mail.exe", FAKE_EXE)])
-    }
-
-    /// A finished installer run: its output and the temporary directory it
-    /// was given.
-    struct Run {
-        output: Output,
-        tmp: PathBuf,
-    }
-
-    impl Run {
-        fn stdout(&self) -> String {
-            String::from_utf8_lossy(&self.output.stdout).into_owned()
-        }
-
-        fn stderr(&self) -> String {
-            String::from_utf8_lossy(&self.output.stderr).into_owned()
-        }
-    }
-
-    fn install_with(shell: &str, home: &Path, downloads: &Path, arch: &str) -> Run {
-        let tmp = temp_dir("win-tmp");
-        let url = format!(
-            "file:///{}",
-            downloads.display().to_string().replace('\\', "/")
-        );
-        let output = Command::new(shell)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(Path::new(ROOT).join("install.ps1"))
-            .env("USERPROFILE", home)
-            .env("TMP", &tmp)
-            .env("TEMP", &tmp)
-            .env("PROCESSOR_ARCHITECTURE", arch)
-            .env("AGENT_MAIL_DOWNLOAD_URL", url)
-            .output()
-            .unwrap();
-        Run { output, tmp }
-    }
-
-    fn install(shell: &str, home: &Path, downloads: &Path) -> Run {
-        install_with(shell, home, downloads, "AMD64")
-    }
-
-    fn bin_dir(home: &Path) -> PathBuf {
-        home.join(".local").join("bin")
-    }
-
-    fn bin_files(home: &Path) -> Vec<String> {
-        match std::fs::read_dir(bin_dir(home)) {
-            Ok(entries) => entries
-                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn assert_refused(run: &Run, home: &Path) {
-        assert_ne!(run.output.status.code(), Some(0), "{:?}", run.output);
-        assert!(
-            bin_files(home).is_empty(),
-            "installed: {:?}",
-            bin_files(home)
-        );
-    }
-
-    #[test]
-    fn job024_ac4a_matching_checksum_installs_agent_mail_exe() {
-        for shell in shells() {
-            let home = temp_dir("win-home");
-            let run = install(shell, &home, &downloads());
-            assert_eq!(
-                run.output.status.code(),
-                Some(0),
-                "{shell}: {:?}",
-                run.output
-            );
-            let installed = bin_dir(&home).join("agent-mail.exe");
-            assert_eq!(std::fs::read(&installed).unwrap(), FAKE_EXE, "{shell}");
-            assert_eq!(bin_files(&home), ["agent-mail.exe"], "{shell}");
-            assert!(
-                run.stdout().contains(&installed.display().to_string()),
-                "{shell}: {}",
-                run.stdout()
-            );
-            assert!(
-                run.stdout().contains("not on your PATH"),
-                "{}",
-                run.stdout()
-            );
-            assert_eq!(
-                std::fs::read_dir(&run.tmp).unwrap().count(),
-                0,
-                "{shell}: temporary directory left"
-            );
-        }
-    }
-
-    #[test]
-    fn job024_ac4b_existing_install_is_replaced() {
-        for shell in shells() {
-            let home = temp_dir("win-home");
-            std::fs::create_dir_all(bin_dir(&home)).unwrap();
-            std::fs::write(bin_dir(&home).join("agent-mail.exe"), "old").unwrap();
-            let run = install(shell, &home, &downloads());
-            assert_eq!(
-                run.output.status.code(),
-                Some(0),
-                "{shell}: {:?}",
-                run.output
-            );
-            assert_eq!(
-                std::fs::read(bin_dir(&home).join("agent-mail.exe")).unwrap(),
-                FAKE_EXE
-            );
-            assert_eq!(bin_files(&home), ["agent-mail.exe"], "{shell}");
-        }
-    }
-
-    #[test]
-    fn job024_ac4c_checksum_mismatch_installs_nothing() {
-        for shell in shells() {
-            let home = temp_dir("win-home");
-            let downloads = downloads();
-            std::fs::write(
-                downloads.join(format!("{WINDOWS_ASSET}.sha256")),
-                sum_line(&"0".repeat(64)),
-            )
-            .unwrap();
-            let run = install(shell, &home, &downloads);
-            assert_refused(&run, &home);
-            assert!(
-                run.stderr().contains(
-                    "checksum mismatch for agent-mail-x86_64-pc-windows-msvc.zip; nothing was installed"
-                ),
-                "{shell}: {}",
-                run.stderr()
-            );
-            assert_eq!(std::fs::read_dir(&run.tmp).unwrap().count(), 0);
-        }
-    }
-
-    #[test]
-    fn job024_ac4d_malformed_checksum_file_installs_nothing() {
-        for shell in shells() {
-            let digest = "a".repeat(64);
-            for malformed in [
-                format!("{digest}  {WINDOWS_ASSET}.sha256\n"),
-                format!("{digest} {WINDOWS_ASSET}\n"),
-                format!("{}  {WINDOWS_ASSET}\n", "A".repeat(64)),
-                format!("{digest}  {WINDOWS_ASSET}\r\n"),
-                format!("{digest}  {WINDOWS_ASSET}\n{digest}  {WINDOWS_ASSET}\n"),
-                String::new(),
-            ] {
-                let home = temp_dir("win-home");
-                let downloads = downloads();
-                std::fs::write(
-                    downloads.join(format!("{WINDOWS_ASSET}.sha256")),
-                    &malformed,
-                )
-                .unwrap();
-                let run = install(shell, &home, &downloads);
-                assert_refused(&run, &home);
-                assert!(
-                    run.stderr().contains("checksum file")
-                        && run.stderr().contains("malformed")
-                        && run.stderr().contains("nothing was installed"),
-                    "{shell} {malformed:?}: {}",
-                    run.stderr()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn job024_ac4e_missing_zip_installs_nothing() {
-        for shell in shells() {
-            let home = temp_dir("win-home");
-            let downloads = downloads();
-            std::fs::remove_file(downloads.join(WINDOWS_ASSET)).unwrap();
-            let run = install(shell, &home, &downloads);
-            assert_refused(&run, &home);
-            assert!(
-                run.stderr().contains("could not download"),
-                "{}",
-                run.stderr()
-            );
-        }
-    }
-
-    #[test]
-    fn job024_ac4f_zip_without_only_agent_mail_exe_installs_nothing() {
-        for shell in shells() {
-            for files in [
-                &[("other.exe", FAKE_EXE)][..],
-                &[("agent-mail.exe", FAKE_EXE), ("extra.dll", b"x")][..],
-            ] {
-                let home = temp_dir("win-home");
-                let run = install(shell, &home, &downloads_with(files));
-                assert_refused(&run, &home);
-                assert!(
-                    run.stderr().contains("must hold exactly agent-mail.exe"),
-                    "{shell}: {}",
-                    run.stderr()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn job024_ac4g_non_x64_is_refused_with_a_message_naming_x64() {
-        let home = temp_dir("win-home");
-        let run = install_with("powershell.exe", &home, &downloads(), "ARM64");
-        assert_refused(&run, &home);
-        assert!(run.stderr().contains("x64"), "{}", run.stderr());
-    }
-}
-
-#[test]
-fn job024_ac4g_installer_never_elevates_runs_the_binary_or_changes_path() {
-    let script = read("install.ps1");
-    let code: Vec<&str> = script
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .collect();
-    let code = code.join("\n");
-    for forbidden in [
-        "Start-Process",
-        "RunAs",
-        "Invoke-Expression",
-        "iex",
-        "SetEnvironmentVariable",
-        "$env:PATH =",
-        "$env:Path =",
-        "$env:PATH +=",
-        "$env:Path +=",
-        "setx",
-        "& $dest",
-        "& $binary",
-        "& $staged",
-        "Invoke-Item",
-    ] {
-        assert!(
-            !code.contains(forbidden),
-            "install.ps1 contains {forbidden}"
-        );
-    }
-    assert!(code.contains("$arch -ne 'AMD64'"), "no AMD64 check");
-    assert!(code.contains("x64"), "the refusal does not name x64");
-    assert!(code.contains("not on your PATH"), "no PATH hint");
-    // Nothing is extracted before the checksum passes.
-    let mismatch = code.find("checksum mismatch").unwrap();
-    let extract = code.find("ExtractToFile").unwrap();
-    assert!(mismatch < extract, "extracts before the checksum check");
 }
 
 // ---------------------------------------------------------------- AC7
@@ -1152,5 +828,341 @@ fn job024_claude_md_lists_the_windows_files() {
         "x86_64-pc-windows-msvc",
     ] {
         assert!(claude.contains(needle), "CLAUDE.md lacks {needle}");
+    }
+}
+
+// ---------------------------------------------------------------- job 027
+
+/// The lines of a PowerShell script that are not comments, trimmed.
+fn ps_code(path: &str) -> String {
+    let script = read(path);
+    let code: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    code.join("\n")
+}
+
+/// Checks the elevation of `script`: one `Start-Process -Verb RunAs -Wait`
+/// of the host itself with the script's own text, behind the
+/// Administrators role check, and the refusal ending in `refusal`.
+fn assert_elevates_once(script: &str, refusal: &str) {
+    let code = ps_code(script);
+    assert_eq!(
+        code.matches("Start-Process").count(),
+        1,
+        "{script}: Start-Process"
+    );
+    assert_eq!(code.matches("RunAs").count(), 1, "{script}: RunAs");
+    let start = code.lines().find(|l| l.contains("Start-Process")).unwrap();
+    for needle in [
+        "-Verb RunAs",
+        "-Wait",
+        "-PassThru",
+        "-EncodedCommand $encoded",
+        "-FilePath $hostExe",
+    ] {
+        assert!(start.contains(needle), "{script}: {start} lacks {needle}");
+    }
+    assert!(!start.contains("-File "), "{script} relaunches a file");
+    assert!(code.contains("$hostExe = (Get-Process -Id $PID).Path"));
+    // The elevated copy runs this block's own text, never a file.
+    assert!(code.contains("$AgentMailText = $MyInvocation.MyCommand.ScriptBlock.ToString()"));
+    assert!(code.contains("$inner = \"& {$AgentMailText} "));
+    assert!(code.contains(".IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"));
+    assert!(code.contains("New-Object Security.Principal.WindowsPrincipal("));
+    let check = code
+        .find("elseif (Test-Administrator) {")
+        .unwrap_or_else(|| panic!("{script}: no Administrators check"));
+    let relaunched = code
+        .find("} elseif ($Relaunched) {")
+        .unwrap_or_else(|| panic!("{script}: the elevated copy may relaunch"));
+    let start_at = code.find("Start-Process").unwrap();
+    assert!(
+        check < relaunched && relaunched < start_at,
+        "{script}: order"
+    );
+    assert!(
+        code.contains("$code = $elevated.ExitCode") && code.contains("exit $code"),
+        "{script} does not exit with the elevated copy's code"
+    );
+    assert_eq!(
+        code.matches(&format!("administrator rights are needed; {refusal}\")"))
+            .count(),
+        2,
+        "{script}: refusal text"
+    );
+    assert!(code.contains("[void](Read-Host 'Press Enter to close this window')"));
+    // Nothing comes from the user-writable environment or %TEMP%.
+    for forbidden in [
+        "$env:ProgramFiles",
+        "$env:ProgramData",
+        "$env:TEMP",
+        "$env:TMP",
+        "GetTempPath",
+        "AGENT_MAIL_DOWNLOAD_URL",
+        "$env:USERPROFILE",
+        "$env:SystemRoot",
+        "$env:windir",
+        "Invoke-Expression",
+        "iex ",
+    ] {
+        assert!(!code.contains(forbidden), "{script} uses {forbidden}");
+    }
+    assert!(code.contains("Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'agent-mail'"));
+    assert!(code.contains("Join-Path ([Environment]::SystemDirectory) 'sc.exe'"));
+    assert!(code.contains("[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames"));
+    assert!(code.contains("'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'"));
+}
+
+#[test]
+fn job027_ac1_install_elevates_once_behind_the_administrators_check() {
+    assert_elevates_once("install.ps1", "nothing was installed");
+    let code = ps_code("install.ps1");
+    assert!(code.contains("param([string]$DownloadUrl, [switch]$Relaunched)"));
+    // The URL reaches the elevated copy inside its command line.
+    assert!(code.contains(
+        "-DownloadUrl ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$url'))) -Relaunched"
+    ));
+}
+
+#[test]
+fn job027_ac1_install_verifies_before_extracting_and_stages_in_the_install_folder() {
+    let code = ps_code("install.ps1");
+    let mismatch = code.find("checksum mismatch").unwrap();
+    let extract = code.find("ExtractToFile").unwrap();
+    assert!(mismatch < extract, "extracts before the checksum check");
+    assert!(code.find("is malformed; nothing was installed").unwrap() < extract);
+    for message in [
+        "checksum mismatch for $Asset; nothing was installed",
+        "checksum file for $Asset is malformed; nothing was installed",
+        "could not download $baseUrl/$Asset; nothing was installed",
+        "$Asset must hold exactly agent-mail.exe; nothing was installed",
+        "agent-mail for Windows is built for x64 (AMD64) only",
+        "$arch -ne 'AMD64'",
+        "the new binary did not start; the previous version was restored",
+        "Installed agent-mail $version",
+        "Open a new terminal",
+    ] {
+        assert!(code.contains(message), "install.ps1 lacks {message}");
+    }
+    assert!(code.contains("$Prefix = 'agent-mail installer'"));
+    // Downloads and extraction happen in a fresh folder inside the
+    // admin-only install folder.
+    assert!(
+        code.contains(
+            "$staging = Join-Path $folder ('.staging-' + [Guid]::NewGuid().ToString('N'))"
+        )
+    );
+    assert!(code.contains("$binary = Get-Release $staging"));
+    assert!(code.contains("$zip = Join-Path $Staging $Asset"));
+}
+
+#[test]
+fn job027_ac1_install_registers_the_broker_with_a_quoted_path_and_an_explicit_access_list() {
+    let code = ps_code("install.ps1");
+    assert!(code.contains(r#"$binPath = 'binPath= "\"' + $Exe + '\" broker"'"#));
+    assert!(code.contains(r#"obj= `"NT SERVICE\$ServiceName`" start= delayed-auto type= own"#));
+    assert!(code.contains("$ServiceSddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'"));
+    assert!(code.contains("Invoke-Sc \"sdset $ServiceName $ServiceSddl\""));
+    assert!(code.contains(
+        "/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX"
+    ));
+    // The new binary is checked with --version before anything is stopped
+    // or replaced.
+    let version = code.find("$version = Get-BinaryVersion $binary").unwrap();
+    let stop = code
+        .find("Stop-Broker\n}\nif (Test-Path -LiteralPath $exe)")
+        .unwrap();
+    assert!(version < stop);
+}
+
+#[test]
+fn job027_ac3_uninstall_asks_before_elevating_and_purges_through_the_broker() {
+    assert_elevates_once("uninstall.ps1", "nothing was removed");
+    let code = ps_code("uninstall.ps1");
+    assert!(code.contains("param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)"));
+    for message in [
+        "Read-Host 'Delete all stored Mandates and the audit log? Agents lose access and this cannot be undone. [y/N]'",
+        "Keeping the stored Mandates and the audit log.",
+        "cannot ask for confirmation; rerun with -KeepData or -Force",
+        "could not delete the stored Mandates; nothing else was removed",
+        "agent-mail was removed.",
+        "agent-mail is not installed.",
+        "Invoke-Sc \"start $ServiceName purge\"",
+        "Invoke-Sc \"delete $ServiceName\"",
+        "$Prefix = 'uninstall.ps1'",
+        "@('y', 'yes') -contains ([string]$answer).Trim().ToLowerInvariant()",
+        "$status.ExitCode -eq 0 -and $status.ServiceSpecificExitCode -eq 0",
+    ] {
+        assert!(code.contains(message), "uninstall.ps1 lacks {message}");
+    }
+    // -KeepData wins over -Force, the confirmation comes before the
+    // elevation, and the elevated copy is told the answer.
+    let keep = code.find("if ($KeepData) {").unwrap();
+    let force = code.find("} elseif ($Force) {").unwrap();
+    let ask = code.find("Read-Host 'Delete all").unwrap();
+    let elevate = code.find("Start-Process").unwrap();
+    assert!(keep < force && force < ask && ask < elevate);
+    assert!(code.contains("$choice = if ($deleteData) { '-Force' } else { '-KeepData' }"));
+    assert!(code.contains("$inner = \"& {$AgentMailText} $choice -Relaunched\""));
+    // The purge runs before the service is deleted.
+    assert!(code.find("(Invoke-Purge)").unwrap() < code.find("Invoke-Sc \"delete").unwrap());
+}
+
+#[test]
+fn job027_ac4_scripts_are_ascii_with_lf_line_endings() {
+    // Windows PowerShell 5.1 reads a file without a BOM as ANSI.
+    for script in ["install.ps1", "uninstall.ps1"] {
+        let text = read(script);
+        assert!(text.is_ascii(), "{script} is not ASCII");
+        assert!(!text.contains('\r'), "{script} has CR line endings");
+    }
+}
+
+#[test]
+fn job027_ac4_publish_uploads_both_installers() {
+    let workflow = read(".github/workflows/release.yml");
+    let publish = job(&workflow, "publish");
+    assert!(publish.contains("cp install.ps1 dist/install.ps1"));
+    assert!(publish.contains("cp uninstall.ps1 dist/uninstall.ps1"));
+    let create = publish
+        .split("gh release create")
+        .nth(1)
+        .expect("no gh release create");
+    let files: Vec<&str> = create
+        .lines()
+        .map(|l| l.trim().trim_end_matches('\\').trim())
+        .collect();
+    for asset in ["dist/install.ps1", "dist/uninstall.ps1"] {
+        assert!(files.contains(&asset), "gh release create lacks {asset}");
+    }
+}
+
+#[test]
+fn job027_ac5_verify_release_checks_the_installer_assets() {
+    let verify = read("scripts/verify-release.sh");
+    for needle in [
+        "uninstall.ps1",
+        "install.ps1",
+        "missing asset",
+        "git show",
+        r#"for name in install.ps1 uninstall.ps1; do"#,
+        r#"gh release download "$tag" --repo "$repo" --dir "$dir" --pattern "$name""#,
+        r#"[ -f "$dir/$name" ] || { echo "missing asset $name" >&2; exit 1; }"#,
+        r#"git -C "$root" show "$tag:$name" > "$dir/$name.expected""#,
+        r#"cmp -s "$dir/$name" "$dir/$name.expected""#,
+        r#"echo "$name differs from $tag" >&2"#,
+    ] {
+        assert!(verify.contains(needle), "verify-release.sh lacks {needle}");
+    }
+    let header: Vec<&str> = verify.lines().take_while(|l| l.starts_with('#')).collect();
+    let header = header.join("\n");
+    for needle in [
+        "install.ps1",
+        "uninstall.ps1",
+        "missing asset",
+        "git show",
+        "differs from",
+    ] {
+        assert!(header.contains(needle), "header comment lacks {needle}");
+    }
+    #[cfg(unix)]
+    {
+        let status = Command::new("sh")
+            .arg("-n")
+            .arg(Path::new(ROOT).join("scripts/verify-release.sh"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "verify-release.sh does not parse");
+    }
+}
+
+#[test]
+fn job027_ac6_windows_ci_runs_the_installer_tests() {
+    const STEP: &str = "      - name: Installer tests\n        if: runner.os == 'Windows'\n        run: cargo test --locked --test installers -- --ignored --test-threads=1\n";
+    let ci = read(".github/workflows/ci.yml");
+    assert!(ci.contains(STEP), "ci.yml lacks the installer step");
+    let release = read(".github/workflows/release.yml");
+    let test = job(&release, "test");
+    assert!(
+        test.contains(STEP),
+        "release.yml test job lacks the installer step"
+    );
+    assert_eq!(scopes_of(test), ["contents: read"]);
+}
+
+#[cfg(windows)]
+mod powershell {
+    use super::*;
+
+    /// Windows PowerShell 5.1 always, PowerShell 7 too where installed.
+    fn shells() -> Vec<&'static str> {
+        let mut shells = vec!["powershell.exe"];
+        let pwsh = Command::new("pwsh.exe")
+            .args(["-NoProfile", "-Command", "exit 0"])
+            .output();
+        if pwsh.is_ok_and(|o| o.status.success()) {
+            shells.push("pwsh.exe");
+        }
+        shells
+    }
+
+    fn run(shell: &str, command: &str) -> Output {
+        Command::new(shell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", command])
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn job027_ac4_both_scripts_parse_under_each_shell() {
+        for shell in shells() {
+            for script in ["install.ps1", "uninstall.ps1"] {
+                let path = Path::new(ROOT).join(script);
+                let out = run(
+                    shell,
+                    &format!(
+                        "$errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('{}', [ref]$null, [ref]$errors); $errors.Count",
+                        path.display()
+                    ),
+                );
+                assert!(out.status.success(), "{shell} {script}: {out:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    "0",
+                    "{shell}: {script} has parse errors"
+                );
+            }
+        }
+    }
+
+    /// The elevated relaunch's command line, built as the scripts build it
+    /// but from their whole text and a long URL, stays well under the
+    /// 32,767-character limit.
+    #[test]
+    fn job027_ac1_the_relaunch_command_line_fits() {
+        for script in ["install.ps1", "uninstall.ps1"] {
+            let path = Path::new(ROOT).join(script);
+            let out = run(
+                "powershell.exe",
+                &format!(
+                    "$text = [IO.File]::ReadAllText('{}'); \
+                     $inner = '& {{' + $text + '}} -DownloadUrl ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(' + ('A' * 400) + '))) -Relaunched'; \
+                     $buffer = New-Object IO.MemoryStream; \
+                     $gzip = New-Object IO.Compression.GZipStream($buffer, [IO.Compression.CompressionMode]::Compress); \
+                     $bytes = [Text.Encoding]::UTF8.GetBytes($inner); $gzip.Write($bytes, 0, $bytes.Length); $gzip.Close(); \
+                     $payload = [Convert]::ToBase64String($buffer.ToArray()); \
+                     $boot = 'GZipStream FromBase64String ScriptBlock StreamReader Decompress ReadToEnd ' * 4 + $payload; \
+                     ('-NoProfile -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($boot))).Length",
+                    path.display()
+                ),
+            );
+            assert!(out.status.success(), "{script}: {out:?}");
+            let length: usize = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            // Room for the host's own path in front.
+            assert!(length < 32_767 - 1_024, "{script}: {length} characters");
+        }
     }
 }
