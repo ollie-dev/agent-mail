@@ -4,7 +4,7 @@
 
 **Blocked by:** 21
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The README's "What each OS protects against" section says both platforms protect against a hijacked Agent, how (Keychain plus self-check on macOS, the Broker on Windows), and that administrators are out of scope; the old Windows "honest Agents only" caveat is gone
 - [ ] The README's install section covers the elevated `install.ps1`, updates and `uninstall.ps1`; the Mandate section says `mandate create` on Windows needs an elevated terminal; the audit section documents `agent-mail audit` and the Windows log location

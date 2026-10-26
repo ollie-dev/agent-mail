@@ -660,7 +660,26 @@
       "updated": "2026-10-26T14:22:49Z",
       "builder": "ac42e3a3a2388ee19",
       "approvedBy": "human"
+    },
+    {
+      "id": "028-broker-docs",
+      "title": "Broker docs",
+      "feature": "Ticket 22: Docs for the Windows Broker (.scratch/windows-broker/issues/22-docs.md)",
+      "branch": "factory/028-broker-docs",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-26T14:55:25Z",
+      "builder": "a57913594bfdc7444"
     }
   ],
-  "updated": "2026-10-26T14:22:49Z"
+  "updated": "2026-10-26T14:55:25Z"
 }
