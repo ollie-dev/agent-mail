@@ -1,8 +1,9 @@
 //! The Windows installers for real: `install.ps1` against a `file://`
 //! download directory holding the test-built `agent-mail.exe`, and
 //! `uninstall.ps1`. They install to `%ProgramFiles%\agent-mail`, register
-//! the Broker service and change the machine Path, so every test is opt-in
-//! and needs an elevated shell:
+//! the Broker service and change the machine Path, so every installer test
+//! is opt-in and needs an elevated shell (only the fixture check of the
+//! fake server's certificate chain runs by default):
 //!
 //!   cargo test --locked --test installers -- --ignored --test-threads=1
 //!
@@ -541,6 +542,44 @@ fn assert_nothing_installed(shell: &str, before: &MachinePath) {
         "{shell}: the install folder exists"
     );
     assert_eq!(&machine_path(), before, "{shell}: the machine Path changed");
+}
+
+// ---------------------------------------------------------------- fixture
+
+/// The fake IMAP server's certificate chains to its test CA the way the
+/// Broker's platform verifier builds chains: Windows' own chain engine,
+/// with the CA as the only extra certificate. A leaf whose subject equals
+/// its issuer (rcgen's default DN on both) is taken as self-signed and
+/// never reaches the CA. Not ignored: it needs no rights and changes
+/// nothing.
+#[test]
+fn job027_fake_server_certificate_chains_to_the_test_ca_on_windows() {
+    let (ca, leaf, _) = support::test_certificates();
+    let contains = |der: &[u8], text: &str| der.windows(text.len()).any(|w| w == text.as_bytes());
+    assert!(contains(&ca, support::TEST_CA_NAME));
+    assert!(!contains(&ca, "rcgen self signed cert"));
+    assert!(!contains(&leaf, "rcgen self signed cert"));
+    let dir = temp_dir("chain");
+    let (ca_file, leaf_file) = (dir.join("ca.cer"), dir.join("leaf.cer"));
+    std::fs::write(&ca_file, ca.as_ref()).unwrap();
+    std::fs::write(&leaf_file, leaf.as_ref()).unwrap();
+    let out = ps(&format!(
+        "$ca = New-Object Security.Cryptography.X509Certificates.X509Certificate2({}); \
+         $leaf = New-Object Security.Cryptography.X509Certificates.X509Certificate2({}); \
+         $chain = New-Object Security.Cryptography.X509Certificates.X509Chain; \
+         $chain.ChainPolicy.RevocationMode = 'NoCheck'; \
+         $chain.ChainPolicy.VerificationFlags = 'AllowUnknownCertificateAuthority'; \
+         [void]$chain.ChainPolicy.ExtraStore.Add($ca); \
+         [void]$chain.Build($leaf); \
+         $elements = @($chain.ChainElements | ForEach-Object {{ $_.Certificate.Thumbprint }}); \
+         '{{0}} {{1}} {{2}} {{3}}' -f $elements.Count, $elements[-1], $ca.Thumbprint, $leaf.Subject",
+        quoted(&ca_file.display().to_string()),
+        quoted(&leaf_file.display().to_string())
+    ));
+    let parts: Vec<&str> = out.splitn(4, ' ').collect();
+    assert_eq!(parts[0], "2", "the leaf does not chain to the CA: {out}");
+    assert_eq!(parts[1], parts[2], "the chain ends elsewhere: {out}");
+    assert_eq!(parts[3], format!("CN={}", support::TEST_LEAF_NAME), "{out}");
 }
 
 // ---------------------------------------------------------------- AC1
