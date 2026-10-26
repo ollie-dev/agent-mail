@@ -866,14 +866,22 @@ fn assert_elevates_once(script: &str, refusal: &str) {
         assert!(start.contains(needle), "{script}: {start} lacks {needle}");
     }
     assert!(!start.contains("-File "), "{script} relaunches a file");
-    assert!(code.contains("$hostExe = (Get-Process -Id $PID).Path"));
+    // The elevated copy is always the system's Windows PowerShell, which
+    // only administrators can replace.
+    assert!(code.contains(
+        r"$hostExe = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\powershell.exe')"
+    ));
+    assert!(
+        !code.contains("Get-Process"),
+        "{script} relaunches its own host"
+    );
     // The elevated copy runs this block's own text, never a file.
     assert!(code.contains("$AgentMailText = $MyInvocation.MyCommand.ScriptBlock.ToString()"));
     assert!(code.contains("$inner = \"& {$AgentMailText} "));
     assert!(code.contains(".IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"));
-    assert!(code.contains("New-Object Security.Principal.WindowsPrincipal("));
+    assert!(code.contains("$IsAdministrator = ([Security.Principal.WindowsPrincipal]::new("));
     let check = code
-        .find("elseif (Test-Administrator) {")
+        .find("elseif ($IsAdministrator) {")
         .unwrap_or_else(|| panic!("{script}: no Administrators check"));
     let relaunched = code
         .find("} elseif ($Relaunched) {")
@@ -914,6 +922,73 @@ fn assert_elevates_once(script: &str, refusal: &str) {
     assert!(code.contains("Join-Path ([Environment]::SystemDirectory) 'sc.exe'"));
     assert!(code.contains("[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames"));
     assert!(code.contains("'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'"));
+}
+
+/// Checks that `script`, when elevated, loads only `modules` from the
+/// running PowerShell's own `$PSHOME\Modules` and autoloads nothing, so a
+/// module planted on the user-writable `PSModulePath` never runs as
+/// administrator; and that only .NET and built-in commands run first.
+fn assert_loads_only_shipped_modules(script: &str, modules: &str) {
+    let text = read(script);
+    let block = text
+        .split("\n& {\n")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{script}: no script block"));
+    let hardened = block
+        .find("\n        $PSModuleAutoLoadingPreference = 'None'\n    }\n")
+        .map(|at| at + 1)
+        .unwrap_or_else(|| panic!("{script}: autoloading stays on"));
+    let before = &block[..hardened];
+    assert_eq!(
+        before,
+        format!(
+            "    param({params})
+    $ErrorActionPreference = 'Stop'
+    Set-StrictMode -Version 2.0
+
+    # Elevated, only the modules this PowerShell ships with are loaded, and
+    # nothing is autoloaded: the user's own PSModulePath entries (such as
+    # Documents\\WindowsPowerShell\\Modules) are writable by every process of
+    # the user, so a module planted there must never run as administrator.
+    # Only .NET and built-in commands run before this.
+    $IsAdministrator = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $SavedModulePath = $env:PSModulePath
+    if ($IsAdministrator) {{
+        $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+        foreach ($module in @({modules})) {{
+            Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $module, \"$module.psd1\"))
+        }}
+",
+            params = if script == "install.ps1" {
+                "[string]$DownloadUrl, [switch]$Relaunched"
+            } else {
+                "[switch]$KeepData, [switch]$Force, [switch]$Relaunched"
+            }
+        ),
+        "{script}: the start of the block"
+    );
+    let code = ps_code(script);
+    // The elevated copy's bootstrap uses .NET only, before the block runs.
+    let boot = code.lines().find(|l| l.starts_with("$boot = ")).unwrap();
+    assert!(!boot.contains("New-Object"), "{script}: {boot}");
+    assert!(boot.contains("[IO.Compression.GZipStream]::new("));
+    assert!(boot.contains("[IO.StreamReader]::new("));
+    assert!(!code.contains("Get-FileHash"), "{script} uses Get-FileHash");
+    // The operator's shell gets its PSModulePath back after `iex`.
+    code.find("$env:PSModulePath = $SavedModulePath\nif ($AgentMailExits) { exit $code }")
+        .unwrap_or_else(|| panic!("{script}: PSModulePath not restored"));
+}
+
+#[test]
+fn job027_elevated_scripts_load_only_the_modules_powershell_ships_with() {
+    assert_loads_only_shipped_modules(
+        "install.ps1",
+        "'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility'",
+    );
+    assert_loads_only_shipped_modules(
+        "uninstall.ps1",
+        "'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'CimCmdlets'",
+    );
 }
 
 #[test]
@@ -1164,5 +1239,81 @@ mod powershell {
             // Room for the host's own path in front.
             assert!(length < 32_767 - 1_024, "{script}: {length} characters");
         }
+    }
+
+    /// The body of `if ($IsAdministrator) { ... }`, the elevated module
+    /// hardening, from `script`.
+    fn hardening(script: &str) -> String {
+        let text = read(script);
+        const OPEN: &str = "    if ($IsAdministrator) {\n";
+        let start = text.find(OPEN).unwrap() + OPEN.len();
+        let end = start + text[start..].find("\n    }\n").unwrap();
+        text[start..end].to_string()
+    }
+
+    /// Run elevated, the scripts' hardening keeps a module planted first on
+    /// `PSModulePath` (as in the user-writable Documents folder) from
+    /// supplying any command, under each shell. Without it, the planted
+    /// `Get-Service` would win.
+    #[test]
+    fn job027_a_module_planted_on_psmodulepath_never_loads_after_the_hardening() {
+        let planted =
+            std::env::temp_dir().join(format!("agent-mail-release-planted-{}", std::process::id()));
+        let module = planted.join("Planted");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("Planted.psm1"),
+            "function Get-Service { 'PLANTED' }\nfunction Get-CimInstance { 'PLANTED' }\nfunction Write-Host { 'PLANTED' }\nExport-ModuleMember -Function *\n",
+        )
+        .unwrap();
+        let path = std::env::var("PSModulePath").unwrap_or_default();
+        let planted_path = format!("{};{path}", planted.display());
+        // Runs `command` under `shell` with the planted module first on
+        // PSModulePath, passed encoded so no quoting is lost.
+        let run_planted = |shell: &str, command: &str| {
+            use base64::Engine;
+            let utf16: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            Command::new(shell)
+                .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+                .arg(base64::engine::general_purpose::STANDARD.encode(utf16))
+                .env("PSModulePath", &planted_path)
+                .output()
+                .unwrap()
+        };
+        for shell in shells() {
+            for (script, probe, expected) in [
+                (
+                    "install.ps1",
+                    "(Get-Service -Name Winmgmt).Name; Write-Host 'host'",
+                    &["Winmgmt", "host"][..],
+                ),
+                (
+                    "uninstall.ps1",
+                    "(Get-Service -Name Winmgmt).Name; (Get-CimInstance Win32_Service -Filter \"Name='Winmgmt'\").Name; Write-Host 'host'",
+                    &["Winmgmt", "Winmgmt", "host"][..],
+                ),
+            ] {
+                let control = run_planted(shell, probe);
+                assert!(
+                    String::from_utf8_lossy(&control.stdout).contains("PLANTED"),
+                    "{shell}: the planted module does not load even without the hardening: {control:?}"
+                );
+                let out = run_planted(
+                    shell,
+                    &format!(
+                        "$ErrorActionPreference = 'Stop'; & {{\n{}\n{probe}\n}}",
+                        hardening(script)
+                    ),
+                );
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{shell} {script}: {out:?}");
+                assert_eq!(
+                    stdout.trim().lines().map(str::trim).collect::<Vec<_>>(),
+                    expected,
+                    "{shell} {script}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&planted);
     }
 }

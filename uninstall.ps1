@@ -20,6 +20,21 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version 2.0
 
+    # Elevated, only the modules this PowerShell ships with are loaded, and
+    # nothing is autoloaded: the user's own PSModulePath entries (such as
+    # Documents\WindowsPowerShell\Modules) are writable by every process of
+    # the user, so a module planted there must never run as administrator.
+    # Only .NET and built-in commands run before this.
+    $IsAdministrator = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $SavedModulePath = $env:PSModulePath
+    if ($IsAdministrator) {
+        $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+        foreach ($module in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'CimCmdlets')) {
+            Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1"))
+        }
+        $PSModuleAutoLoadingPreference = 'None'
+    }
+
     # This block's own text: the elevated copy runs exactly this.
     $AgentMailText = $MyInvocation.MyCommand.ScriptBlock.ToString()
     $AgentMailExits = [bool]$PSCommandPath -or $Relaunched
@@ -28,11 +43,6 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
     $Prefix = 'uninstall.ps1'
     $EnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $Folder = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'agent-mail'
-
-    function Test-Administrator {
-        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-        $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    }
 
     # Runs `file` with the command line `arguments`, passed verbatim, and
     # returns its exit code and output.
@@ -187,7 +197,7 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
         if ($null -eq $deleteData) {
             [Console]::Error.WriteLine("${Prefix}: cannot ask for confirmation; rerun with -KeepData or -Force")
             $code = 1
-        } elseif (Test-Administrator) {
+        } elseif ($IsAdministrator) {
             try {
                 Uninstall-AgentMail $deleteData
             } catch {
@@ -214,9 +224,11 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
             $gzip.Write($bytes, 0, $bytes.Length)
             $gzip.Close()
             $payload = [Convert]::ToBase64String($buffer.ToArray())
-            $boot = "`$z = New-Object IO.Compression.GZipStream((New-Object IO.MemoryStream(,[Convert]::FromBase64String('$payload'))), [IO.Compression.CompressionMode]::Decompress); & ([ScriptBlock]::Create((New-Object IO.StreamReader(`$z, [Text.Encoding]::UTF8)).ReadToEnd()))"
+            $boot = "`$z = [IO.Compression.GZipStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String('$payload')), [IO.Compression.CompressionMode]::Decompress); & ([ScriptBlock]::Create([IO.StreamReader]::new(`$z, [Text.Encoding]::UTF8).ReadToEnd()))"
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($boot))
-            $hostExe = (Get-Process -Id $PID).Path
+            # Always the system's Windows PowerShell, which only administrators
+            # can replace, never a host the user could have installed.
+            $hostExe = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\powershell.exe')
             Write-Host 'Asking for administrator rights; the uninstaller continues in a new window.'
             try {
                 $elevated = Start-Process -FilePath $hostExe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -EncodedCommand $encoded"
@@ -232,5 +244,6 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
             }
         }
     }
+    $env:PSModulePath = $SavedModulePath
     if ($AgentMailExits) { exit $code }
 } -KeepData:$KeepData -Force:$Force -Relaunched:$Relaunched
