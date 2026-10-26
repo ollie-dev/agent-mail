@@ -621,7 +621,46 @@
       "reason": "",
       "updated": "2026-10-25T19:54:08Z",
       "builder": "abc11f7640b463044"
+    },
+    {
+      "id": "027-broker-installers",
+      "title": "Broker installers",
+      "feature": "Ticket 21: Installer and uninstaller for the Broker (.scratch/windows-broker/issues/21-installers.md)",
+      "branch": "factory/027-broker-installers",
+      "stage": "merged",
+      "round": 4,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        },
+        {
+          "security": "PASS",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        },
+        {
+          "security": "CHANGES",
+          "ux": "PASS",
+          "ui": "PASS",
+          "code": "PASS"
+        }
+      ],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-26T14:22:49Z",
+      "builder": "ac42e3a3a2388ee19",
+      "approvedBy": "human"
     }
   ],
-  "updated": "2026-10-25T15:15:39Z"
+  "updated": "2026-10-26T14:22:49Z"
 }

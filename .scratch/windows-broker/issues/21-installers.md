@@ -4,7 +4,7 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `install.ps1` requests elevation (UAC) once, downloads and verifies the binary as today, installs it to `%ProgramFiles%\agent-mail`, registers the Broker as a service under `NT SERVICE\agent-mail` with delayed automatic start, starts it and adds the folder to the machine PATH
 - [ ] Rerunning `install.ps1` updates in place: it stops the Broker, replaces the binary, starts it again and checks `--version`; stored Mandates are untouched
