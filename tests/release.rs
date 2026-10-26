@@ -1563,3 +1563,235 @@ fn job028_ac5_no_release_or_plugin_test_still_asserts_the_old_windows_wording() 
         }
     }
 }
+
+// ------------------------------------------------- job 029: security docs
+
+const SECURITY_DOCS: [&str; 3] = [
+    "docs/security/README.md",
+    "docs/security/macos.md",
+    "docs/security/windows.md",
+];
+const PLATFORM_DOCS: [&str; 2] = ["docs/security/macos.md", "docs/security/windows.md"];
+const PLATFORM_HEADINGS: [&str; 6] = [
+    "## Who holds what",
+    "## Trust boundaries",
+    "## One Agent request",
+    "## `mandate create`",
+    "## Protected against",
+    "## Not protected against",
+];
+
+/// The section of `doc` under the `##` line `heading`, up to the next `#`
+/// or `##` heading outside a code block.
+fn doc_section(doc: &str, heading: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    let mut in_fence = false;
+    for line in doc.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && (line.starts_with("# ") || line.starts_with("## ")) {
+            inside = line == heading;
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert!(!out.is_empty(), "no section {heading}");
+    out
+}
+
+/// The bodies of the fenced `mermaid` blocks in `text`.
+fn mermaid_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        match current.as_mut() {
+            None if line.trim() == "```mermaid" => current = Some(String::new()),
+            Some(body) if line.trim_start().starts_with("```") => {
+                blocks.push(std::mem::take(body));
+                current = None;
+            }
+            Some(body) => {
+                body.push_str(line);
+                body.push('\n');
+            }
+            None => {}
+        }
+    }
+    blocks
+}
+
+/// The prose of `doc` as `prose_paragraphs` splits it, with each Markdown
+/// table row as its own paragraph, as each list item is.
+fn doc_prose(doc: &str) -> Vec<String> {
+    let rows_apart: Vec<String> = doc
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with('|') {
+                format!("\n{l}\n")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    prose_paragraphs(&rows_apart.join("\n"))
+}
+
+/// Every `amt_` in `text` that is not a placeholder, i.e. not followed only
+/// by `.`, `<`, `x` or `X` up to the end of its token-like run (a closing
+/// `>` of `<...>` is allowed).
+fn real_token_shapes(text: &str) -> Vec<String> {
+    text.match_indices("amt_")
+        .filter_map(|(i, _)| {
+            let run: String = text[i + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || "-_.<>".contains(*c))
+                .collect();
+            let body = run.trim_end_matches('>');
+            let placeholder = body.chars().all(|c| ".<xX".contains(c));
+            (!placeholder).then(|| format!("amt_{run}"))
+        })
+        .collect()
+}
+
+#[test]
+fn job029_ac1_overview_compares_both_platforms() {
+    let doc = read("docs/security/README.md");
+    let lines: Vec<&str> = doc.lines().collect();
+    let table = lines.windows(2).any(|w| {
+        w[0].starts_with('|')
+            && w[0].contains("macOS")
+            && w[0].contains("Windows")
+            && w[1].starts_with('|')
+            && w[1].contains("---")
+    });
+    assert!(table, "no table whose header names macOS and Windows");
+    for needle in [
+        "Mandate",
+        "Agent Token",
+        "Policy",
+        "administrator",
+        "out of scope",
+        "(macos.md)",
+        "(windows.md)",
+    ] {
+        assert!(doc.contains(needle), "overview lacks {needle}");
+    }
+}
+
+#[test]
+fn job029_ac2_platform_docs_have_the_six_sections_and_terms() {
+    for file in PLATFORM_DOCS {
+        let doc = read(file);
+        let headings: Vec<&str> = doc.lines().filter(|l| l.starts_with("## ")).collect();
+        for heading in PLATFORM_HEADINGS {
+            assert!(headings.contains(&heading), "{file} lacks {heading}");
+        }
+        let not = doc_section(&doc, "## Not protected against");
+        assert!(not.contains("administrator"), "{file}: {not}");
+    }
+    let macos = read("docs/security/macos.md");
+    for needle in ["Keychain", "hardened runtime", "self-check"] {
+        assert!(macos.contains(needle), "macos.md lacks {needle}");
+    }
+    let windows = read("docs/security/windows.md");
+    for needle in [
+        "Broker",
+        r"NT SERVICE\agent-mail",
+        r"\\.\pipe\agent-mail",
+        "SID",
+        "broker_unavailable",
+        "broker_version_mismatch",
+    ] {
+        assert!(windows.contains(needle), "windows.md lacks {needle}");
+    }
+    assert!(windows.contains("elevated") || windows.contains("elevation"));
+}
+
+#[test]
+fn job029_ac3_platform_docs_have_component_and_sequence_diagrams() {
+    for file in PLATFORM_DOCS {
+        let doc = read(file);
+        let all = mermaid_blocks(&doc);
+        assert!(all.len() >= 3, "{file}: {} mermaid blocks", all.len());
+        assert!(
+            all.iter().any(|b| {
+                let start = b.trim_start();
+                (start.starts_with("flowchart") || start.starts_with("graph"))
+                    && b.contains("subgraph")
+            }),
+            "{file}: no component diagram with subgraphs"
+        );
+        let sequences = all
+            .iter()
+            .filter(|b| b.trim_start().starts_with("sequenceDiagram"))
+            .count();
+        assert!(sequences >= 2, "{file}: {sequences} sequence diagrams");
+        for heading in ["## One Agent request", "## `mandate create`"] {
+            assert!(
+                mermaid_blocks(&doc_section(&doc, heading))
+                    .iter()
+                    .any(|b| b.trim_start().starts_with("sequenceDiagram")),
+                "{file}: no sequence diagram under {heading}"
+            );
+        }
+    }
+}
+
+#[test]
+fn job029_ac4_docs_follow_the_text_convention_and_link_the_adrs() {
+    for file in SECURITY_DOCS {
+        let doc = read(file);
+        for p in doc_prose(&doc) {
+            assert!(
+                p.chars().count() <= 300,
+                "{file}: a paragraph of {} characters: {p}",
+                p.chars().count()
+            );
+        }
+        let lower = doc.to_lowercase();
+        for avoided in ["vault", "daemon", "api key"] {
+            assert!(!lower.contains(avoided), "{file} uses {avoided}");
+        }
+        let tokens = real_token_shapes(&doc);
+        assert!(tokens.is_empty(), "{file}: {tokens:?}");
+        assert!(!doc.contains(concat!("honest", " Agents")), "{file}");
+    }
+    let macos = read("docs/security/macos.md");
+    for adr in [
+        "0002-no-background-service.md",
+        "0003-immutable-mandates.md",
+    ] {
+        assert!(macos.contains(adr), "macos.md does not link {adr}");
+    }
+    let windows = read("docs/security/windows.md");
+    for adr in ["0004-windows-broker.md", "0003-immutable-mandates.md"] {
+        assert!(windows.contains(adr), "windows.md does not link {adr}");
+    }
+}
+
+#[test]
+fn job029_ac4_helpers_split_tables_and_tell_placeholders_from_tokens() {
+    assert!(real_token_shapes("`amt_...` and amt_<x> and amt_XXXX").is_empty());
+    assert_eq!(real_token_shapes("x amt_abc123 y"), ["amt_abc123"]);
+    assert_eq!(real_token_shapes("amt_...real"), ["amt_...real"]);
+    assert_eq!(doc_prose("| a | b |\n|---|---|\n| c | d |").len(), 3);
+}
+
+#[test]
+fn job029_ac5_readme_links_the_security_docs() {
+    let section = readme_section("## What each OS protects against");
+    for link in SECURITY_DOCS {
+        assert!(
+            section.contains(&format!("({link})")),
+            "README section does not link {link}"
+        );
+    }
+    for file in PLATFORM_DOCS {
+        assert!(!mermaid_blocks(&read(file)).is_empty(), "{file}");
+    }
+}

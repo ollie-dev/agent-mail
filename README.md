@@ -201,6 +201,8 @@ The Keychain prompts once after each agent-mail update; allow it. A Keychain pro
 
 So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. On macOS the audit log can also be read or changed by any program running as you; on Windows only the Broker can write it.
 
+**Security concept.** The [security concept](docs/security/README.md) compares both platforms. The [macOS](docs/security/macos.md) and [Windows](docs/security/windows.md) documents show who holds what, the trust boundaries, one Agent request and `mandate create` in diagrams.
+
 ## Several Mandates and whoami
 
 An agent can hold several Mandates at once, for example one for a work account and one for a private account. `AGENT_MAIL_TOKEN` takes one or more agent tokens, comma-separated; spaces around each token and empty fields are ignored, and a token given twice counts once:
