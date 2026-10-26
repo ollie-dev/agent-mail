@@ -194,11 +194,11 @@ param([string]$DownloadUrl, [switch]$Relaunched)
         } finally {
             $key.Close()
         }
-        # Tell Explorer, so new terminals see the change.
+        # Tell Explorer, so new terminals see the change. Deleting a value
+        # that does not exist changes nothing, but .NET then broadcasts
+        # WM_SETTINGCHANGE itself, with no C# compiled at run time.
         try {
-            Add-Type -Namespace AgentMail -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
-            $result = [UIntPtr]::Zero
-            [void][AgentMail.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+            [Environment]::SetEnvironmentVariable('AGENT_MAIL_INSTALLER_UNUSED', $null, 'Machine')
         } catch {
             Write-Host 'Could not announce the Path change; sign out and in again if a new terminal does not find agent-mail.'
         }

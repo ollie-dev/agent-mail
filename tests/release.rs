@@ -979,6 +979,45 @@ fn assert_loads_only_shipped_modules(script: &str, modules: &str) {
         .unwrap_or_else(|| panic!("{script}: PSModulePath not restored"));
 }
 
+/// Neither script compiles C# at run time: Windows PowerShell's `Add-Type`
+/// writes its source and output to the user-writable `%TEMP%` and loads
+/// the result into the elevated process. The Path change is announced by
+/// .NET's own `WM_SETTINGCHANGE` broadcast instead.
+#[test]
+fn job027_elevated_scripts_compile_no_code() {
+    for script in ["install.ps1", "uninstall.ps1"] {
+        let code = ps_code(script);
+        for forbidden in [
+            "-MemberDefinition",
+            "-TypeDefinition",
+            "Add-Type -Path",
+            "Add-Type -LiteralPath",
+            "DllImport",
+            "[AgentMail.Env]",
+            "SendMessageTimeout",
+            "CompileAssemblyFromSource",
+            "CSharpCodeProvider",
+        ] {
+            assert!(!code.contains(forbidden), "{script} uses {forbidden}");
+        }
+        for line in code.lines().filter(|l| l.contains("Add-Type")) {
+            assert!(
+                line.starts_with("Add-Type -AssemblyName System.IO.Compression"),
+                "{script}: {line}"
+            );
+        }
+        assert_eq!(
+            code.lines()
+                .filter(|l| l.contains("SetEnvironmentVariable"))
+                .collect::<Vec<_>>(),
+            [
+                "[Environment]::SetEnvironmentVariable('AGENT_MAIL_INSTALLER_UNUSED', $null, 'Machine')"
+            ],
+            "{script}: the broadcast"
+        );
+    }
+}
+
 #[test]
 fn job027_elevated_scripts_load_only_the_modules_powershell_ships_with() {
     assert_loads_only_shipped_modules(

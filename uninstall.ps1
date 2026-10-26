@@ -120,10 +120,11 @@ param([switch]$KeepData, [switch]$Force, [switch]$Relaunched)
         } finally {
             $key.Close()
         }
+        # Tell Explorer, so new terminals see the change: .NET broadcasts
+        # WM_SETTINGCHANGE after deleting this missing value, with no C#
+        # compiled at run time.
         try {
-            Add-Type -Namespace AgentMail -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
-            $result = [UIntPtr]::Zero
-            [void][AgentMail.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+            [Environment]::SetEnvironmentVariable('AGENT_MAIL_INSTALLER_UNUSED', $null, 'Machine')
         } catch { }
     }
 
