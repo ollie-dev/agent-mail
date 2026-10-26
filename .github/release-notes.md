@@ -18,13 +18,22 @@ On Windows x64, from PowerShell:
 irm https://github.com/ollie-dev/agent-mail/releases/latest/download/install.ps1 | iex
 ```
 
-It verifies the zip's SHA-256 checksum and installs `%USERPROFILE%\.local\bin\agent-mail.exe`. Verify its build attestation with:
+It asks for administrator rights once (UAC), verifies the zip's SHA-256 checksum and installs `%ProgramFiles%\agent-mail\agent-mail.exe`. It registers and starts the Broker, the service `agent-mail`, and adds the folder to the machine Path. Rerun it to update; your Mandates are kept.
+
+Verify its build attestation with:
 
 ```sh
 gh attestation verify agent-mail-x86_64-pc-windows-msvc.zip --repo ollie-dev/agent-mail
 ```
 
-On Windows, Mandates live in Windows Credential Manager, where any program running as you, including a hijacked Agent, can read the Credentials. The Windows build protects only against honest Agents.
+To uninstall, download `uninstall.ps1` from this release and run `powershell -ExecutionPolicy Bypass -File uninstall.ps1`. It asks before deleting your Mandates and audit log; `-KeepData` keeps them, `-Force` deletes them without asking.
+
+## Windows
+
+On Windows the Broker holds the Mandates and makes every mail call, so a hijacked Agent cannot extract a Credential, as on macOS. Run `agent-mail mandate create` in an elevated terminal. Administrators are out of scope on both platforms.
+
+- `broker_unavailable`: the service could not be reached. Start it with `sc.exe start agent-mail` in an elevated terminal, or rerun `install.ps1`.
+- `broker_version_mismatch`: the binary and the service are different versions. Rerun `install.ps1`.
 
 ## Keychain prompt after an update
 

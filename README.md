@@ -67,13 +67,21 @@ agent-mail releases are built for macOS (Apple silicon and Intel) and Windows x6
 curl -fsSL https://github.com/ollie-dev/agent-mail/releases/latest/download/install.sh | sh
 ```
 
-The installer picks the binary for your Mac's architecture, downloads it with its SHA-256 checksum file, verifies the checksum and only then installs the binary to `~/.local/bin/agent-mail`. If the checksum does not match, it stops and installs nothing. It never uses `sudo` and needs no Rust toolchain. If `~/.local/bin` is not on your `PATH`, it prints a hint.
+The installer picks the binary for your Mac's architecture, downloads it with its SHA-256 checksum file, verifies the checksum and only then installs the binary to `~/.local/bin/agent-mail`. If the checksum does not match, it stops and installs nothing.
 
-The checksum comes from the same release as the binary, so it catches a corrupted or tampered download, not a compromised release. To check that a release was built from this repository by its release workflow, download the tarball from the [releases page](https://github.com/ollie-dev/agent-mail/releases) and verify its build attestation with the GitHub CLI:
+It never uses `sudo` and needs no Rust toolchain. If `~/.local/bin` is not on your `PATH`, it prints a hint.
+
+The checksum comes from the same release as the binary, so it catches a corrupted or tampered download, not a compromised release. To check that a release was built from this repository by its release workflow, verify the tarball's build attestation with the GitHub CLI:
 
 ```sh
 gh attestation verify agent-mail-aarch64-apple-darwin.tar.gz --repo ollie-dev/agent-mail
 ```
+
+On macOS the first Keychain access after an update prompts once, because each release has a new code signature; allow it. A Keychain prompt at any other time is a red flag: deny it.
+
+macOS release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A macOS release binary checks its own signature before it touches the Keychain.
+
+If the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed; reinstall from the releases page. The hardened-runtime check and `hardened_runtime_missing` apply to macOS only; Windows builds skip them.
 
 On Windows x64, install the latest release from PowerShell (Windows PowerShell 5.1 or PowerShell 7):
 
@@ -81,21 +89,33 @@ On Windows x64, install the latest release from PowerShell (Windows PowerShell 5
 irm https://github.com/ollie-dev/agent-mail/releases/latest/download/install.ps1 | iex
 ```
 
-It downloads the zip with its SHA-256 checksum file, verifies the checksum and only then installs `%USERPROFILE%\.local\bin\agent-mail.exe`. If the checksum does not match, it stops and installs nothing. It never asks for administrator rights and does not change your `PATH`; if `%USERPROFILE%\.local\bin` is not on it, it prints a hint. The Windows binary is not code-signed; verify its build attestation instead:
+It asks for administrator rights once (UAC), downloads the zip with its SHA-256 checksum file, verifies the checksum and only then installs `%ProgramFiles%\agent-mail\agent-mail.exe`. If the checksum does not match, it stops and installs nothing.
+
+It then registers and starts the Broker, the Windows service `agent-mail` running as `NT SERVICE\agent-mail` with delayed automatic start, and adds `%ProgramFiles%\agent-mail` to the machine Path. Open a new terminal to use `agent-mail`.
+
+The Broker stores your Mandates and makes every mail call; see [What each OS protects against](#what-each-os-protects-against). Only administrators can change the binary in `%ProgramFiles%\agent-mail`, so an Agent cannot replace the Broker.
+
+To update, rerun the same command: it replaces the binary in place, restarts the Broker and keeps your stored Mandates.
+
+The Windows binary is not code-signed; verify its build attestation instead:
 
 ```sh
 gh attestation verify agent-mail-x86_64-pc-windows-msvc.zip --repo ollie-dev/agent-mail
 ```
 
-On Windows, Mandates are stored in Windows Credential Manager, where any program running as you can read them; see [What each OS protects against](#what-each-os-protects-against).
+To uninstall, download `uninstall.ps1` from the [releases page](https://github.com/ollie-dev/agent-mail/releases) and run it from PowerShell:
 
-On macOS the first Keychain access after an update prompts once, because each release has a new code signature; allow it. A Keychain prompt at any other time is a red flag: deny it.
+```powershell
+powershell -ExecutionPolicy Bypass -File uninstall.ps1
+```
 
-macOS release binaries are signed ad hoc with the hardened runtime, which blocks code injection into agent-mail. A macOS release binary checks its own signature before it touches the Keychain; if the hardened runtime is missing, every command that needs the Keychain fails with `hardened_runtime_missing` and the Keychain is not accessed. Reinstall from the releases page if you see it. The hardened-runtime check and `hardened_runtime_missing` apply to macOS only; Windows builds skip them.
+It asks for administrator rights once (UAC) and removes the Broker, the binary and its Path entry. It then asks before deleting your stored Mandates and the audit log; add `-KeepData` to keep them, or `-Force` to delete them without asking.
 
 ## Creating a Mandate
 
-A Mandate names the email accounts an Agent may use and grants it operations (`list`, `search`, `read`, `flag`, `move`, `draft`) on chosen mailboxes. Only you create Mandates; an Agent cannot. Run this in your own terminal, not inside an Agent session or sandbox (it refuses to run there):
+A Mandate names the email accounts an Agent may use and grants it operations (`list`, `search`, `read`, `flag`, `move`, `draft`) on chosen mailboxes. Only you create Mandates; an Agent cannot.
+
+Run this in your own terminal, not inside an Agent session or sandbox (it refuses to run there):
 
 ```sh
 agent-mail mandate create
@@ -103,11 +123,15 @@ agent-mail mandate create
 
 It asks for a name, then for each account its server, login and Credential (typed hidden; for Gmail an app password, see [Gmail app passwords](#gmail-app-passwords)). It checks a live login, then lets you tick mailboxes and operations.
 
-At the end it stores the Mandate in the Keychain (in Windows Credential Manager on Windows) and prints its Agent Token. The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
+At the end it stores the Mandate, in the Keychain on macOS or with the Broker on Windows, and prints its Agent Token.
+
+The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
+
+On Windows, run `mandate create` in an elevated terminal (Run as administrator); otherwise it fails with `elevation_required` and stores nothing. An Agent cannot click the UAC prompt, and your other programs cannot read the elevated window while you type a Credential.
 
 It then offers to save the Mandate's accounts and Grants (never its Credentials or token) as a TOML file. `agent-mail mandate create --from <FILE>` pre-fills a new setup from that file; every Credential is still typed and checked.
 
-A Mandate cannot be changed. To give an Agent different access, create a new Mandate, swap in its token, and delete the old one:
+A Mandate cannot be changed. To give an Agent different access, create a new Mandate, swap in its token, and delete the old one. On Windows, `mandate list` and `mandate delete` need no elevated terminal:
 
 ```sh
 agent-mail mandate list                 # IDs, names, accounts, Grants, creation dates
@@ -165,15 +189,17 @@ To retire a Mandate, do both: run `agent-mail mandate delete <ID>` to revoke its
 
 ## What each OS protects against
 
-**macOS.** Credentials live in the Keychain, readable only by the signed agent-mail binary. A hijacked Agent cannot extract a Credential: it can only call agent-mail, which enforces the Mandate's Policy and logs each call.
+**macOS.** Credentials live in the Keychain, readable only by the signed agent-mail binary, whose hardened-runtime self-check runs before every Keychain access. A hijacked Agent cannot extract a Credential: it can only call agent-mail, which enforces the Mandate's Policy and logs each call.
 
 The Keychain prompts once after each agent-mail update; allow it. A Keychain prompt at any other time is a red flag: deny it. Approving it could hand a Credential to another program.
 
+**Windows.** The Broker, the service `agent-mail` running as `NT SERVICE\agent-mail`, keeps the Mandates in that account's own Credential Manager, out of reach of your programs. A hijacked Agent cannot extract a Credential: it can only ask the Broker, which enforces the Policy and logs each call.
+
+**Administrators.** On both platforms, an administrator is out of scope: someone with administrator or root rights can run code as the Broker's account or as root and read everything.
+
 **Agent Tokens.** A token in a host config file, such as `.claude/settings.local.json` or `claude_desktop_config.json`, is plain text. Any program running as the same user can read it, including other Agents. Whoever holds an Agent Token can do what its Mandate grants, and no more.
 
-So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. The audit log can also be read or changed by any program running as you.
-
-**Windows.** Credentials live in Windows Credential Manager. Any program running as the same user can read them, so a hijacked Agent can read (extract) the Credentials and use them without agent-mail, its Policy or its audit log. The Windows build therefore protects only against honest Agents: those that call agent-mail and stay within their Mandate.
+So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. On macOS the audit log can also be read or changed by any program running as you; on Windows only the Broker can write it.
 
 ## Several Mandates and whoami
 
@@ -490,30 +516,42 @@ that cannot be reached or one that answers malformed data gives
 
 ## Audit log
 
-Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail flag`, `agent-mail move` and `agent-mail draft` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it. The log lives in your per-user data directory:
+Every `agent-mail list`, `agent-mail search`, `agent-mail read`, `agent-mail flag`, `agent-mail move` and `agent-mail draft` call an agent makes appends one line to an audit log, so you can see which Mandate did what, on which account, and whether its Policy allowed it.
+
+`agent-mail audit` prints the entries of your own Mandates as JSON; `agent-mail audit --text` prints one line per entry. It needs no Agent Token. The log lives here:
 
 - macOS: `~/Library/Application Support/agent-mail/audit.log` (the home directory comes from the user database, not from `$HOME`)
 - Other Unix: `$XDG_DATA_HOME/agent-mail/audit.log`, or `~/.local/share/agent-mail/audit.log` when `XDG_DATA_HOME` is unset
-- Windows: `%LOCALAPPDATA%\agent-mail\audit.log` (the folder comes from the Local AppData known folder, not from the environment variable)
+- Windows: `%ProgramData%\agent-mail\audit.log`, one log for all users, written by the Broker
 
-On Unix, the directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call. If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. On Windows the file gets the folder's default permissions. Entries are only ever appended; `agent-mail audit` prints your own entries (`--text` for one line each), or open the log with a pager or `jq`. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
+On Unix, the directory is created on the first call with mode `0700` and the file with mode `0600`; an existing directory or file with looser modes is tightened to these on the next call.
+
+If `audit.log` or its `agent-mail` directory is a symbolic link, or `audit.log` is not a regular file, nothing is written. Entries are only ever appended. If an entry cannot be written, the call fails with `audit_unavailable` and returns no result.
+
+On Windows only the Broker can write the log, and besides the Broker only Administrators can read the file directly.
 
 Each line is one JSON object with these keys, in this order, absent keys left out:
 
 - `time`: when the call was made, RFC 3339 UTC to the second, e.g. `2026-10-21T09:30:15Z`.
-- `mandate`: the short ID of the Mandate selected for the call; left out when no presented token opened a Mandate, when no account was chosen, when no presented Mandate covers the account, or when several do (`ambiguous_mandate`).
+- `mandate`: the short ID of the Mandate selected for the call. Left out when no presented token opened a Mandate, when no account was chosen, or when no single presented Mandate covers the account (`ambiguous_mandate` when several do).
 - `operation`: the operation: `list`, `search`, `read`, `flag`, `move` or `draft`.
 - `account`: the account's login; left out when no single account was chosen (`account_required`).
-- `mailbox`: the mailbox involved: for `search`, the searched mailbox as the agent named it; for `read`, `flag` and `move`, the mailbox the message reference names, which for `move` is the source; for `draft`, the Drafts mailbox, once it was found (left out when the call was denied or failed before that) (not used by `list`).
+- `mailbox`: the mailbox involved, not used by `list`. For `search`, the searched mailbox as the agent named it; for `read`, `flag` and `move`, the mailbox the message reference names, which for `move` is the source.
+- `mailbox` for `draft`: the Drafts mailbox, once it was found; left out when the call was denied or failed before that.
 - `target`: for `move`, the target mailbox as the agent named it, also when the call was denied or failed. Not used by `list`, `search`, `read`, `flag` or `draft`.
-- `messages`: the message references involved: for `search`, the references of the messages returned, newest first (left out when the search failed); for `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed; for `move`, the reference the agent asked for, followed on success by the message's new reference in the target when the server reported one; for `draft`, in reply mode the original's reference (also when the call was denied or failed), followed on success by the new draft's reference when the server reported one, and left out when that leaves none (not used by `list`).
+- `messages`: the message references involved, not used by `list`. For `search`, the references of the messages returned, newest first, left out when the search failed. For `read` and `flag`, the one reference the agent asked for, also when the call was denied or failed.
+- `messages` for `move`: the reference the agent asked for, followed on success by the message's new reference in the target when the server reported one.
+- `messages` for `draft`: in reply mode the original's reference (also when the call was denied or failed), followed on success by the new draft's reference when the server reported one; left out when that leaves none.
 - `recipients`: for `draft`, the recipients the agent gave, in order, on every `draft` entry including denials; an empty list when one of them was not a valid address, so a rejected value is never logged. Not used by `list`, `search`, `read`, `flag` or `move`.
-- `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`; also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged. Not used by `list`, `search`, `read`, `move` or `draft`.
-- `results`: for `search`, the number of messages returned, which is the length of `messages` (not used by `list`, `read`, `flag`, `move` or `draft`, left out when the search failed). How many matched in total is not logged.
+- `change`: for `flag`, the change asked for: `+\Seen` or `+\Flagged` for `--set`, `-\Seen` or `-\Flagged` for `--clear`, also when the call was denied or failed. Left out when the flag name was not supported (`unsupported_flag`), so an unsupported name is never logged.
+- `results`: for `search`, the number of messages returned, which is the length of `messages`; left out when the search failed. How many matched in total is not logged. Not used by the other operations.
 - `outcome`: `allowed` if the Mandate's Policy granted the operation, otherwise `denied`.
-- `reason`: the error code when the call failed, such as `denied`, `missing_token`, `login_failed`, `drafts_not_found`, `draft_refused` or `unsupported`; left out on success. An `allowed` call can still carry a reason, such as `login_failed`, when it failed after the Policy granted it.
+- `reason`: the error code when the call failed, such as `denied`, `missing_token`, `login_failed`, `drafts_not_found`, `draft_refused` or `unsupported`; left out on success. An `allowed` call can still carry a reason when it failed after the Policy granted it.
+- `sid`: on Windows, the security identifier (SID) of the user the call was made for; `agent-mail audit` filters on it.
 
-The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers. Any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
+The log never contains a credential, an agent token, a token hash, a message body, a subject, an attachment name or an address from a message. For `draft` it holds the recipients the agent gave and references only, never the draft's subject or body or the original's headers.
+
+On macOS, any process running as you, including an agent, can read or delete the file directly; the file mode only keeps out other users.
 
 ## Development
 

@@ -68,6 +68,8 @@ With an invalid token among valid ones, stderr first gets a warning with `"code"
 - `missing_token`, `invalid_token`: ask the human to set a valid token in `AGENT_MAIL_TOKEN` and restart the host, as above.
 - `too_many_tokens`: `AGENT_MAIL_TOKEN` holds more than 8 distinct tokens. Ask the human to keep at most 8 there and restart the host.
 - `login_failed`, `connection_failed`, `store_unavailable`, `hardened_runtime_missing`: tell the human; you cannot fix these.
+- `broker_unavailable`: on Windows, the agent-mail service could not be reached. Tell the human; do not try to start, install or repair the service yourself.
+- `broker_version_mismatch`: on Windows, agent-mail and its service are different versions. Tell the human; do not try to fix it yourself.
 
 ## Mandates
 

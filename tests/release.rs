@@ -737,19 +737,13 @@ fn job024_ac2c_readme_says_the_hardened_runtime_check_is_macos_only() {
 }
 
 #[test]
-fn job024_ac5a_readme_windows_paragraph_says_a_hijacked_agent_can_read_credentials() {
+fn job024_ac5a_readme_windows_paragraph_says_a_hijacked_agent_cannot_extract_credentials() {
     let section = readme_section("## What each OS protects against");
     let windows = section
         .split("\n\n")
         .find(|p| p.trim_start().starts_with("**Windows.**"))
         .expect("no Windows paragraph");
-    for needle in [
-        "Credential Manager",
-        "hijacked Agent",
-        "same user",
-        "honest Agents",
-        "extract",
-    ] {
+    for needle in ["Credential Manager", "hijacked Agent", "cannot extract"] {
         assert!(windows.contains(needle), "Windows paragraph lacks {needle}");
     }
     assert!(!windows.contains("no Windows release"));
@@ -761,14 +755,14 @@ fn job024_ac5b_readme_and_release_notes_give_the_windows_install() {
     let install = readme_section("## Install");
     for needle in [
         WINDOWS_ONE_LINER,
-        r"%USERPROFILE%\.local\bin\agent-mail.exe",
+        r"%ProgramFiles%\agent-mail\agent-mail.exe",
         "SHA-256 checksum",
         "gh attestation verify agent-mail-x86_64-pc-windows-msvc.zip --repo ollie-dev/agent-mail",
     ] {
         assert!(install.contains(needle), "Install section lacks {needle}");
     }
     let audit = readme_section("## Audit log");
-    assert!(audit.contains(r"Windows: `%LOCALAPPDATA%\agent-mail\audit.log`"));
+    assert!(audit.contains(r"Windows: `%ProgramData%\agent-mail\audit.log`"));
     let notes = read(".github/release-notes.md");
     assert!(notes.contains(WINDOWS_ONE_LINER));
     assert!(notes.contains(ONE_LINER));
@@ -1354,5 +1348,218 @@ mod powershell {
             }
         }
         let _ = std::fs::remove_dir_all(&planted);
+    }
+}
+
+// ---------------------------------------------------------------- job 028
+
+/// The blank-line-separated paragraph of `section` starting with `start`.
+fn paragraph_starting<'a>(section: &'a str, start: &str) -> &'a str {
+    section
+        .split("\n\n")
+        .find(|p| p.trim_start().starts_with(start))
+        .unwrap_or_else(|| panic!("no paragraph starts with {start}"))
+}
+
+/// The prose paragraphs of `section`: code blocks are skipped, each list
+/// item is its own paragraph and wrapped lines are joined.
+fn prose_paragraphs(section: &str) -> Vec<String> {
+    let mut prose = String::new();
+    let mut in_fence = false;
+    for line in section.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            prose.push('\n');
+            continue;
+        }
+        if !in_fence {
+            prose.push_str(line);
+        }
+        prose.push('\n');
+    }
+    let mut paragraphs = Vec::new();
+    for block in prose.split("\n\n") {
+        for item in format!("\n{block}").split("\n- ") {
+            let joined: Vec<&str> = item.lines().map(str::trim).collect();
+            let text = joined.join(" ").trim().to_string();
+            if !text.is_empty() {
+                paragraphs.push(text);
+            }
+        }
+    }
+    paragraphs
+}
+
+#[test]
+fn job028_ac1_both_platforms_protect_against_a_hijacked_agent() {
+    let section = readme_section("## What each OS protects against");
+    let macos = paragraph_starting(&section, "**macOS.**");
+    for needle in ["hijacked Agent", "Keychain"] {
+        assert!(macos.contains(needle), "macOS paragraph lacks {needle}");
+    }
+    assert!(
+        macos.contains("self-check") || macos.contains("hardened runtime"),
+        "{macos}"
+    );
+    let windows = paragraph_starting(&section, "**Windows.**");
+    for needle in ["hijacked Agent", "Broker", r"NT SERVICE\agent-mail"] {
+        assert!(windows.contains(needle), "Windows paragraph lacks {needle}");
+    }
+    for stale in [
+        "Credential Manager, where any program running as you",
+        "can read (extract)",
+    ] {
+        assert!(!windows.contains(stale), "Windows paragraph has {stale}");
+    }
+    assert!(section.contains("administrator"), "{section}");
+    assert!(section.contains("out of scope"), "{section}");
+    for file in [
+        "README.md",
+        ".github/release-notes.md",
+        "plugin/skills/agent-mail/SKILL.md",
+    ] {
+        assert!(!read(file).contains("honest Agents"), "{file}");
+    }
+    for paragraph in section.split("\n\n") {
+        if paragraph.contains("audit log") && paragraph.contains("any program running as you") {
+            assert!(paragraph.contains("macOS"), "{paragraph}");
+        }
+    }
+}
+
+#[test]
+fn job028_ac2_install_mandate_and_audit_sections_describe_the_broker() {
+    let install = readme_section("## Install");
+    for needle in [
+        WINDOWS_ONE_LINER,
+        r"%ProgramFiles%\agent-mail",
+        "Broker",
+        "Path",
+        "uninstall.ps1",
+        "-KeepData",
+    ] {
+        assert!(install.contains(needle), "Install section lacks {needle}");
+    }
+    assert!(install.contains("UAC") || install.contains("administrator"));
+    assert!(
+        install
+            .split("\n\n")
+            .any(|p| p.to_lowercase().contains("rerun") && p.contains("Mandates")),
+        "no paragraph says rerunning keeps the Mandates"
+    );
+    for stale in [
+        r"%USERPROFILE%\.local\bin\agent-mail.exe",
+        "never asks for administrator rights",
+    ] {
+        assert!(!install.contains(stale), "Install section has {stale}");
+    }
+
+    let mandate = readme_section("## Creating a Mandate");
+    assert!(
+        mandate.split("\n\n").any(|p| p.contains("Windows")
+            && p.contains("elevated")
+            && p.contains("`elevation_required`")),
+        "no paragraph says mandate create needs an elevated terminal"
+    );
+    assert!(!mandate.contains("in Windows Credential Manager on Windows"));
+    assert!(mandate.contains("Broker"));
+
+    let audit = readme_section("## Audit log");
+    for needle in ["agent-mail audit", r"%ProgramData%\agent-mail\audit.log"] {
+        assert!(audit.contains(needle), "Audit section lacks {needle}");
+    }
+    let windows = audit
+        .lines()
+        .find(|l| l.contains(r"%ProgramData%\agent-mail\audit.log"))
+        .unwrap();
+    assert!(windows.contains("written by the Broker"), "{windows}");
+    assert!(!audit.contains(r"%LOCALAPPDATA%\agent-mail\audit.log"));
+
+    for heading in [
+        "## Install",
+        "## Creating a Mandate",
+        "## What each OS protects against",
+        "## Audit log",
+    ] {
+        for p in prose_paragraphs(&readme_section(heading)) {
+            assert!(
+                p.chars().count() <= 300,
+                "{heading}: a paragraph of {} characters: {p}",
+                p.chars().count()
+            );
+        }
+    }
+}
+
+#[test]
+fn job028_ac3_release_notes_describe_the_broker() {
+    let notes = read(".github/release-notes.md");
+    for needle in [
+        WINDOWS_ONE_LINER,
+        r"%ProgramFiles%\agent-mail",
+        "uninstall.ps1",
+        "Broker",
+        "hijacked Agent",
+        "`broker_unavailable`",
+        "`broker_version_mismatch`",
+        ONE_LINER,
+        KEYCHAIN_NOTE,
+    ] {
+        assert!(notes.contains(needle), "release notes lack {needle}");
+    }
+    assert!(!notes.contains(r"%USERPROFILE%\.local\bin\agent-mail.exe"));
+}
+
+#[test]
+fn job028_ac4_claude_md_lists_the_broker_and_uninstall_ps1() {
+    let claude = read("CLAUDE.md");
+    for needle in [
+        "src/broker.rs",
+        "src/broker/windows.rs",
+        "src/client.rs",
+        "length-prefixed",
+        "tests/broker.rs",
+        "tests/client.rs",
+        "tests/installers.rs",
+    ] {
+        assert!(claude.contains(needle), "CLAUDE.md lacks {needle}");
+    }
+    let release = claude
+        .lines()
+        .find(|l| l.starts_with("- Release files:"))
+        .expect("no Release files bullet");
+    let assets = release.split("release assets").next().unwrap();
+    for needle in ["`install.ps1`", "`uninstall.ps1`"] {
+        assert!(
+            assets.contains(needle),
+            "Release files bullet lacks {needle}"
+        );
+    }
+}
+
+#[test]
+fn job028_ac5_no_release_or_plugin_test_still_asserts_the_old_windows_wording() {
+    let old = [
+        concat!("\"honest", " Agents\""),
+        concat!("r\"%USERPROFILE%", r"\.local\bin\agent-mail.exe", "\""),
+        concat!("`%LOCALAPPDATA%", r"\agent-mail\audit.log`"),
+    ];
+    for file in ["tests/release.rs", "tests/plugin.rs"] {
+        let code = read(file);
+        let mut stale = false;
+        for (n, line) in code.lines().enumerate() {
+            // Needles in a `stale` list or a negated `contains` are allowed.
+            if line.contains("for stale in") {
+                stale = true;
+            } else if stale && line.trim_start().starts_with(']') {
+                stale = false;
+            }
+            if stale || line.contains("(!") {
+                continue;
+            }
+            for needle in old {
+                assert!(!line.contains(needle), "{file}:{}: {line}", n + 1);
+            }
+        }
     }
 }

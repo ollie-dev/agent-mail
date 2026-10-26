@@ -290,7 +290,8 @@ fn ac6_readme_states_what_each_os_protects_against() {
         "same user",
         "Agent Token",
         "Windows",
-        "honest Agents",
+        "Broker",
+        "out of scope",
     ] {
         assert!(section.contains(needle), "section lacks {needle:?}");
     }
@@ -956,6 +957,29 @@ fn job024_ac8_prose_paragraphs_before_install_are_short() {
 fn job024_ac9_token_values_in_the_top_part_are_placeholders() {
     for token in token_values(&readme_top()) {
         assert!(is_placeholder(&token), "README token value {token:?}");
+    }
+}
+
+#[test]
+fn job028_ac3_skill_tells_the_agent_to_hand_broker_errors_to_the_human() {
+    let skill = skill();
+    let start = skill
+        .find("\n## Errors and what to do\n")
+        .expect("SKILL.md has the section");
+    let rest = &skill[start + 1..];
+    let section = match rest[1..].find("\n## ") {
+        Some(end) => &rest[..end + 1],
+        None => rest,
+    };
+    for code in ["broker_unavailable", "broker_version_mismatch"] {
+        let item = section
+            .lines()
+            .find(|l| l.starts_with(&format!("- `{code}`")))
+            .unwrap_or_else(|| panic!("no item for {code}"));
+        assert!(item.contains("human"), "{item}");
+        assert!(item.contains("yourself"), "{item}");
+        assert!(!item.contains("sc.exe"), "{item}");
+        assert!(!item.contains("install.ps1"), "{item}");
     }
 }
 
