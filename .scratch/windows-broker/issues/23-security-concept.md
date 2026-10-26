@@ -4,7 +4,7 @@
 
 **Blocked by:** 22
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `docs/security/README.md` compares macOS and Windows side by side and explains what both share: the sealed Mandate, the Agent Token, the Policy, and that administrators are out of scope
 - [ ] `docs/security/macos.md` and `docs/security/windows.md` each cover who holds what, the trust boundaries, the path of one Agent request, `mandate create`, and the threats protected against and not protected against

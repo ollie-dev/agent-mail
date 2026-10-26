@@ -31,5 +31,5 @@
 - [x] Ticket 20: CLI and MCP server as Broker clients on Windows (.scratch/windows-broker/issues/20-windows-clients.md) → 026-windows-broker-clients
 - [x] Ticket 21: Installer and uninstaller for the Broker (.scratch/windows-broker/issues/21-installers.md) → 027-broker-installers
 - [x] Ticket 22: Docs for the Windows Broker (.scratch/windows-broker/issues/22-docs.md) → 028-broker-docs
-- [ ] Ticket 23: Security concept documents for macOS and Windows (.scratch/windows-broker/issues/23-security-concept.md)
+- [x] Ticket 23: Security concept documents for macOS and Windows (.scratch/windows-broker/issues/23-security-concept.md) → 029-security-concept
 - [ ] Intel Mac (x86_64) coverage: the x86_64-apple-darwin binary is already built, signed, attested, published and picked by install.sh, but it is cross-compiled on an arm64 runner and never run. Run it under Rosetta in the release workflow (`arch -x86_64`): `cargo test --locked --target x86_64-apple-darwin` in the `test` job, and `--version` for both targets (not only the host one) in `scripts/verify-release.sh`, with tests/release.rs checks to match

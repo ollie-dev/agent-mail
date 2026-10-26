@@ -679,6 +679,25 @@
       "reason": "",
       "updated": "2026-10-26T14:55:25Z",
       "builder": "a57913594bfdc7444"
+    },
+    {
+      "id": "029-security-concept",
+      "title": "Security concept",
+      "feature": "Ticket 23: Security concept documents for macOS and Windows (.scratch/windows-broker/issues/23-security-concept.md)",
+      "branch": "factory/029-security-concept",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-26T15:14:41Z",
+      "builder": "a2daf0aa920b85916"
     }
   ],
   "updated": "2026-10-26T14:55:25Z"
