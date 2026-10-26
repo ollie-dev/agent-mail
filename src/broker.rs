@@ -597,6 +597,72 @@ impl<S: MandateStore> MandateStore for SerializedStore<S> {
     }
 }
 
+/// The one service start argument that makes the Broker purge instead of
+/// serving: `sc.exe start agent-mail purge`, as `uninstall.ps1` runs it.
+pub const PURGE_ARG: &str = "purge";
+
+/// Whether the service start arguments `args`, after the service name, ask
+/// for the purge: exactly one argument, exactly `purge`. Anything else
+/// runs the normal Broker. Starting the service at all needs
+/// `SERVICE_START`, which only SYSTEM and Administrators hold.
+pub fn is_purge_start<S: AsRef<str>>(args: &[S]) -> bool {
+    matches!(args, [only] if only.as_ref() == PURGE_ARG)
+}
+
+/// Why [`purge`] failed.
+#[derive(Debug)]
+pub enum PurgeError {
+    /// The store could not be read or a record could not be deleted.
+    Store(StoreError),
+    /// Records were still there after every one was deleted.
+    Remaining(usize),
+    /// The audit log or its folder could not be deleted.
+    Audit(io::Error),
+}
+
+/// Deletes every record in `store`, then the audit log `audit.log` in
+/// `audit_dir` and the folder itself, as `uninstall.ps1` asks the Broker
+/// to. Returns how many records were deleted. A folder that does not exist
+/// is fine; a folder that is a link is unlinked, never followed.
+pub fn purge(store: &dyn MandateStore, audit_dir: &std::path::Path) -> Result<usize, PurgeError> {
+    let mut deleted = 0;
+    for (key, _) in store.entries().map_err(PurgeError::Store)? {
+        if store.delete(&key).map_err(PurgeError::Store)? {
+            deleted += 1;
+        }
+    }
+    let left = store.entries().map_err(PurgeError::Store)?.len();
+    if left != 0 {
+        return Err(PurgeError::Remaining(left));
+    }
+    remove_audit_dir(audit_dir).map_err(PurgeError::Audit)?;
+    Ok(deleted)
+}
+
+fn remove_audit_dir(dir: &std::path::Path) -> io::Result<()> {
+    let not_found = |e: io::Error| {
+        if e.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    };
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(e) => return not_found(e),
+    };
+    if metadata.file_type().is_symlink() {
+        // A junction or directory link is removed as a directory, a file
+        // link as a file; neither touches the target.
+        return std::fs::remove_dir(dir).or_else(|_| std::fs::remove_file(dir));
+    }
+    if !metadata.is_dir() {
+        return std::fs::remove_file(dir);
+    }
+    std::fs::remove_file(dir.join(crate::audit::FILE_NAME)).or_else(not_found)?;
+    std::fs::remove_dir_all(dir).or_else(not_found)
+}
+
 /// Runs `agent-mail broker`: on Windows, hands the process to the service
 /// control manager until the service stops; elsewhere, or when the process
 /// was not started as a service, prints one JSON error and exits 1.

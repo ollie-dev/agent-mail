@@ -9,6 +9,10 @@
 # attestation, and on the matching architecture runs `agent-mail --version`.
 # For the Windows x64 zip: checks the checksum, that the zip holds exactly
 # `agent-mail.exe`, and the build attestation (no signature check, no run).
+# For the Windows installers `install.ps1` and `uninstall.ps1`: downloads
+# each asset with `gh release download "$tag" --pattern <name>`, fails with
+# `missing asset <name>` if it is absent, and with `<name> differs from <tag>`
+# unless it is byte-identical to `git show "<tag>:<name>"`.
 # Needs `gh` (authenticated) and, for the signature check, macOS.
 set -eu
 
@@ -81,5 +85,20 @@ members=$(unzip -Z1 "$dir/$asset")
     exit 1
 }
 gh attestation verify "$dir/$asset" --repo "$repo"
+
+# The Windows installers: each asset must be the file at the tag, byte for
+# byte.
+dir="$work/installers"
+mkdir -p "$dir"
+for name in install.ps1 uninstall.ps1; do
+    echo "== $name"
+    gh release download "$tag" --repo "$repo" --dir "$dir" --pattern "$name" || true
+    [ -f "$dir/$name" ] || { echo "missing asset $name" >&2; exit 1; }
+    git -C "$root" show "$tag:$name" > "$dir/$name.expected"
+    cmp -s "$dir/$name" "$dir/$name.expected" || {
+        echo "$name differs from $tag" >&2
+        exit 1
+    }
+done
 
 echo "release $tag verified"

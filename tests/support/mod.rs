@@ -16,7 +16,9 @@ use agent_mail::mandate::{Account, Credential, Grant, Mandate, Operation, Policy
 use agent_mail::seal::{self, AgentToken};
 use agent_mail::store::{InMemoryStore, MandateStore};
 use agent_mail::{Context, RunOutput};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+use rcgen::{
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
@@ -653,29 +655,57 @@ impl FakeImap {
     }
 }
 
-fn tls_config() -> (CertificateDer<'static>, Arc<ServerConfig>) {
+/// The common name of the fake IMAP server's test CA.
+pub const TEST_CA_NAME: &str = "agent-mail test CA";
+/// The common name of the fake IMAP server's certificate.
+pub const TEST_LEAF_NAME: &str = "localhost";
+
+/// A fresh test CA and the fake server's certificate it signed, with the
+/// certificate's PKCS #8 key: (CA, leaf, key), all DER.
+pub fn test_certificates() -> (CertificateDer<'static>, CertificateDer<'static>, Vec<u8>) {
+    // Distinct subject names: with rcgen's default DN on both, the leaf's
+    // issuer equals its own subject, and Windows treats it as self-signed
+    // instead of chaining it to the CA in LocalMachine\Root.
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, TEST_CA_NAME);
     let ca_key = KeyPair::generate().unwrap();
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
     let issuer = Issuer::new(ca_params, ca_key);
 
     let leaf_key = KeyPair::generate().unwrap();
-    let leaf = CertificateParams::new(vec!["localhost".to_string(), "imap.gmail.com".to_string()])
-        .unwrap()
-        .signed_by(&leaf_key, &issuer)
-        .unwrap();
+    let mut leaf_params =
+        CertificateParams::new(vec!["localhost".to_string(), "imap.gmail.com".to_string()])
+            .unwrap();
+    leaf_params.distinguished_name = DistinguishedName::new();
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, TEST_LEAF_NAME);
+    let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+    (
+        ca_cert.der().clone(),
+        leaf.der().clone(),
+        leaf_key.serialize_der(),
+    )
+}
+
+/// The test CA, and a server config whose certificate it signed.
+fn tls_config() -> (CertificateDer<'static>, Arc<ServerConfig>) {
+    let (ca, leaf, key) = test_certificates();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![leaf.der().clone()],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            vec![leaf],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
         )
         .unwrap();
-    (ca_cert.der().clone(), Arc::new(config))
+    (ca, Arc::new(config))
 }
 
 fn serve(mut stream: TcpStream, mode: Mode, tls: Arc<ServerConfig>, commands: Arc<Mutex<State>>) {
