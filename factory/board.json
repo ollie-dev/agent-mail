@@ -555,7 +555,7 @@
     {
       "id": "024-readme-start-page",
       "title": "README start page",
-      "feature": "README as a great-looking start page: open with a centred header showing the icon `assets/icon.png` (480×480 PNG, displayed at about 128px), the name, a one-line tagline (fix the current title's typos: \"Connects your agents securely to your email\"), and badges (latest release, platform macOS, license if one exists); then a short \"why\" (credentials stay in the Keychain, Agents get scoped Mandates, every call is audited, drafts only, never sends), a quick start (install, `mandate create`, give the token to Claude Code or Claude Desktop) of a few commands, and a table of contents. Move the long reference sections (Search, Read, Flag, Move, Draft, MCP server, Sandbox and proxies, Audit log, Several Mandates and whoami, Usage errors) below the quick start or into `docs/` with links, keeping their content accurate. Keep every heading and phrase that tests/plugin.rs and tests/release.rs check, or update those tests in the same change, and keep the README's placeholder-only token scan passing; follow the CLAUDE.md text convention (paragraphs of at most about 300 characters, each thing said once)",
+      "feature": "README as a great-looking start page: open with a centred header showing the icon `assets/icon.png` (480\u00d7480 PNG, displayed at about 128px), the name, a one-line tagline (fix the current title's typos: \"Connects your agents securely to your email\"), and badges (latest release, platform macOS, license if one exists); then a short \"why\" (credentials stay in the Keychain, Agents get scoped Mandates, every call is audited, drafts only, never sends), a quick start (install, `mandate create`, give the token to Claude Code or Claude Desktop) of a few commands, and a table of contents. Move the long reference sections (Search, Read, Flag, Move, Draft, MCP server, Sandbox and proxies, Audit log, Several Mandates and whoami, Usage errors) below the quick start or into `docs/` with links, keeping their content accurate. Keep every heading and phrase that tests/plugin.rs and tests/release.rs check, or update those tests in the same change, and keep the README's placeholder-only token scan passing; follow the CLAUDE.md text convention (paragraphs of at most about 300 characters, each thing said once)",
       "branch": "factory/024-readme-start-page",
       "stage": "merged",
       "round": 1,
@@ -698,6 +698,25 @@
       "reason": "",
       "updated": "2026-10-26T15:14:41Z",
       "builder": "a2daf0aa920b85916"
+    },
+    {
+      "id": "030-intel-mac-coverage",
+      "title": "Intel Mac manual check",
+      "feature": "Intel Mac (x86_64) coverage, manual: no CI job for it (no Rosetta step, no Intel runner; Intel Macs are ageing and the maintainer checks by hand from time to time). On an Intel Mac a plain `cargo build` / `cargo test --locked` builds and tests natively for x86_64-apple-darwin, and `scripts/verify-release.sh <tag>` already runs `--version` on the binary matching the host. Document this manual Intel check in the README's Releasing section, make `verify-release.sh` say which macOS binary it ran `--version` on and which it skipped, with tests/release.rs checks to match",
+      "branch": "factory/030-intel-mac-coverage",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-10-26T21:48:08Z",
+      "builder": "a2d79c51cf47ca6b0"
     }
   ],
   "updated": "2026-10-26T14:55:25Z"
