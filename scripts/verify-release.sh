@@ -6,7 +6,10 @@
 # For each macOS target: downloads the tarball and its .sha256 file with
 # `gh release download`, checks the checksum, extracts the binary, checks
 # that it is signed ad hoc with the hardened runtime, verifies the build
-# attestation, and on the matching architecture runs `agent-mail --version`.
+# attestation, and on the matching architecture runs `agent-mail --version`
+# and prints `ran agent-mail --version on <target>`. The other target is not
+# run; it prints `skipped agent-mail --version on <target>: not the host
+# architecture (<host>)`, with `unknown` as the host on other architectures.
 # For the Windows x64 zip: checks the checksum, that the zip holds exactly
 # `agent-mail.exe`, and the build attestation (no signature check, no run).
 # For the Windows installers `install.ps1` and `uninstall.ps1`: downloads
@@ -61,6 +64,9 @@ for target in $targets; do
             echo "expected agent-mail ${tag#v}, got: $version" >&2
             exit 1
         }
+        echo "ran agent-mail --version on $target"
+    else
+        echo "skipped agent-mail --version on $target: not the host architecture (${host:-unknown})"
     fi
 done
 

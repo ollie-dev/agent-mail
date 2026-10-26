@@ -1795,3 +1795,311 @@ fn job029_ac5_readme_links_the_security_docs() {
         assert!(!mermaid_blocks(&read(file)).is_empty(), "{file}");
     }
 }
+
+// ---------------------------------------------------------------- job 030
+
+/// `scripts/verify-release.sh` run against stubbed `gh`, `codesign`,
+/// `uname` and `git` and fake release assets in a temporary directory. No
+/// network, no real GitHub, no repo tags.
+#[cfg(target_os = "macos")]
+mod verify_release {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const WINDOWS_ZIP: &str = "agent-mail-x86_64-pc-windows-msvc.zip";
+
+    fn write_executable(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn write_sha256(dir: &Path, asset: &str) {
+        let sum = Command::new("shasum")
+            .args(["-a", "256", asset])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(sum.status.success());
+        std::fs::write(dir.join(format!("{asset}.sha256")), &sum.stdout).unwrap();
+    }
+
+    /// The fake release assets. `versions` gives the `--version` line of
+    /// each macOS target's binary.
+    fn fixtures(versions: [(&str, &str); 2]) -> PathBuf {
+        let dir = temp_dir("verify-fixtures");
+        for (target, version) in versions {
+            let stage = temp_dir("verify-stage");
+            write_executable(
+                &stage.join("agent-mail"),
+                &format!("#!/bin/sh\necho '{version}'\n"),
+            );
+            let asset = format!("agent-mail-{target}.tar.gz");
+            let status = Command::new("tar")
+                .arg("-czf")
+                .arg(dir.join(&asset))
+                .arg("-C")
+                .arg(&stage)
+                .arg("agent-mail")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            write_sha256(&dir, &asset);
+        }
+        let stage = temp_dir("verify-stage");
+        std::fs::write(stage.join("agent-mail.exe"), b"fake exe").unwrap();
+        let status = Command::new("/usr/bin/zip")
+            .args(["-q", "-X"])
+            .arg(dir.join(WINDOWS_ZIP))
+            .arg("agent-mail.exe")
+            .current_dir(&stage)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        write_sha256(&dir, WINDOWS_ZIP);
+        for name in ["install.ps1", "uninstall.ps1"] {
+            std::fs::write(dir.join(name), format!("# fake {name}\n")).unwrap();
+        }
+        dir
+    }
+
+    /// The stub commands, first on `PATH`.
+    fn stubs() -> PathBuf {
+        let dir = temp_dir("verify-stubs");
+        write_executable(
+            &dir.join("gh"),
+            r#"#!/bin/sh
+case "$1 $2" in
+"release download")
+    shift 3
+    dest=""
+    patterns=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --repo) shift 2 ;;
+        --dir) dest=$2; shift 2 ;;
+        --pattern) patterns="$patterns $2"; shift 2 ;;
+        *) shift ;;
+        esac
+    done
+    for p in $patterns; do
+        [ -f "$FAKE_FIXTURES/$p" ] && cp "$FAKE_FIXTURES/$p" "$dest/"
+    done
+    exit 0 ;;
+"attestation verify") exit 0 ;;
+esac
+echo "gh stub: unexpected $*" >&2
+exit 1
+"#,
+        );
+        write_executable(
+            &dir.join("codesign"),
+            "#!/bin/sh\necho 'CodeDirectory v=20500 size=1 flags=0x10002(adhoc,runtime) hashes=1+0 location=embedded'\n",
+        );
+        write_executable(&dir.join("uname"), "#!/bin/sh\necho \"$FAKE_UNAME_M\"\n");
+        write_executable(
+            &dir.join("git"),
+            r#"#!/bin/sh
+[ "$1" = "-C" ] && [ "$3" = "show" ] || { echo "git stub: unexpected $*" >&2; exit 1; }
+cat "$FAKE_FIXTURES/${4#*:}"
+"#,
+        );
+        dir
+    }
+
+    fn verify(arch: &str, fixtures: &Path) -> Output {
+        let stubs = stubs();
+        Command::new("sh")
+            .arg(Path::new(ROOT).join("scripts/verify-release.sh"))
+            .arg("v9.9.9")
+            .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+            .env("FAKE_UNAME_M", arch)
+            .env("FAKE_FIXTURES", fixtures)
+            .env("TMPDIR", temp_dir("verify-tmp"))
+            .output()
+            .unwrap()
+    }
+
+    fn all_good() -> PathBuf {
+        fixtures([
+            ("aarch64-apple-darwin", "agent-mail 9.9.9"),
+            ("x86_64-apple-darwin", "agent-mail 9.9.9"),
+        ])
+    }
+
+    fn lines(output: &Output) -> Vec<String> {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn count(lines: &[String], line: &str) -> usize {
+        lines.iter().filter(|l| *l == line).count()
+    }
+
+    #[test]
+    fn job030_ac1_prints_ran_for_the_host_target() {
+        let output = verify("arm64", &all_good());
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let out = lines(&output);
+        assert_eq!(
+            count(&out, "ran agent-mail --version on aarch64-apple-darwin"),
+            1,
+            "{out:?}"
+        );
+        let version = out.iter().position(|l| l == "agent-mail 9.9.9").unwrap();
+        let ran = out
+            .iter()
+            .position(|l| l == "ran agent-mail --version on aarch64-apple-darwin")
+            .unwrap();
+        assert!(version < ran, "ran line before the version check: {out:?}");
+    }
+
+    #[test]
+    fn job030_ac2_prints_skipped_for_the_other_target() {
+        let output = verify("arm64", &all_good());
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let out = lines(&output);
+        assert_eq!(
+            count(
+                &out,
+                "skipped agent-mail --version on x86_64-apple-darwin: not the host architecture (aarch64-apple-darwin)"
+            ),
+            1,
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|l| l.contains("ran agent-mail --version on x86_64-apple-darwin"))
+        );
+        // The skipped binary is not run: only one version line is printed.
+        assert_eq!(count(&out, "agent-mail 9.9.9"), 1, "{out:?}");
+    }
+
+    #[test]
+    fn job030_ac3_on_intel_the_roles_swap() {
+        let output = verify("x86_64", &all_good());
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let out = lines(&output);
+        assert_eq!(
+            count(&out, "ran agent-mail --version on x86_64-apple-darwin"),
+            1,
+            "{out:?}"
+        );
+        assert_eq!(
+            count(
+                &out,
+                "skipped agent-mail --version on aarch64-apple-darwin: not the host architecture (x86_64-apple-darwin)"
+            ),
+            1,
+            "{out:?}"
+        );
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("release v9.9.9 verified")
+        );
+    }
+
+    #[test]
+    fn job030_ac4_unknown_host_skips_both_targets() {
+        let output = verify("riscv64", &all_good());
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let out = lines(&output);
+        for target in TARGETS {
+            let line = format!(
+                "skipped agent-mail --version on {target}: not the host architecture (unknown)"
+            );
+            assert_eq!(count(&out, &line), 1, "{out:?}");
+        }
+        assert!(
+            !out.iter().any(|l| l.contains("ran agent-mail --version")),
+            "{out:?}"
+        );
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("release v9.9.9 verified")
+        );
+    }
+
+    #[test]
+    fn job030_ac5_version_mismatch_fails_without_a_ran_line() {
+        let fixtures = fixtures([
+            ("aarch64-apple-darwin", "agent-mail 9.9.9"),
+            ("x86_64-apple-darwin", "agent-mail 0.0.1"),
+        ]);
+        let output = verify("x86_64", &fixtures);
+        assert_ne!(output.status.code(), Some(0), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("expected agent-mail 9.9.9, got: agent-mail 0.0.1"),
+            "{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("ran agent-mail --version on x86_64-apple-darwin"),
+            "{stdout}"
+        );
+    }
+}
+
+#[test]
+fn job030_ac6_verify_release_prints_ran_and_skipped() {
+    let verify = read("scripts/verify-release.sh");
+    assert!(verify.contains("echo \"ran agent-mail --version on $target\""));
+    assert!(verify.contains("skipped agent-mail --version on $target: not the host architecture"));
+    let header: String = verify
+        .lines()
+        .skip(1)
+        .take_while(|l| l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(header.contains("--version"), "header: {header}");
+    assert!(
+        header.contains("`ran agent-mail --version"),
+        "header lacks ran: {header}"
+    );
+    assert!(
+        header.contains("`skipped agent-mail --version"),
+        "header lacks skipped: {header}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = Path::new(ROOT).join("scripts/verify-release.sh");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "verify-release.sh is not executable");
+        let status = Command::new("sh").arg("-n").arg(&path).status().unwrap();
+        assert!(status.success(), "verify-release.sh does not parse");
+    }
+}
+
+#[test]
+fn job030_ac7_readme_describes_the_manual_intel_check() {
+    let development = readme_section("## Development");
+    let releasing = development
+        .split("Releasing")
+        .nth(1)
+        .expect("no Releasing paragraph under Development");
+    for needle in [
+        "Intel",
+        "x86_64-apple-darwin",
+        "cargo test --locked",
+        "scripts/verify-release.sh vX.Y.Z",
+        "ran agent-mail --version on x86_64-apple-darwin",
+        "no CI job",
+    ] {
+        assert!(releasing.contains(needle), "Releasing text lacks {needle}");
+    }
+    let intel: Vec<String> = prose_paragraphs(releasing)
+        .into_iter()
+        .filter(|p| p.contains("Intel"))
+        .collect();
+    assert!(!intel.is_empty());
+    for paragraph in intel {
+        assert!(
+            paragraph.chars().count() <= 300,
+            "{} chars: {paragraph}",
+            paragraph.chars().count()
+        );
+    }
+}
