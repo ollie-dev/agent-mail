@@ -36,13 +36,17 @@ const INSTALLED: &str =
 // ---------------------------------------------------------------- helpers
 
 /// Runs `script` in Windows PowerShell, passed encoded so no quoting is
-/// lost, and returns its trimmed stdout. Panics if it fails.
+/// lost, and returns its trimmed stdout. Panics if it fails. The caller's
+/// `PSModulePath` is dropped: run from PowerShell 7 it lists PowerShell 7's
+/// modules, and Windows PowerShell then fails to autoload cmdlets such as
+/// `Get-FileHash`.
 fn ps(script: &str) -> String {
     let script = format!(
         "$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'; {script}"
     );
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let out = Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
         .arg(BASE64.encode(utf16))
         .output()
