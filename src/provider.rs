@@ -1,6 +1,7 @@
 //! The built-in list of Providers: mail services whose IMAP settings
 //! `mandate create` fills in, so the human types only the address and the
-//! Credential.
+//! Credential, plus unsupported Providers that the picker lists with the
+//! reason they cannot work.
 //!
 //! This module loads `data/providers.json`, validates it, builds the picker
 //! labels and search keys, and looks a Provider up by mail domain.
@@ -23,10 +24,18 @@ const PROVIDERS_JSON: &str = include_str!("../data/providers.json");
 /// The longest `note` allowed, in characters.
 pub const NOTE_MAX: usize = 300;
 
+/// The longest `unsupported` reason allowed, in characters.
+pub const REASON_MAX: usize = 300;
+
+/// What an unsupported Provider's picker label ends with: a space, an en
+/// dash, a space, then `not supported`.
+pub const UNSUPPORTED_SUFFIX: &str = " \u{2013} not supported";
+
 /// The most domains a picker label shows.
 const LABEL_DOMAINS: usize = 3;
 
-/// A mail service with known IMAP settings.
+/// A mail service: either one with known IMAP settings and Credential kind,
+/// or an unsupported one with the reason it cannot work.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
@@ -36,10 +45,16 @@ pub struct Provider {
     pub name: String,
     /// The service's own mail domains, in data order. May be empty.
     pub domains: Vec<String>,
-    /// Where and how to connect.
-    pub imap: ImapSettings,
-    /// Which Credential the service wants.
-    pub credential: CredentialKind,
+    /// Where and how to connect. Present exactly when `unsupported` is not.
+    #[serde(default)]
+    pub imap: Option<ImapSettings>,
+    /// Which Credential the service wants. Present exactly when
+    /// `unsupported` is not.
+    #[serde(default)]
+    pub credential: Option<CredentialKind>,
+    /// Why the service cannot work with agent-mail, if it cannot.
+    #[serde(default)]
+    pub unsupported: Option<String>,
     /// Shown before the Credential prompt, if present.
     #[serde(default)]
     pub note: Option<String>,
@@ -78,11 +93,26 @@ impl CredentialKind {
 }
 
 impl Provider {
+    /// The IMAP settings and Credential kind of a supported Provider; `None`
+    /// for an unsupported one.
+    pub fn connection(&self) -> Option<(&ImapSettings, CredentialKind)> {
+        match (&self.unsupported, &self.imap, self.credential) {
+            (None, Some(imap), Some(credential)) => Some((imap, credential)),
+            _ => None,
+        }
+    }
+
     /// The picker label: `Name (d1, d2, d3, …)`, at most three domains in
     /// data order, `, …` only when there are more, just `Name` without any.
+    /// An unsupported Provider's label ends with [`UNSUPPORTED_SUFFIX`].
     pub fn label(&self) -> String {
+        let suffix = if self.unsupported.is_some() {
+            UNSUPPORTED_SUFFIX
+        } else {
+            ""
+        };
         if self.domains.is_empty() {
-            return self.name.clone();
+            return format!("{}{suffix}", self.name);
         }
         let shown: Vec<&str> = self
             .domains
@@ -95,7 +125,7 @@ impl Provider {
         } else {
             ""
         };
-        format!("{} ({}{more})", self.name, shown.join(", "))
+        format!("{} ({}{more}){suffix}", self.name, shown.join(", "))
     }
 
     /// The picker option: the label, searchable by the name and every
@@ -139,11 +169,35 @@ pub fn parse(json: &str) -> Result<Vec<Provider>, String> {
                 return Err(format!("domain {domain:?} appears twice"));
             }
         }
-        if provider.imap.host.trim().is_empty() {
-            return Err(format!("provider {id:?} has an empty IMAP host"));
-        }
-        if provider.imap.port == 0 {
-            return Err(format!("provider {id:?} has IMAP port 0"));
+        match (&provider.unsupported, &provider.imap, &provider.credential) {
+            (Some(reason), None, None) => {
+                if reason.trim().is_empty() {
+                    return Err(format!("provider {id:?} has an empty unsupported reason"));
+                }
+                if reason.chars().count() > REASON_MAX {
+                    return Err(format!(
+                        "provider {id:?} has an unsupported reason over {REASON_MAX} characters"
+                    ));
+                }
+            }
+            (Some(_), _, _) => {
+                return Err(format!(
+                    "provider {id:?} is unsupported but has IMAP settings or a credential kind"
+                ));
+            }
+            (None, Some(imap), Some(_)) => {
+                if imap.host.trim().is_empty() {
+                    return Err(format!("provider {id:?} has an empty IMAP host"));
+                }
+                if imap.port == 0 {
+                    return Err(format!("provider {id:?} has IMAP port 0"));
+                }
+            }
+            (None, _, _) => {
+                return Err(format!(
+                    "provider {id:?} needs both IMAP settings and a credential kind, or an unsupported reason"
+                ));
+            }
         }
         if let Some(note) = &provider.note
             && note.chars().count() > NOTE_MAX
