@@ -736,6 +736,25 @@
       "reason": "",
       "updated": "2026-11-02T11:12:10Z",
       "builder": "aa85827e44f055ade"
+    },
+    {
+      "id": "032-unsupported-providers",
+      "title": "Unsupported Providers",
+      "feature": "Provider list ticket 02: Unsupported Providers in the picker (.scratch/provider-list/issues/02-unsupported-providers.md, spec .scratch/provider-list/spec.md)",
+      "branch": "factory/032-unsupported-providers",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-11-02T12:52:44Z",
+      "builder": "a787bca97493c7f0e"
     }
   ],
   "updated": "2026-11-02T11:12:10Z"

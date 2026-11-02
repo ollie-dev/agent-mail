@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The 5 unsupported entries from `.scratch/provider-list/providers.json` are in the built-in list, with a reason and without IMAP settings or Credential kind
 - [ ] The list test also checks: IMAP settings and Credential kind present exactly when no reason is set, reasons at most 300 characters
