@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Prefactor first: the Terminal port offers a single choice with search, and the scripted test terminal can answer it
 - [ ] The 30 supported Providers from `.scratch/provider-list/providers.json` are built into the binary, not read at runtime; a code comment says why

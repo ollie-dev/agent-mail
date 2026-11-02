@@ -717,7 +717,26 @@
       "reason": "",
       "updated": "2026-10-26T21:48:08Z",
       "builder": "a2d79c51cf47ca6b0"
+    },
+    {
+      "id": "031-provider-list-picker",
+      "title": "Provider list picker",
+      "feature": "Provider list ticket 01: Provider list and searchable picker in `mandate create` (.scratch/provider-list/issues/01-provider-list-and-picker.md, spec .scratch/provider-list/spec.md)",
+      "branch": "factory/031-provider-list-picker",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-11-02T11:12:10Z",
+      "builder": "aa85827e44f055ade"
     }
   ],
-  "updated": "2026-10-26T14:55:25Z"
+  "updated": "2026-11-02T11:12:10Z"
 }
