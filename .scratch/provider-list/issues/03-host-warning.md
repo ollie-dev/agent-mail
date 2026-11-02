@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] With "Custom server…" and a login like `max@web.de` on a host other than WEB.DE's, the warning names the chosen server and the expected host, before the Credential prompt
 - [ ] Choosing one Provider and typing an address of another Provider with a different host warns the same way

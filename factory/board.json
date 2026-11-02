@@ -755,6 +755,25 @@
       "reason": "",
       "updated": "2026-11-02T12:52:44Z",
       "builder": "a787bca97493c7f0e"
+    },
+    {
+      "id": "033-host-warning",
+      "title": "Host warning",
+      "feature": "Provider list ticket 03: Host warning for every Provider (.scratch/provider-list/issues/03-host-warning.md, spec .scratch/provider-list/spec.md)",
+      "branch": "factory/033-host-warning",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-11-02T13:00:48Z",
+      "builder": "a86f36c8d1b1820a5"
     }
   ],
   "updated": "2026-11-02T11:12:10Z"
