@@ -10,6 +10,28 @@ use crate::mandate::Credential;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cancelled;
 
+/// One option of a single choice with search: what is shown, and the extra
+/// words it can be found by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOption {
+    /// The text shown in the list.
+    pub label: String,
+    /// More text the option matches, shown or not.
+    pub keys: Vec<String>,
+}
+
+impl SearchOption {
+    /// Whether the trimmed `query`, compared case-insensitively, is a
+    /// substring of the label or of any key. An empty query matches all.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || std::iter::once(&self.label)
+                .chain(&self.keys)
+                .any(|text| text.to_lowercase().contains(&query))
+    }
+}
+
 /// Prompts and messages for the human at a terminal.
 pub trait Terminal {
     /// Whether a human can be talking to this terminal.
@@ -21,6 +43,15 @@ pub trait Terminal {
     /// Asks the human to pick one of `options`, with the cursor starting on
     /// `default`; returns the picked index.
     fn choose(&self, prompt: &str, options: &[String], default: usize) -> Result<usize, Cancelled>;
+    /// Like `choose`, but the human can type to narrow the list to the
+    /// options that match (see `SearchOption::matches`); returns the picked
+    /// index.
+    fn search(
+        &self,
+        prompt: &str,
+        options: &[SearchOption],
+        default: usize,
+    ) -> Result<usize, Cancelled>;
     /// Asks the human to tick any of `options`, with the indexes in `ticked`
     /// ticked to begin with; returns the ticked indexes in option order.
     fn checklist(
@@ -104,6 +135,15 @@ impl Terminal for NoTerminal {
         &self,
         _prompt: &str,
         _options: &[String],
+        _default: usize,
+    ) -> Result<usize, Cancelled> {
+        Err(Cancelled)
+    }
+
+    fn search(
+        &self,
+        _prompt: &str,
+        _options: &[SearchOption],
         _default: usize,
     ) -> Result<usize, Cancelled> {
         Err(Cancelled)
@@ -227,6 +267,31 @@ impl Terminal for InquireTerminal {
             .map_err(|_| Cancelled)
     }
 
+    /// Filters with `SearchOption::matches` instead of `inquire`'s fuzzy
+    /// match, so a domain that the label does not show still finds its
+    /// option. Matches keep their list order.
+    fn search(
+        &self,
+        prompt: &str,
+        options: &[SearchOption],
+        default: usize,
+    ) -> Result<usize, Cancelled> {
+        let labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
+        let scorer = |query: &str, _: &String, _: &str, index: usize| -> Option<i64> {
+            let option = options.get(index)?;
+            option
+                .matches(query)
+                .then(|| -i64::try_from(index).unwrap_or(i64::MAX))
+        };
+        inquire::Select::new(prompt, labels)
+            .with_starting_cursor(default.min(options.len().saturating_sub(1)))
+            .with_scorer(&scorer)
+            .with_help_message("type to search, enter to choose")
+            .raw_prompt()
+            .map(|choice| choice.index)
+            .map_err(|_| Cancelled)
+    }
+
     fn checklist(
         &self,
         prompt: &str,
@@ -279,7 +344,7 @@ mod scripted {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    use super::{Cancelled, Terminal};
+    use super::{Cancelled, SearchOption, Terminal};
     use crate::mandate::Credential;
 
     /// Marker that a release build must not contain (checked by a test).
@@ -298,6 +363,9 @@ mod scripted {
         Hidden(String),
         /// Picks the option with exactly this label.
         Choose(String),
+        /// Types the query (first) into a choice with search, then picks the
+        /// option with exactly the label (second), which must match it.
+        Search(String, String),
         /// Ticks the options with exactly these labels.
         Tick(Vec<String>),
         /// Answers a yes/no question.
@@ -324,6 +392,11 @@ mod scripted {
         /// Picks the option labelled `label`.
         pub fn choose(label: &str) -> Self {
             Self::Choose(label.to_string())
+        }
+
+        /// Types `query` into a choice with search, then picks `label`.
+        pub fn search(query: &str, label: &str) -> Self {
+            Self::Search(query.to_string(), label.to_string())
         }
 
         /// Ticks the options labelled `labels`.
@@ -553,6 +626,55 @@ mod scripted {
             }
         }
 
+        /// Recorded as a `Kind::Choice` with every option's label.
+        fn search(
+            &self,
+            prompt: &str,
+            options: &[SearchOption],
+            default: usize,
+        ) -> Result<usize, Cancelled> {
+            let labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
+            let offered = labels.get(default).cloned();
+            let record = |answer| {
+                self.record_offer(
+                    Kind::Choice,
+                    prompt,
+                    &labels,
+                    answer,
+                    offered.clone(),
+                    Vec::new(),
+                );
+            };
+            match self.next(Kind::Choice, prompt) {
+                Answer::Search(query, label) => {
+                    let index = Self::index_of(&labels, &label, prompt);
+                    assert!(
+                        options[index].matches(&query),
+                        "search {query:?} at {prompt:?} does not find {label:?}"
+                    );
+                    record(Some(label));
+                    Ok(index)
+                }
+                Answer::Choose(label) => {
+                    let index = Self::index_of(&labels, &label, prompt);
+                    record(Some(label));
+                    Ok(index)
+                }
+                Answer::Accept => {
+                    let label = offered
+                        .clone()
+                        .unwrap_or_else(|| panic!("choice {prompt:?} has no default"));
+                    record(Some(label));
+                    Ok(default)
+                }
+                Answer::Cancel => {
+                    record(None);
+                    Err(Cancelled)
+                }
+                other => panic!("search choice {prompt:?} got {other:?}"),
+            }
+        }
+
         fn checklist(
             &self,
             prompt: &str,
@@ -640,5 +762,60 @@ mod scripted {
             self.record(Kind::Reveal, text, &[], None);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> Vec<SearchOption> {
+        vec![
+            SearchOption {
+                label: "Alpha".to_string(),
+                keys: vec!["a.example".to_string()],
+            },
+            SearchOption {
+                label: "Beta".to_string(),
+                keys: vec!["hidden.example".to_string()],
+            },
+        ]
+    }
+
+    #[test]
+    fn search_picks_an_option_found_by_a_hidden_key() {
+        let terminal = ScriptedTerminal::new(vec![Answer::search("HIDDEN", "Beta")]);
+        assert_eq!(terminal.search("Pick:", &options(), 0), Ok(1));
+        let entry = &terminal.transcript()[0];
+        assert_eq!(entry.kind, Kind::Choice);
+        assert_eq!(entry.options, ["Alpha", "Beta"]);
+        assert_eq!(entry.default.as_deref(), Some("Alpha"));
+        assert_eq!(entry.answer.as_deref(), Some("Beta"));
+    }
+
+    #[test]
+    #[should_panic(expected = "does not find")]
+    fn search_panics_when_the_query_does_not_find_the_label() {
+        let terminal = ScriptedTerminal::new(vec![Answer::search("hidden", "Alpha")]);
+        let _ = terminal.search("Pick:", &options(), 0);
+    }
+
+    #[test]
+    fn search_can_be_cancelled_chosen_or_accepted() {
+        let terminal =
+            ScriptedTerminal::new(vec![Answer::Cancel, Answer::choose("Beta"), Answer::Accept]);
+        assert_eq!(terminal.search("Pick:", &options(), 0), Err(Cancelled));
+        assert_eq!(terminal.search("Pick:", &options(), 0), Ok(1));
+        assert_eq!(terminal.search("Pick:", &options(), 1), Ok(1));
+    }
+
+    #[test]
+    fn matching_trims_ignores_case_and_matches_all_on_empty() {
+        let [alpha, beta] = <[SearchOption; 2]>::try_from(options()).unwrap();
+        assert!(alpha.matches("  ALP "));
+        assert!(alpha.matches(""));
+        assert!(beta.matches("   "));
+        assert!(!alpha.matches("hidden"));
+        assert!(beta.matches("Hidden.Example"));
     }
 }
