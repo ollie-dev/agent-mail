@@ -491,6 +491,57 @@
       },
       "credential": "password",
       "note": "Enable IMAP first: Email > Settings > POP3 & IMAP > enable access via POP3 and IMAP. GMX switches it off again after long inactivity."
+    },
+    {
+      "id": "outlook",
+      "name": "Outlook.com / Hotmail",
+      "domains": [
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "msn.com",
+        "outlook.de",
+        "hotmail.de"
+      ],
+      "unsupported": "Microsoft removed password and app-password sign-in for IMAP in personal accounts in September 2024; only OAuth2 works."
+    },
+    {
+      "id": "microsoft365",
+      "name": "Microsoft 365 / Exchange Online (work)",
+      "domains": [],
+      "unsupported": "Basic authentication for IMAP in Exchange Online was permanently disabled in 2022–2023; only OAuth2 is accepted."
+    },
+    {
+      "id": "proton",
+      "name": "Proton Mail",
+      "domains": [
+        "proton.me",
+        "protonmail.com",
+        "protonmail.ch",
+        "pm.me"
+      ],
+      "unsupported": "IMAP is only offered through Proton Mail Bridge on localhost, whose self-signed certificate agent-mail does not trust."
+    },
+    {
+      "id": "tuta",
+      "name": "Tuta (Tutanota)",
+      "domains": [
+        "tuta.com",
+        "tutanota.com",
+        "tutanota.de",
+        "tuta.io",
+        "tutamail.com",
+        "keemail.me"
+      ],
+      "unsupported": "Tuta offers no IMAP access at all; mail is reachable only through its own apps."
+    },
+    {
+      "id": "hey",
+      "name": "HEY",
+      "domains": [
+        "hey.com"
+      ],
+      "unsupported": "HEY provides no IMAP access."
     }
   ]
 }

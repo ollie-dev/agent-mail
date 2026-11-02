@@ -2,7 +2,7 @@
 //! labels and the search.
 
 use agent_mail::mandate::TlsMode;
-use agent_mail::provider::{self, CredentialKind, NOTE_MAX, Provider};
+use agent_mail::provider::{self, CredentialKind, NOTE_MAX, Provider, REASON_MAX};
 use agent_mail::terminal::SearchOption;
 use serde_json::{Value, json};
 
@@ -47,8 +47,59 @@ fn ac2_all_returns_the_30_supported_providers_in_file_order() {
         .map(|p| p["id"].as_str().unwrap())
         .collect();
     assert_eq!(supported.len(), 30);
-    let ids: Vec<&str> = provider::all().iter().map(|p| p.id.as_str()).collect();
+    let ids: Vec<&str> = provider::all()
+        .iter()
+        .filter(|p| p.unsupported.is_none())
+        .map(|p| p.id.as_str())
+        .collect();
     assert_eq!(ids, supported);
+}
+
+const UNSUPPORTED: [&str; 5] = ["outlook", "microsoft365", "proton", "tuta", "hey"];
+
+fn starting_list() -> Vec<Value> {
+    let starting: Value =
+        serde_json::from_str(&repo_file(".scratch/provider-list/providers.json")).unwrap();
+    starting["providers"].as_array().unwrap().clone()
+}
+
+#[test]
+fn job032_ac1_all_returns_the_35_providers_in_file_order() {
+    let starting = starting_list();
+    let expected: Vec<&str> = starting.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = provider::all().iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids.len(), 35);
+    assert_eq!(ids, expected);
+    assert_eq!(ids[30..], UNSUPPORTED);
+}
+
+#[test]
+fn job032_ac1_unsupported_providers_carry_the_starting_reason_only() {
+    let starting = starting_list();
+    for id in UNSUPPORTED {
+        let raw = starting.iter().find(|p| p["id"] == id).unwrap();
+        let p = by_id(id);
+        assert_eq!(
+            p.unsupported.as_deref(),
+            Some(raw["unsupported"].as_str().unwrap()),
+            "{id}"
+        );
+        assert_eq!(p.imap, None, "{id}");
+        assert_eq!(p.credential, None, "{id}");
+        assert!(p.connection().is_none(), "{id}");
+    }
+    assert_eq!(
+        by_id("hey").unsupported.as_deref(),
+        Some("HEY provides no IMAP access.")
+    );
+    let supported: Vec<&Provider> = provider::all()
+        .iter()
+        .filter(|p| !UNSUPPORTED.contains(&p.id.as_str()))
+        .collect();
+    assert_eq!(supported.len(), 30);
+    for p in supported {
+        assert_eq!(p.unsupported, None, "{}", p.id);
+    }
 }
 
 fn is_slug(id: &str) -> bool {
@@ -72,13 +123,27 @@ fn ac3_the_built_in_list_follows_the_schema() {
         for d in &p.domains {
             assert!(domains.insert(d.to_lowercase()), "duplicate domain {d}");
         }
-        assert!(!p.imap.host.is_empty());
-        assert_ne!(p.imap.port, 0);
-        assert!(matches!(p.imap.tls, TlsMode::Implicit | TlsMode::Starttls));
-        assert!(matches!(
-            p.credential,
-            CredentialKind::Password | CredentialKind::AppPassword
-        ));
+        match &p.unsupported {
+            None => {
+                let imap = p
+                    .imap
+                    .as_ref()
+                    .expect("supported Provider has IMAP settings");
+                assert!(!imap.host.is_empty());
+                assert_ne!(imap.port, 0);
+                assert!(matches!(imap.tls, TlsMode::Implicit | TlsMode::Starttls));
+                assert!(matches!(
+                    p.credential,
+                    Some(CredentialKind::Password | CredentialKind::AppPassword)
+                ));
+            }
+            Some(reason) => {
+                assert!(p.imap.is_none(), "{}", p.id);
+                assert!(p.credential.is_none(), "{}", p.id);
+                assert!(!reason.trim().is_empty(), "{}", p.id);
+                assert!(reason.chars().count() <= REASON_MAX, "{}", p.id);
+            }
+        }
         if let Some(note) = &p.note {
             assert!(note.chars().count() <= NOTE_MAX, "{}", p.id);
         }
@@ -144,6 +209,55 @@ fn ac3_the_parser_rejects_each_broken_rule() {
     assert!(provider::parse(&note).is_ok());
 }
 
+/// `entry` turned unsupported: `reason` set, `imap` and `credential` gone.
+fn unsupported(id: &str, reason: &str) -> Value {
+    let mut e = entry(id, &[]);
+    let object = e.as_object_mut().unwrap();
+    object.remove("imap");
+    object.remove("credential");
+    object.insert("unsupported".to_string(), json!(reason));
+    e
+}
+
+#[test]
+fn job032_ac2_the_parser_enforces_the_unsupported_rules() {
+    assert_eq!(REASON_MAX, 300);
+    let with = |second: Value| list(vec![entry("a", &["a.test"]), second]);
+    let bad = [
+        ("unsupported with imap", {
+            let mut e = unsupported("b", "No IMAP.");
+            e["imap"] = json!({ "host": "imap.example.test", "port": 993, "tls": "implicit" });
+            with(e)
+        }),
+        ("unsupported with credential", {
+            let mut e = unsupported("b", "No IMAP.");
+            e["credential"] = json!("password");
+            with(e)
+        }),
+        (
+            "reason of 301 characters",
+            with(unsupported("b", &"r".repeat(REASON_MAX + 1))),
+        ),
+        ("neither unsupported nor imap", {
+            let mut e = entry("b", &["b.test"]);
+            e.as_object_mut().unwrap().remove("imap");
+            with(e)
+        }),
+        ("neither unsupported nor credential", {
+            let mut e = entry("b", &["b.test"]);
+            e.as_object_mut().unwrap().remove("credential");
+            with(e)
+        }),
+    ];
+    for (rule, text) in bad {
+        assert!(provider::parse(&text).is_err(), "{rule} was accepted");
+    }
+    let longest = with(unsupported("b", &"r".repeat(REASON_MAX)));
+    let parsed = provider::parse(&longest).unwrap();
+    assert_eq!(parsed[1].unsupported.as_deref().map(str::len), Some(300));
+    assert!(parsed[1].domains.is_empty());
+}
+
 fn by_id(id: &str) -> &'static Provider {
     provider::all().iter().find(|p| p.id == id).unwrap()
 }
@@ -170,7 +284,12 @@ fn ac4_sorted_is_case_insensitive_by_name() {
     let mut expected = names.clone();
     expected.sort();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 30);
+    assert_eq!(names.len(), 35);
+    let supported = provider::sorted()
+        .iter()
+        .filter(|p| p.unsupported.is_none())
+        .count();
+    assert_eq!(supported, 30);
 }
 
 fn found(query: &str) -> Vec<&'static str> {
@@ -192,8 +311,57 @@ fn ac4_search_finds_by_name_and_every_domain() {
     let mut gmx = found("gmx");
     gmx.sort_unstable();
     assert_eq!(gmx, ["gmx", "gmx-com"]);
-    assert_eq!(found("").len(), 30);
+    assert_eq!(found("").len(), 35);
     let option: SearchOption = by_id("gmx").search_option();
     assert_eq!(option.keys[0], "GMX");
     assert_eq!(option.keys.len(), 1 + by_id("gmx").domains.len());
+}
+
+#[test]
+fn job032_ac3_unsupported_labels_carry_the_suffix() {
+    let expected = [
+        (
+            "outlook",
+            "Outlook.com / Hotmail (outlook.com, hotmail.com, live.com, \u{2026}) \u{2013} not supported",
+        ),
+        (
+            "microsoft365",
+            "Microsoft 365 / Exchange Online (work) \u{2013} not supported",
+        ),
+        (
+            "proton",
+            "Proton Mail (proton.me, protonmail.com, protonmail.ch, \u{2026}) \u{2013} not supported",
+        ),
+        (
+            "tuta",
+            "Tuta (Tutanota) (tuta.com, tutanota.com, tutanota.de, \u{2026}) \u{2013} not supported",
+        ),
+        ("hey", "HEY (hey.com) \u{2013} not supported"),
+    ];
+    for (id, label) in expected {
+        assert_eq!(by_id(id).label(), label);
+        assert_eq!(by_id(id).search_option().label, label);
+    }
+    assert_eq!(by_id("gmail").label(), "Gmail (gmail.com, googlemail.com)");
+    for p in provider::all().iter().filter(|p| p.unsupported.is_none()) {
+        assert!(!p.label().contains("not supported"), "{}", p.label());
+        assert!(!p.label().contains('\u{2013}'), "{}", p.label());
+    }
+}
+
+#[test]
+fn job032_ac3_search_finds_unsupported_providers_by_name_and_domain() {
+    for (query, id) in [
+        ("hotmail.de", "outlook"),
+        ("microsoft", "microsoft365"),
+        ("pm.me", "proton"),
+        ("keemail.me", "tuta"),
+        ("HEY", "hey"),
+    ] {
+        assert!(found(query).contains(&id), "{query} does not find {id}");
+    }
+    assert!(!by_id("outlook").label().contains("hotmail.de"));
+    assert!(!by_id("proton").label().contains("pm.me"));
+    assert!(!by_id("tuta").label().contains("keemail.me"));
+    assert_eq!(found("").len(), 35);
 }

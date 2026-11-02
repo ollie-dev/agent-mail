@@ -27,7 +27,7 @@ use crate::imap::{self, ImapError};
 use crate::mandate::{
     Account, Credential, Grant, MailboxPattern, Mandate, Operation, Policy, TlsMode,
 };
-use crate::provider::{self, Provider};
+use crate::provider::{self, ImapSettings, Provider};
 use crate::seal::{self, AgentToken};
 use crate::terminal::{Cancelled, SearchOption, Terminal, escape_controls};
 use crate::utf7;
@@ -515,7 +515,7 @@ fn add_account(
         Some(_) => None,
         None => ask_provider(terminal)?,
     };
-    let (host, port, tls, login, credential_prompt) = if let Some(chosen) = chosen {
+    let (host, port, tls, login, credential_prompt) = if let Some((chosen, imap, kind)) = chosen {
         let login = ask_login(
             terminal,
             &format!("Email address at {}:", chosen.name),
@@ -525,13 +525,7 @@ fn add_account(
         if let Some(note) = &chosen.note {
             terminal.message(note);
         }
-        (
-            chosen.imap.host.clone(),
-            chosen.imap.port,
-            chosen.imap.tls,
-            login,
-            chosen.credential.prompt(),
-        )
+        (imap.host.clone(), imap.port, imap.tls, login, kind.prompt())
     } else {
         let host = ask_non_empty(
             terminal,
@@ -600,19 +594,38 @@ fn add_account(
     }
 }
 
+/// A chosen supported Provider with its IMAP settings and Credential kind.
+type ChosenProvider = (
+    &'static Provider,
+    &'static ImapSettings,
+    provider::CredentialKind,
+);
+
 /// Asks "Mail provider:" with search: "Custom server…" first (the default),
-/// then the built-in Providers by name. `None` means "Custom server…".
-fn ask_provider(terminal: &dyn Terminal) -> Result<Option<&'static Provider>, CoreError> {
+/// then the built-in Providers by name, unsupported ones included. Choosing
+/// an unsupported Provider shows its reason and asks again. `None` means
+/// "Custom server…".
+fn ask_provider(terminal: &dyn Terminal) -> Result<Option<ChosenProvider>, CoreError> {
     let providers = provider::sorted();
     let mut options = vec![SearchOption {
         label: CUSTOM_SERVER.to_string(),
         keys: Vec::new(),
     }];
     options.extend(providers.iter().map(|p| p.search_option()));
-    let index = terminal
-        .search(MAIL_PROVIDER, &options, 0)
-        .map_err(cancelled)?;
-    Ok(index.checked_sub(1).and_then(|i| providers.get(i).copied()))
+    loop {
+        let index = terminal
+            .search(MAIL_PROVIDER, &options, 0)
+            .map_err(cancelled)?;
+        let Some(chosen) = index.checked_sub(1).and_then(|i| providers.get(i).copied()) else {
+            return Ok(None);
+        };
+        if let Some((imap, kind)) = chosen.connection() {
+            return Ok(Some((chosen, imap, kind)));
+        }
+        if let Some(reason) = &chosen.unsupported {
+            terminal.message(reason);
+        }
+    }
 }
 
 /// Whether `login` is a Gmail address (`@gmail.com` or `@googlemail.com`).

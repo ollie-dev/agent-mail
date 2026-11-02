@@ -866,8 +866,13 @@ fn job031_ac4_mail_provider_lists_custom_server_then_providers_by_name() {
     let entry = picker(&session);
     assert_eq!(entry.kind, Kind::Choice);
     assert_eq!(entry.default.as_deref(), Some(CUSTOM_SERVER));
-    assert_eq!(entry.options.len(), 31);
+    assert_eq!(entry.options.len(), 36);
     assert_eq!(entry.options[0], CUSTOM_SERVER);
+    let supported = provider::all()
+        .iter()
+        .filter(|p| p.unsupported.is_none())
+        .count();
+    assert_eq!(supported, 30);
     let mut by_name: Vec<&provider::Provider> = provider::all().iter().collect();
     by_name.sort_by_key(|p| p.name.to_lowercase());
     let expected: Vec<String> = by_name.iter().map(|p| p.label()).collect();
@@ -1099,4 +1104,134 @@ fn job031_ac8_provider_and_custom_server_store_the_same_account() {
             assert!(!text.contains("provider"), "a provider key was stored");
         }
     }
+}
+
+// ---- Unsupported Providers in the picker ----
+
+const PROTON_LABEL: &str =
+    "Proton Mail (proton.me, protonmail.com, protonmail.ch, \u{2026}) \u{2013} not supported";
+const HEY_LABEL: &str = "HEY (hey.com) \u{2013} not supported";
+
+fn reason_of(id: &str) -> String {
+    provider::all()
+        .iter()
+        .find(|p| p.id == id)
+        .and_then(|p| p.unsupported.clone())
+        .unwrap_or_else(|| panic!("{id} has a reason"))
+}
+
+#[test]
+fn job032_ac3_mail_provider_lists_unsupported_providers_by_name() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let session = gmail_session(&store, &server, GMAIL_LOGIN);
+    assert_completed(&session);
+
+    let entry = picker(&session);
+    assert_eq!(entry.options.len(), 36);
+    assert_eq!(entry.options[0], CUSTOM_SERVER);
+    let mut by_name: Vec<&provider::Provider> = provider::all().iter().collect();
+    by_name.sort_by_key(|p| p.name.to_lowercase());
+    assert_eq!(by_name.len(), 35);
+    let expected: Vec<String> = by_name.iter().map(|p| p.label()).collect();
+    assert_eq!(entry.options[1..], expected[..]);
+    for label in [
+        "Outlook.com / Hotmail (outlook.com, hotmail.com, live.com, \u{2026}) \u{2013} not supported",
+        "Microsoft 365 / Exchange Online (work) \u{2013} not supported",
+        PROTON_LABEL,
+        "Tuta (Tutanota) (tuta.com, tutanota.com, tutanota.de, \u{2026}) \u{2013} not supported",
+        HEY_LABEL,
+        GMAIL_LABEL,
+    ] {
+        assert!(entry.options.iter().any(|o| o == label), "{label}");
+    }
+}
+
+#[test]
+fn job032_ac4_unsupported_provider_shows_the_reason_and_asks_again() {
+    let store = InMemoryStore::new();
+    let script = vec![
+        Answer::text("proton-mandate"),
+        Answer::search("pm.me", PROTON_LABEL),
+        Answer::Cancel,
+    ];
+    let session = create(script, &store, &[]);
+    assert_eq!(session.terminal.remaining(), 0, "script not used up");
+    assert_ne!(session.output.code, 0);
+    assert!(store.entries().is_empty());
+
+    let transcript = session.terminal.transcript();
+    let pickers: Vec<usize> = transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.text == MAIL_PROVIDER)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(pickers.len(), 2, "{transcript:?}");
+    let (first, second) = (&transcript[pickers[0]], &transcript[pickers[1]]);
+    assert_eq!(first.answer.as_deref(), Some(PROTON_LABEL));
+    assert_eq!(second.kind, Kind::Choice);
+    assert_eq!(second.options, first.options);
+    assert_eq!(second.options.len(), 36);
+    assert_eq!(second.default.as_deref(), Some(CUSTOM_SERVER));
+
+    let between = &transcript[pickers[0] + 1..pickers[1]];
+    assert_eq!(between.len(), 1, "{between:?}");
+    assert_eq!(between[0].kind, Kind::Message);
+    assert_eq!(between[0].text, reason_of("proton"));
+    for e in &transcript {
+        assert_ne!(e.kind, Kind::Hidden, "a Credential was asked: {e:?}");
+        assert_ne!(e.text, "Email address at Proton Mail:");
+    }
+}
+
+#[test]
+fn job032_ac4_another_provider_after_an_unsupported_one_completes() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let script = vec![
+        Answer::text("gmail-mandate"),
+        Answer::choose(HEY_LABEL),
+        Answer::search("gmail", GMAIL_LABEL),
+        Answer::text(GMAIL_LOGIN),
+        Answer::hidden(CREDENTIAL),
+        Answer::tick(&["INBOX"]),
+        Answer::tick(&["list"]),
+        no(),
+        yes(),
+        no(),
+    ];
+    let session = create_with(
+        &["mandate", "create"],
+        script,
+        &HashMap::new(),
+        &store,
+        &[&server],
+        &[("imap.gmail.com", 993, server.port)],
+    );
+    assert_completed(&session);
+
+    let transcript = session.terminal.transcript();
+    let reason = reason_of("hey");
+    let shown: Vec<usize> = transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == Kind::Message && e.text == reason)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(shown.len(), 1, "{transcript:?}");
+    let pickers: Vec<usize> = transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.text == MAIL_PROVIDER)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(pickers.len(), 2);
+    assert!(pickers[0] < shown[0] && shown[0] < pickers[1]);
+    assert_eq!(transcript[pickers[1]].answer.as_deref(), Some(GMAIL_LABEL));
+
+    let mandate = stored_mandate(&store, &session.token());
+    assert_eq!(mandate.accounts.len(), 1);
+    assert_eq!(mandate.accounts[0].host, "imap.gmail.com");
+    assert_eq!(mandate.accounts[0].port, 993);
 }
