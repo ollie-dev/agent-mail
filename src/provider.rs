@@ -247,9 +247,31 @@ pub fn by_domain(domain: &str) -> Option<&'static Provider> {
         .find(|p| p.domains.iter().any(|d| d.to_lowercase() == domain))
 }
 
+/// The supported built-in Provider a login belongs to, with its IMAP host.
+/// The domain is the exact text after the login's last `@`; a login without
+/// `@`, an unknown domain or an unsupported Provider gives `None`.
+pub fn expected_for_login(login: &str) -> Option<(&'static Provider, &'static str)> {
+    let (_, domain) = login.trim().rsplit_once('@')?;
+    let provider = by_domain(domain)?;
+    let (imap, _) = provider.connection()?;
+    Some((provider, imap.host.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_host_follows_the_exact_domain_after_the_last_at() {
+        let host = |login: &str| expected_for_login(login).map(|(_, h)| h);
+        assert_eq!(host("Someone@GMail.com"), Some("imap.gmail.com"));
+        assert_eq!(host("someone@googlemail.com"), Some("imap.gmail.com"));
+        assert_eq!(host("a@b@web.de"), Some("imap.web.de"));
+        assert_eq!(host("x@cox.net"), Some("imap.mail.yahoo.com"));
+        assert_eq!(host("agent@example.test"), None);
+        assert_eq!(host("someone@gmail.com.evil.test"), None);
+        assert_eq!(host("gmail.com"), None);
+    }
 
     #[test]
     fn slugs_follow_the_pattern() {

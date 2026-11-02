@@ -1235,3 +1235,158 @@ fn job032_ac4_another_provider_after_an_unsupported_one_completes() {
     assert_eq!(mandate.accounts[0].host, "imap.gmail.com");
     assert_eq!(mandate.accounts[0].port, 993);
 }
+
+const WEB_DE_LABEL: &str = "WEB.DE (web.de)";
+const YAHOO_LABEL: &str = "Yahoo Mail (yahoo.com, ymail.com, rocketmail.com, …)";
+
+/// A "Custom server…" script ending at the hidden prompt with Cancel.
+fn job033_custom_script(host: &str, port: u16, login: &str) -> Vec<Answer> {
+    vec![
+        Answer::text("host-warning"),
+        Answer::choose(CUSTOM_SERVER),
+        Answer::text(host),
+        Answer::text(&port.to_string()),
+        Answer::choose(TLS_IMPLICIT),
+        Answer::text(login),
+        Answer::Cancel,
+    ]
+}
+
+/// Runs a script cancelled at the hidden prompt and returns the Messages
+/// shown before the first Hidden entry, asserting nothing was stored.
+fn job033_messages_before_hidden(script: Vec<Answer>) -> (Vec<String>, Vec<String>) {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let session = create(script, &store, &[&server]);
+    assert_eq!(session.terminal.remaining(), 0, "script not used up");
+    assert!(store.entries().is_empty());
+    let entries = session.terminal.transcript();
+    let hidden = entries
+        .iter()
+        .position(|e| e.kind == Kind::Hidden)
+        .expect("hidden prompt reached");
+    let before = entries[..hidden]
+        .iter()
+        .filter(|e| e.kind == Kind::Message)
+        .map(|e| e.text.clone())
+        .collect();
+    let all = entries
+        .iter()
+        .filter(|e| e.kind == Kind::Message)
+        .map(|e| e.text.clone())
+        .collect();
+    (before, all)
+}
+
+fn job033_assert_no_warning(script: Vec<Answer>) {
+    let (_, all) = job033_messages_before_hidden(script);
+    assert!(
+        all.iter().all(|m| !m.starts_with("Warning:")),
+        "unexpected warning: {all:?}"
+    );
+}
+
+#[test]
+fn job033_ac1_web_de_login_on_a_custom_server_is_warned() {
+    let server = FakeImap::start(Mode::Implicit);
+    let script = job033_custom_script("localhost", server.port, "max@web.de");
+    let store = InMemoryStore::new();
+    let session = create(script, &store, &[&server]);
+    assert_eq!(session.terminal.remaining(), 0, "script not used up");
+    let entries = session.terminal.transcript();
+    let warnings: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == Kind::Message && e.text.contains("looks like a WEB.DE address"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(warnings.len(), 1, "exactly one warning: {entries:?}");
+    let text = &entries[warnings[0]].text;
+    assert!(text.contains("max@web.de"), "{text}");
+    assert!(
+        text.contains(&format!("localhost:{}", server.port)),
+        "{text}"
+    );
+    assert!(text.contains("imap.web.de"), "{text}");
+    let hidden = entries.iter().position(|e| e.kind == Kind::Hidden).unwrap();
+    assert!(warnings[0] < hidden);
+}
+
+#[test]
+fn job033_ac2_other_providers_address_at_a_chosen_provider_is_warned() {
+    let script = vec![
+        Answer::text("host-warning"),
+        Answer::search("web.de", WEB_DE_LABEL),
+        Answer::text("max@gmx.de"),
+        Answer::Cancel,
+    ];
+    let (before, _) = job033_messages_before_hidden(script);
+    let warning = before
+        .iter()
+        .find(|m| m.contains("looks like a GMX address"))
+        .unwrap_or_else(|| panic!("warning shown: {before:?}"));
+    assert!(warning.contains("max@gmx.de"), "{warning}");
+    assert!(warning.contains("imap.web.de:993"), "{warning}");
+    assert!(warning.contains("imap.gmx.net"), "{warning}");
+}
+
+#[test]
+fn job033_ac3a_providers_sharing_a_host_are_not_warned() {
+    job033_assert_no_warning(vec![
+        Answer::text("host-warning"),
+        Answer::search("yahoo", YAHOO_LABEL),
+        Answer::text("x@cox.net"),
+        Answer::Cancel,
+    ]);
+}
+
+#[test]
+fn job033_ac3b_matching_host_in_another_case_is_not_warned() {
+    job033_assert_no_warning(job033_custom_script("IMAP.WEB.DE", 993, "max@web.de"));
+}
+
+#[test]
+fn job033_ac3c_unknown_domain_is_not_warned() {
+    job033_assert_no_warning(job033_custom_script("localhost", 993, "agent@example.test"));
+}
+
+#[test]
+fn job033_ac3c_domain_is_matched_exactly_not_as_a_suffix() {
+    job033_assert_no_warning(job033_custom_script(
+        "localhost",
+        993,
+        "someone@gmail.com.evil.test",
+    ));
+}
+
+#[test]
+fn job033_ac3d_login_without_at_is_not_warned() {
+    job033_assert_no_warning(job033_custom_script("localhost", 993, "max"));
+}
+
+#[test]
+fn job033_ac4_gmail_only_check_and_constants_are_gone() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/create.rs"),
+    )
+    .unwrap();
+    for name in ["GMAIL_HOST", "GMAIL_PORT", "looks_like_gmail"] {
+        assert!(!source.contains(name), "src/create.rs still has {name}");
+    }
+}
+
+#[test]
+fn job033_ac5_host_and_login_in_the_warning_are_escaped() {
+    let (before, _) = job033_messages_before_hidden(job033_custom_script(
+        "evil\u{1b}[2Jhost",
+        993,
+        "max\u{7}@web.de",
+    ));
+    let warning = before
+        .iter()
+        .find(|m| m.contains("looks like a WEB.DE address"))
+        .unwrap_or_else(|| panic!("warning shown: {before:?}"));
+    assert!(warning.contains("evil\\u{1b}[2Jhost"), "{warning}");
+    assert!(warning.contains("max\\u{7}@web.de"), "{warning}");
+    assert!(!warning.contains('\u{1b}') && !warning.contains('\u{7}'));
+}
