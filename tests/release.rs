@@ -2103,3 +2103,15 @@ fn job030_ac7_readme_describes_the_manual_intel_check() {
         );
     }
 }
+
+#[test]
+fn job031_ac9_claude_md_lists_the_provider_module_and_data() {
+    let claude = read("CLAUDE.md");
+    for needle in [
+        "src/provider.rs",
+        "data/providers.json",
+        "tests/provider.rs",
+    ] {
+        assert!(claude.contains(needle), "CLAUDE.md lacks {needle}");
+    }
+}

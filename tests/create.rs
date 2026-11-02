@@ -7,16 +7,18 @@ use std::collections::HashMap;
 
 use agent_mail::RunOutput;
 use agent_mail::create::{
-    ABORT, GENERIC, GMAIL, NOTHING_STORED, RETRY, SANDBOX_INDICATORS, TLS_IMPLICIT,
+    ABORT, CUSTOM_SERVER, MAIL_PROVIDER, NOTHING_STORED, RETRY, SANDBOX_INDICATORS, TLS_IMPLICIT,
 };
+use agent_mail::export::MandateFile;
 use agent_mail::mandate::{Credential, Mandate, Operation, TlsMode};
+use agent_mail::provider;
 use agent_mail::seal::{self, AgentToken};
 use agent_mail::store::{InMemoryStore, MandateStore};
 use agent_mail::terminal::{Answer, Kind, ScriptedTerminal};
 use serde_json::json;
 use support::{
-    CREDENTIAL, CountingStore, FakeImap, LOGIN, Mode, OTHER_LOGIN, contains_bytes, error_of,
-    grant_on, run_with_terminal, tokens_in,
+    CREDENTIAL, CountingStore, FakeImap, GMAIL_LOGIN, LOGIN, Mode, OTHER_LOGIN, contains_bytes,
+    error_of, grant_on, run_with_terminal, tokens_in,
 };
 
 const WRONG: &str = "wrong-password";
@@ -77,7 +79,7 @@ fn no() -> Answer {
 /// Generic Account answers up to and including the hidden Credential.
 fn generic(port: u16, login: &str, credential: &str) -> Vec<Answer> {
     vec![
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&port.to_string()),
         Answer::choose(TLS_IMPLICIT),
@@ -200,61 +202,6 @@ fn ac2_printed_token_lists_exactly_the_ticked_mailboxes() {
 }
 
 #[test]
-fn ac3_gmail_preset_asks_only_address_and_app_password() {
-    let server = FakeImap::start(Mode::Implicit);
-    let store = InMemoryStore::new();
-    let script = vec![
-        Answer::text("gmail-mandate"),
-        Answer::choose(GMAIL),
-        Answer::text(LOGIN),
-        Answer::hidden(CREDENTIAL),
-        Answer::tick(&["INBOX"]),
-        Answer::tick(&["list"]),
-        no(),
-        yes(),
-        no(),
-    ];
-    let session = create_with(
-        &["mandate", "create"],
-        script,
-        &HashMap::new(),
-        &store,
-        &[&server],
-        &[("imap.gmail.com", 993, server.port)],
-    );
-    assert_completed(&session);
-
-    let transcript = session.terminal.transcript();
-    let start = transcript
-        .iter()
-        .position(|e| e.answer.as_deref() == Some(GMAIL))
-        .expect("Gmail chosen");
-    let end = transcript
-        .iter()
-        .position(|e| e.kind == Kind::Checklist)
-        .expect("checklist shown");
-    let prompts: Vec<_> = transcript[start + 1..end]
-        .iter()
-        .filter(|e| e.kind != Kind::Message)
-        .collect();
-    let kinds: Vec<Kind> = prompts.iter().map(|e| e.kind).collect();
-    assert_eq!(kinds, [Kind::Text, Kind::Hidden], "{prompts:?}");
-    for entry in &prompts {
-        let text = entry.text.to_lowercase();
-        for word in ["host", "port", "tls"] {
-            assert!(!text.contains(word), "asked for {word}: {:?}", entry.text);
-        }
-    }
-
-    let mandate = stored_mandate(&store, &session.token());
-    let account = &mandate.accounts[0];
-    assert_eq!(account.login, LOGIN);
-    assert_eq!(account.host, "imap.gmail.com");
-    assert_eq!(account.port, 993);
-    assert_eq!(account.tls, TlsMode::Implicit);
-}
-
-#[test]
 fn ac4_wrong_credential_can_be_retried_and_completes() {
     let server = FakeImap::start(Mode::Implicit);
     let store = InMemoryStore::new();
@@ -348,7 +295,7 @@ fn ac5_same_login_twice_is_refused_and_reasked() {
     script.extend(generic(a.port, LOGIN, CREDENTIAL));
     script.extend([Answer::tick(&["INBOX"]), Answer::tick(&["list"]), yes()]);
     script.extend([
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&b.port.to_string()),
         Answer::choose(TLS_IMPLICIT),
@@ -844,4 +791,312 @@ fn job024_ac1e_controlling_terminal_is_conout_on_windows_and_dev_tty_on_unix() {
         assert!(after_cfg(cfg, item), "{item} is not under {cfg:?}");
     }
     assert_eq!(source.matches("const TTY_PATH").count(), 2);
+}
+
+// ---- The Mail provider picker ----
+
+const GMAIL_LABEL: &str = "Gmail (gmail.com, googlemail.com)";
+
+/// A session that picks Gmail by searching, types `login` and finishes.
+fn gmail_session(store: &InMemoryStore, server: &FakeImap, login: &str) -> Session {
+    let script = vec![
+        Answer::text("gmail-mandate"),
+        Answer::search("gmail", GMAIL_LABEL),
+        Answer::text(login),
+        Answer::hidden(CREDENTIAL),
+        Answer::tick(&["INBOX"]),
+        Answer::tick(&["list"]),
+        no(),
+        yes(),
+        no(),
+    ];
+    create_with(
+        &["mandate", "create"],
+        script,
+        &HashMap::new(),
+        store,
+        &[server],
+        &[("imap.gmail.com", 993, server.port)],
+    )
+}
+
+/// A session that picks "Custom server…" with `host`, port 993 and implicit
+/// TLS, types `login` and finishes.
+fn custom_session(store: &InMemoryStore, server: &FakeImap, host: &str, login: &str) -> Session {
+    let script = vec![
+        Answer::text("custom-mandate"),
+        Answer::choose(CUSTOM_SERVER),
+        Answer::text(host),
+        Answer::text("993"),
+        Answer::choose(TLS_IMPLICIT),
+        Answer::text(login),
+        Answer::hidden(CREDENTIAL),
+        Answer::tick(&["INBOX"]),
+        Answer::tick(&["list"]),
+        no(),
+        yes(),
+        no(),
+    ];
+    create_with(
+        &["mandate", "create"],
+        script,
+        &HashMap::new(),
+        store,
+        &[server],
+        &[(host, 993, server.port)],
+    )
+}
+
+fn picker(session: &Session) -> agent_mail::terminal::Entry {
+    session
+        .terminal
+        .transcript()
+        .into_iter()
+        .find(|e| e.text == MAIL_PROVIDER)
+        .expect("Mail provider asked")
+}
+
+#[test]
+fn job031_ac4_mail_provider_lists_custom_server_then_providers_by_name() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let session = gmail_session(&store, &server, GMAIL_LOGIN);
+    assert_completed(&session);
+
+    let entry = picker(&session);
+    assert_eq!(entry.kind, Kind::Choice);
+    assert_eq!(entry.default.as_deref(), Some(CUSTOM_SERVER));
+    assert_eq!(entry.options.len(), 31);
+    assert_eq!(entry.options[0], CUSTOM_SERVER);
+    let mut by_name: Vec<&provider::Provider> = provider::all().iter().collect();
+    by_name.sort_by_key(|p| p.name.to_lowercase());
+    let expected: Vec<String> = by_name.iter().map(|p| p.label()).collect();
+    assert_eq!(entry.options[1..], expected[..]);
+    for label in [
+        "Gmail (gmail.com, googlemail.com)",
+        "GMX (gmx.de, gmx.net, gmx.at, …)",
+        "WEB.DE (web.de)",
+        "IONOS Mail",
+    ] {
+        assert!(entry.options.iter().any(|o| o == label), "{label}");
+    }
+}
+
+#[test]
+fn job031_ac5_gmail_provider_asks_only_address_and_app_password() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let session = gmail_session(&store, &server, GMAIL_LOGIN);
+    assert_completed(&session);
+
+    let transcript = session.terminal.transcript();
+    let start = transcript
+        .iter()
+        .position(|e| e.text == MAIL_PROVIDER)
+        .expect("Mail provider asked");
+    assert_eq!(transcript[start].answer.as_deref(), Some(GMAIL_LABEL));
+    let end = transcript
+        .iter()
+        .position(|e| e.kind == Kind::Checklist)
+        .expect("checklist shown");
+    let between = &transcript[start + 1..end];
+    let prompts: Vec<_> = between.iter().filter(|e| e.kind != Kind::Message).collect();
+    let texts: Vec<(Kind, &str)> = prompts.iter().map(|e| (e.kind, e.text.as_str())).collect();
+    assert_eq!(
+        texts,
+        [
+            (Kind::Text, "Email address at Gmail:"),
+            (
+                Kind::Hidden,
+                "App password for someone@gmail.com on imap.gmail.com:993:"
+            ),
+        ]
+    );
+    for entry in &prompts {
+        let text = entry.text.to_lowercase();
+        for word in ["host:", "port", "tls"] {
+            assert!(!text.contains(word), "asked for {word}: {:?}", entry.text);
+        }
+    }
+
+    let note = provider::all()
+        .iter()
+        .find(|p| p.id == "gmail")
+        .and_then(|p| p.note.clone())
+        .expect("Gmail has a note");
+    let address = between.iter().position(|e| e.kind == Kind::Text).unwrap();
+    let hidden = between.iter().position(|e| e.kind == Kind::Hidden).unwrap();
+    let shown = between
+        .iter()
+        .position(|e| e.kind == Kind::Message && e.text == note)
+        .expect("Gmail note shown");
+    assert!(address < shown && shown < hidden, "{between:?}");
+
+    let mandate = stored_mandate(&store, &session.token());
+    let account = &mandate.accounts[0];
+    assert_eq!(account.login, GMAIL_LOGIN);
+    assert_eq!(account.host, "imap.gmail.com");
+    assert_eq!(account.port, 993);
+    assert_eq!(account.tls, TlsMode::Implicit);
+}
+
+#[test]
+fn job031_ac5_password_provider_without_note_asks_password_and_shows_no_note() {
+    let store = InMemoryStore::new();
+    let script = vec![
+        Answer::text("posteo-mandate"),
+        Answer::search("posteo.us", "Posteo (posteo.de, posteo.net, posteo.at, …)"),
+        Answer::text("someone@posteo.de"),
+        Answer::Cancel,
+    ];
+    let session = create(script, &store, &[]);
+    assert_eq!(session.terminal.remaining(), 0, "script not used up");
+    assert!(store.entries().is_empty());
+
+    let transcript = session.terminal.transcript();
+    let start = transcript
+        .iter()
+        .position(|e| e.text == MAIL_PROVIDER)
+        .unwrap();
+    let after: Vec<_> = transcript[start + 1..].iter().collect();
+    assert_eq!(after[0].kind, Kind::Text);
+    assert_eq!(after[0].text, "Email address at Posteo:");
+    assert_eq!(
+        after[1].kind,
+        Kind::Hidden,
+        "no note before the password: {after:?}"
+    );
+    assert_eq!(
+        after[1].text,
+        "Password for someone@posteo.de on posteo.de:993:"
+    );
+}
+
+#[test]
+fn job031_ac6_no_account_type_or_gmail_preset_remains() {
+    let server = FakeImap::start(Mode::Implicit);
+    for session in [
+        gmail_session(&InMemoryStore::new(), &server, GMAIL_LOGIN),
+        create(
+            ac1_script(server.port, &[CREDENTIAL], true),
+            &InMemoryStore::new(),
+            &[&server],
+        ),
+    ] {
+        assert_completed(&session);
+        let text = session.transcript();
+        assert!(!text.contains("Account type:"), "{text}");
+        assert!(
+            !text.contains("Gmail (imap.gmail.com, app password)"),
+            "{text}"
+        );
+    }
+    let source = include_str!("../src/create.rs");
+    assert!(!source.contains("pub const GMAIL:"));
+    assert!(!source.contains("pub const GENERIC:"));
+}
+
+#[test]
+fn job031_ac6_gmail_login_on_a_custom_server_is_still_warned() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let script = vec![
+        Answer::text("warned"),
+        Answer::choose(CUSTOM_SERVER),
+        Answer::text("localhost"),
+        Answer::text(&server.port.to_string()),
+        Answer::choose(TLS_IMPLICIT),
+        Answer::text("someone@Gmail.com"),
+        Answer::Cancel,
+    ];
+    let session = create(script, &store, &[&server]);
+    assert_eq!(session.terminal.remaining(), 0, "script not used up");
+    let entries = session.terminal.transcript();
+    let warning = entries
+        .iter()
+        .position(|e| e.kind == Kind::Message && e.text.contains("looks like a Gmail address"))
+        .expect("warning shown");
+    let hidden = entries.iter().position(|e| e.kind == Kind::Hidden).unwrap();
+    assert!(warning < hidden);
+}
+
+#[test]
+fn job031_ac7_custom_server_asks_host_port_tls_and_login_in_order() {
+    let server = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let session = create(
+        ac1_script(server.port, &[CREDENTIAL], true),
+        &store,
+        &[&server],
+    );
+    assert_completed(&session);
+
+    let transcript = session.terminal.transcript();
+    let start = transcript
+        .iter()
+        .position(|e| e.text == MAIL_PROVIDER)
+        .unwrap();
+    assert_eq!(transcript[start].answer.as_deref(), Some(CUSTOM_SERVER));
+    let prompts: Vec<(Kind, String)> = transcript[start + 1..]
+        .iter()
+        .filter(|e| e.kind != Kind::Message)
+        .take(5)
+        .map(|e| (e.kind, e.text.clone()))
+        .collect();
+    assert_eq!(
+        prompts,
+        [
+            (Kind::Text, "IMAP server host:".to_string()),
+            (Kind::Text, "IMAP server port:".to_string()),
+            (Kind::Choice, "TLS mode:".to_string()),
+            (Kind::Text, "Login name:".to_string()),
+            (
+                Kind::Hidden,
+                format!(
+                    "Credential (password) for {LOGIN} on localhost:{}:",
+                    server.port
+                )
+            ),
+        ]
+    );
+    let port = transcript[start + 1..]
+        .iter()
+        .find(|e| e.text == "IMAP server port:")
+        .unwrap();
+    assert_eq!(port.default.as_deref(), Some("993"));
+    assert_ac1_mandate(&store, &session, &server);
+}
+
+/// The Account table lines of a Mandate file, without the name.
+fn account_tables(toml: &str) -> Vec<String> {
+    toml.lines()
+        .filter(|l| !l.starts_with("name ") && !l.starts_with("id "))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn job031_ac8_provider_and_custom_server_store_the_same_account() {
+    let server = FakeImap::start(Mode::Implicit);
+    let via_provider = InMemoryStore::new();
+    let session = gmail_session(&via_provider, &server, GMAIL_LOGIN);
+    assert_completed(&session);
+    let a = stored_mandate(&via_provider, &session.token());
+
+    let via_custom = InMemoryStore::new();
+    let session = custom_session(&via_custom, &server, "imap.gmail.com", GMAIL_LOGIN);
+    assert_completed(&session);
+    let b = stored_mandate(&via_custom, &session.token());
+
+    let toml_a = MandateFile::of(&a).to_toml();
+    let toml_b = MandateFile::of(&b).to_toml();
+    assert_eq!(account_tables(&toml_a), account_tables(&toml_b));
+    for mandate in [&a, &b] {
+        let json = serde_json::to_string(mandate).unwrap();
+        let toml = MandateFile::of(mandate).to_toml();
+        for text in [&json, &toml] {
+            assert!(!text.contains("gmail\""), "a provider id was stored");
+            assert!(!text.contains("provider"), "a provider key was stored");
+        }
+    }
 }

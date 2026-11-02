@@ -1,6 +1,7 @@
 //! `mandate create`: the guided setup the human runs in their own terminal.
 //!
-//! Flow: name, then per Account the Gmail preset or generic server settings,
+//! Flow: name, then per Account a Provider from the built-in list (which
+//! fixes the server settings) or "Custom server…" with the server settings,
 //! the hidden Credential and a live login (retry or abort on failure), the
 //! mailbox and operation checklists; then "add another Account?", a summary,
 //! confirmation, sealing and storing, the Agent Token shown once, and an
@@ -26,8 +27,9 @@ use crate::imap::{self, ImapError};
 use crate::mandate::{
     Account, Credential, Grant, MailboxPattern, Mandate, Operation, Policy, TlsMode,
 };
+use crate::provider::{self, Provider};
 use crate::seal::{self, AgentToken};
-use crate::terminal::{Cancelled, Terminal, escape_controls};
+use crate::terminal::{Cancelled, SearchOption, Terminal, escape_controls};
 use crate::utf7;
 use zeroize::Zeroizing;
 
@@ -51,10 +53,10 @@ pub const SANDBOX_INDICATORS: &[&str] = &[
     "CURSOR_AGENT",
 ];
 
-/// Account type choice: the Gmail preset.
-pub const GMAIL: &str = "Gmail (imap.gmail.com, app password)";
-/// Account type choice: any other IMAP server.
-pub const GENERIC: &str = "Other IMAP server";
+/// The Mail provider prompt.
+pub const MAIL_PROVIDER: &str = "Mail provider:";
+/// Mail provider choice: any IMAP server, with its settings typed in.
+pub const CUSTOM_SERVER: &str = "Custom server…";
 /// TLS mode choice: TLS from the first byte.
 pub const TLS_IMPLICIT: &str = "Implicit TLS (usually port 993)";
 /// TLS mode choice: STARTTLS upgrade, required before login.
@@ -71,6 +73,10 @@ pub const EXPORT_PATH: &str = "Export file path:";
 pub const NOTHING_STORED: &str = "Nothing was stored.";
 
 const GMAIL_HOST: &str = "imap.gmail.com";
+#[expect(
+    dead_code,
+    reason = "kept with the Gmail-only host warning until the warning covers every Provider"
+)]
 const GMAIL_PORT: u16 = 993;
 
 /// Runs the guided setup and stores the Mandate. With `from`, the Mandate
@@ -497,7 +503,7 @@ fn ask_port(terminal: &dyn Terminal, default: u16) -> Result<u16, CoreError> {
 
 /// Asks for one Account's settings and Credential until the live login
 /// succeeds. With `saved`, the settings prompts default to its values and the
-/// Account type is not asked. Returns the Account and its server's raw
+/// Mail provider is not asked. Returns the Account and its server's raw
 /// mailbox names.
 fn add_account(
     context: &Context<'_>,
@@ -505,24 +511,26 @@ fn add_account(
     saved: Option<&FileAccount>,
 ) -> Result<(Account, Vec<String>), CoreError> {
     let terminal = context.terminal;
-    let gmail = match saved {
-        Some(_) => false,
-        None => {
-            let kinds = [GMAIL.to_string(), GENERIC.to_string()];
-            terminal
-                .choose("Account type:", &kinds, 0)
-                .map_err(cancelled)?
-                == 0
-        }
+    let chosen = match saved {
+        Some(_) => None,
+        None => ask_provider(terminal)?,
     };
-    let (host, port, tls, login, credential_prompt) = if gmail {
-        let login = ask_login(terminal, "Gmail address:", None, existing)?;
+    let (host, port, tls, login, credential_prompt) = if let Some(chosen) = chosen {
+        let login = ask_login(
+            terminal,
+            &format!("Email address at {}:", chosen.name),
+            None,
+            existing,
+        )?;
+        if let Some(note) = &chosen.note {
+            terminal.message(note);
+        }
         (
-            GMAIL_HOST.to_string(),
-            GMAIL_PORT,
-            TlsMode::Implicit,
+            chosen.imap.host.clone(),
+            chosen.imap.port,
+            chosen.imap.tls,
             login,
-            "Gmail app password",
+            chosen.credential.prompt(),
         )
     } else {
         let host = ask_non_empty(
@@ -590,6 +598,21 @@ fn add_account(
             }
         }
     }
+}
+
+/// Asks "Mail provider:" with search: "Custom server…" first (the default),
+/// then the built-in Providers by name. `None` means "Custom server…".
+fn ask_provider(terminal: &dyn Terminal) -> Result<Option<&'static Provider>, CoreError> {
+    let providers = provider::sorted();
+    let mut options = vec![SearchOption {
+        label: CUSTOM_SERVER.to_string(),
+        keys: Vec::new(),
+    }];
+    options.extend(providers.iter().map(|p| p.search_option()));
+    let index = terminal
+        .search(MAIL_PROVIDER, &options, 0)
+        .map_err(cancelled)?;
+    Ok(index.checked_sub(1).and_then(|i| providers.get(i).copied()))
 }
 
 /// Whether `login` is a Gmail address (`@gmail.com` or `@googlemail.com`).

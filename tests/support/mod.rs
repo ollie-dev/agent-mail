@@ -26,8 +26,10 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 pub const LOGIN: &str = "agent@example.test";
 /// Second fake Account login.
 pub const OTHER_LOGIN: &str = "other@example.test";
+/// A fake Gmail login, for the Gmail Provider.
+pub const GMAIL_LOGIN: &str = "someone@gmail.com";
 /// Logins the fake server knows.
-pub const KNOWN_LOGINS: [&str; 2] = [LOGIN, OTHER_LOGIN];
+pub const KNOWN_LOGINS: [&str; 3] = [LOGIN, OTHER_LOGIN, GMAIL_LOGIN];
 /// Fake Credential.
 pub const CREDENTIAL: &str = "fake-app-password-123";
 /// A second fake Credential the server accepts, used by the Broker's

@@ -1,0 +1,496 @@
+{
+  "providers": [
+    {
+      "id": "gmx",
+      "name": "GMX",
+      "domains": [
+        "gmx.de",
+        "gmx.net",
+        "gmx.at",
+        "gmx.ch",
+        "gmx.eu"
+      ],
+      "imap": {
+        "host": "imap.gmx.net",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable IMAP first: E-Mail settings > POP3/IMAP > allow POP3 and IMAP access. GMX switches it off again after long inactivity. With 2-factor login on, create an app-specific password under Security."
+    },
+    {
+      "id": "webde",
+      "name": "WEB.DE",
+      "domains": [
+        "web.de"
+      ],
+      "imap": {
+        "host": "imap.web.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable IMAP first: E-Mail-Einstellungen > POP3/IMAP > allow POP3 and IMAP access. WEB.DE switches it off again after long inactivity. With 2-factor login on, create an app-specific password."
+    },
+    {
+      "id": "t-online",
+      "name": "Telekom (T-Online)",
+      "domains": [
+        "t-online.de",
+        "magenta.de"
+      ],
+      "imap": {
+        "host": "secureimap.t-online.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Use the 'Passwort für E-Mail-Programme', not your Telekom Login password. Set it in the Telekom E-Mail Center: gear icon > All settings > Passwords."
+    },
+    {
+      "id": "freenet",
+      "name": "freenet Mail",
+      "domains": [
+        "freenet.de"
+      ],
+      "imap": {
+        "host": "mx.freenet.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable access first: in freenet webmail, gear icon > POP3/IMAP einrichten > activate POP3, IMAP and SMTP."
+    },
+    {
+      "id": "1und1",
+      "name": "1&1 Mail",
+      "domains": [
+        "online.de",
+        "onlinehome.de",
+        "sofortstart.de",
+        "sofort-start.de",
+        "sofortsurf.de",
+        "sofort-surf.de",
+        "go4more.de"
+      ],
+      "imap": {
+        "host": "imap.1und1.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "ionos",
+      "name": "IONOS Mail",
+      "domains": [],
+      "imap": {
+        "host": "imap.ionos.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "posteo",
+      "name": "Posteo",
+      "domains": [
+        "posteo.de",
+        "posteo.net",
+        "posteo.at",
+        "posteo.ch",
+        "posteo.eu",
+        "posteo.com",
+        "posteo.org",
+        "posteo.uk",
+        "posteo.co.uk",
+        "posteo.us"
+      ],
+      "imap": {
+        "host": "posteo.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "mailbox-org",
+      "name": "mailbox.org",
+      "domains": [
+        "mailbox.org"
+      ],
+      "imap": {
+        "host": "imap.mailbox.org",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "With two-factor authentication on, create an app password under Settings > Security and allow it for IMAP."
+    },
+    {
+      "id": "vodafone",
+      "name": "Vodafone E-Mail (Arcor, Kabel)",
+      "domains": [
+        "vodafonemail.de",
+        "arcor.de",
+        "kabelmail.de"
+      ],
+      "imap": {
+        "host": "imap.vodafonemail.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Use the e-mail (IMAP) password of the mailbox. It can differ from your MeinVodafone password."
+    },
+    {
+      "id": "strato",
+      "name": "STRATO Mail",
+      "domains": [],
+      "imap": {
+        "host": "imap.strato.de",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "orange",
+      "name": "Orange (France)",
+      "domains": [
+        "orange.fr",
+        "wanadoo.fr"
+      ],
+      "imap": {
+        "host": "imap.orange.fr",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Generate an app password (mot de passe d'application) in your Orange Espace Client under Connexion et Sécurité. Generating it also switches on IMAP access."
+    },
+    {
+      "id": "free",
+      "name": "Free (France)",
+      "domains": [
+        "free.fr"
+      ],
+      "imap": {
+        "host": "imap.free.fr",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "sfr",
+      "name": "SFR Mail",
+      "domains": [
+        "sfr.fr",
+        "neuf.fr",
+        "club-internet.fr"
+      ],
+      "imap": {
+        "host": "imap.sfr.fr",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "libero",
+      "name": "Libero Mail",
+      "domains": [
+        "libero.it",
+        "iol.it",
+        "blu.it",
+        "inwind.it",
+        "giallo.it"
+      ],
+      "imap": {
+        "host": "imapmail.libero.it",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "virgilio",
+      "name": "Virgilio Mail",
+      "domains": [
+        "virgilio.it"
+      ],
+      "imap": {
+        "host": "in.virgilio.it",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "seznam",
+      "name": "Seznam Email",
+      "domains": [
+        "seznam.cz",
+        "email.cz",
+        "post.cz",
+        "spoluzaci.cz"
+      ],
+      "imap": {
+        "host": "imap.seznam.cz",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "If the login fails, check that IMAP access is allowed in the Seznam webmail settings."
+    },
+    {
+      "id": "wp",
+      "name": "WP Poczta",
+      "domains": [
+        "wp.pl"
+      ],
+      "imap": {
+        "host": "imap.wp.pl",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable access first: in WP Poczta webmail open Opcje > IMAP/POP and allow IMAP."
+    },
+    {
+      "id": "onet",
+      "name": "Onet Poczta",
+      "domains": [
+        "onet.pl",
+        "onet.eu",
+        "op.pl",
+        "vp.pl",
+        "poczta.onet.pl",
+        "onet.com.pl",
+        "autograf.pl",
+        "buziaczek.pl",
+        "spoko.pl"
+      ],
+      "imap": {
+        "host": "imap.poczta.onet.pl",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Since 31 March 2026, IMAP needs a paid Poczta Plus or Standard plan (lifetime accounts excepted). Allow access to mail programs in the Onet mail settings."
+    },
+    {
+      "id": "interia",
+      "name": "Interia Poczta",
+      "domains": [
+        "interia.pl",
+        "interia.eu",
+        "interia.com",
+        "poczta.fm"
+      ],
+      "imap": {
+        "host": "poczta.interia.pl",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable access first: Ustawienia > Ustawienia główne > Parametry, set 'I use an email program' to yes."
+    },
+    {
+      "id": "bluewin",
+      "name": "Swisscom Bluewin",
+      "domains": [
+        "bluewin.ch",
+        "bluemail.ch"
+      ],
+      "imap": {
+        "host": "imaps.bluewin.ch",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Use the e-mail password, not the Swisscom Login password. You can change it in My Swisscom."
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "domains": [
+        "gmail.com",
+        "googlemail.com"
+      ],
+      "imap": {
+        "host": "imap.gmail.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Turn on 2-Step Verification, then create an app password at myaccount.google.com/apppasswords. Not available for work/school accounts, Advanced Protection, or security-key-only 2SV."
+    },
+    {
+      "id": "yahoo",
+      "name": "Yahoo Mail",
+      "domains": [
+        "yahoo.com",
+        "ymail.com",
+        "rocketmail.com",
+        "myyahoo.com",
+        "yahoo.co.uk",
+        "yahoo.de",
+        "yahoo.fr",
+        "yahoo.it",
+        "yahoo.es",
+        "yahoo.ca",
+        "yahoo.com.au"
+      ],
+      "imap": {
+        "host": "imap.mail.yahoo.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Create an app password: Yahoo Account Security > Generate app password."
+    },
+    {
+      "id": "aol",
+      "name": "AOL Mail",
+      "domains": [
+        "aol.com",
+        "aim.com",
+        "netscape.net",
+        "cs.com",
+        "compuserve.com",
+        "wmconnect.com",
+        "aol.co.uk",
+        "aol.de",
+        "aol.fr"
+      ],
+      "imap": {
+        "host": "imap.aol.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Create an app password: login.aol.com > Account Security > Generate app password."
+    },
+    {
+      "id": "icloud",
+      "name": "iCloud Mail",
+      "domains": [
+        "icloud.com",
+        "me.com",
+        "mac.com"
+      ],
+      "imap": {
+        "host": "imap.mail.me.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Turn on two-factor authentication, then create an app-specific password at account.apple.com > Sign-In and Security > App-Specific Passwords."
+    },
+    {
+      "id": "comcast",
+      "name": "Xfinity (Comcast)",
+      "domains": [
+        "comcast.net"
+      ],
+      "imap": {
+        "host": "imap.comcast.net",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Turn on access for third-party email programs in Xfinity Email settings first. Then use your Xfinity ID password."
+    },
+    {
+      "id": "att",
+      "name": "AT&T Mail",
+      "domains": [
+        "att.net",
+        "sbcglobal.net",
+        "bellsouth.net",
+        "pacbell.net",
+        "flash.net",
+        "prodigy.net",
+        "swbell.net",
+        "snet.net",
+        "nvbell.net",
+        "ameritech.net",
+        "wans.net",
+        "currently.com"
+      ],
+      "imap": {
+        "host": "imap.mail.att.net",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "Create a 16-character Secure Mail Key in myAT&T > Profile > Sign-in info and use it as the password."
+    },
+    {
+      "id": "verizon",
+      "name": "Verizon (AOL-hosted)",
+      "domains": [
+        "verizon.net"
+      ],
+      "imap": {
+        "host": "imap.aol.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "verizon.net mail is hosted by AOL. Create an app password at login.aol.com > Account Security > Generate app password."
+    },
+    {
+      "id": "spectrum",
+      "name": "Spectrum (Charter)",
+      "domains": [
+        "charter.net",
+        "spectrum.net",
+        "bresnan.net"
+      ],
+      "imap": {
+        "host": "mobile.charter.net",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password"
+    },
+    {
+      "id": "cox",
+      "name": "Cox (Yahoo-hosted)",
+      "domains": [
+        "cox.net"
+      ],
+      "imap": {
+        "host": "imap.mail.yahoo.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "app_password",
+      "note": "cox.net mail now runs on Yahoo. Create an app password in Yahoo Account Security > Generate app password."
+    },
+    {
+      "id": "gmx-com",
+      "name": "GMX (international)",
+      "domains": [
+        "gmx.com",
+        "gmx.us",
+        "gmx.co.uk",
+        "gmx.fr",
+        "gmx.es",
+        "gmx.ca",
+        "gmx.it",
+        "gmx.se"
+      ],
+      "imap": {
+        "host": "imap.gmx.com",
+        "port": 993,
+        "tls": "implicit"
+      },
+      "credential": "password",
+      "note": "Enable IMAP first: Email > Settings > POP3 & IMAP > enable access via POP3 and IMAP. GMX switches it off again after long inactivity."
+    }
+  ]
+}

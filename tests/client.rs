@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_mail::broker::{self, HIGH_INTEGRITY};
-use agent_mail::create::{GENERIC, NOTHING_STORED, TLS_IMPLICIT};
+use agent_mail::create::{CUSTOM_SERVER, NOTHING_STORED, TLS_IMPLICIT};
 use agent_mail::export::MandateFile;
 use agent_mail::mandate::{Mandate, Operation};
 use agent_mail::seal::{self, AgentToken};
@@ -338,7 +338,7 @@ const MANDATE_NAME: &str = "broker-made";
 fn create_script(port: u16) -> Vec<Answer> {
     vec![
         Answer::text(MANDATE_NAME),
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text(HOST),
         Answer::text(&port.to_string()),
         Answer::choose(TLS_IMPLICIT),
