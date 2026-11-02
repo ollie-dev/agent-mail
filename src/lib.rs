@@ -15,6 +15,7 @@ pub mod imap;
 pub mod mandate;
 pub mod mcp;
 pub mod move_message;
+pub mod provider;
 pub mod proxy;
 pub mod read;
 pub mod seal;

@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_mail::RunOutput;
-use agent_mail::create::{ABORT, EXPORT_OFFER, EXPORT_PATH, GENERIC, RETRY, TLS_IMPLICIT};
+use agent_mail::create::{
+    ABORT, CUSTOM_SERVER, EXPORT_OFFER, EXPORT_PATH, MAIL_PROVIDER, RETRY, TLS_IMPLICIT,
+};
 use agent_mail::export::MandateFile;
 use agent_mail::mandate::{Grant, Mandate, Operation, TlsMode};
 use agent_mail::seal::{self, AgentToken};
@@ -155,7 +157,7 @@ fn accept() -> Answer {
 fn ac1_answers(port: u16) -> Vec<Answer> {
     vec![
         Answer::text("test-mandate"),
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&port.to_string()),
         Answer::choose(TLS_IMPLICIT),
@@ -391,8 +393,8 @@ fn ac3_from_file_pre_selects_the_file_choices() {
     assert_eq!(tls.kind, Kind::Choice);
     assert_eq!(tls.default.as_deref(), Some(TLS_IMPLICIT));
     assert!(
-        !session.entries().iter().any(|e| e.text == "Account type:"),
-        "file Accounts skip the Account type"
+        !session.entries().iter().any(|e| e.text == MAIL_PROVIDER),
+        "file Accounts skip the Mail provider"
     );
     let mailboxes = session.prompt_starting("Mailboxes the Agent may use");
     assert_eq!(mailboxes.pre_ticked, ["INBOX", "Archive"]);
@@ -940,4 +942,48 @@ fn gmail_login_on_another_host_is_warned_before_the_credential() {
     assert!(text.contains(&format!("localhost:{}", server.port)));
     assert!(text.contains("imap.gmail.com"));
     assert!(store.entries().is_empty());
+}
+
+#[test]
+fn job031_ac7_from_asks_no_provider_but_an_added_account_goes_through_the_picker() {
+    let a = FakeImap::start(Mode::Implicit);
+    let b = FakeImap::start(Mode::Implicit);
+    let store = InMemoryStore::new();
+    let dir = TempDir::new();
+    let file = dir.write("m.toml", &ac3_file(a.port));
+    let mut answers = vec![accept(), accept()];
+    answers.extend(kept_account(&[CREDENTIAL]));
+    answers.extend([accept(), accept(), yes()]);
+    answers.extend([
+        Answer::choose(CUSTOM_SERVER),
+        Answer::text("localhost"),
+        Answer::text(&b.port.to_string()),
+        Answer::choose(TLS_IMPLICIT),
+        Answer::text(OTHER_LOGIN),
+        Answer::hidden(CREDENTIAL),
+        Answer::tick(&["Archive"]),
+        Answer::tick(&["list"]),
+        no(),
+        yes(),
+        no(),
+    ]);
+    let session = create(Some(&file), answers, &store, &[&a, &b]);
+    session.assert_completed();
+
+    let entries = session.entries();
+    let first_checklist = entries
+        .iter()
+        .position(|e| e.kind == Kind::Checklist)
+        .unwrap();
+    let pickers: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.text == MAIL_PROVIDER)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(pickers.len(), 1, "only the added Account is asked");
+    assert!(pickers[0] > first_checklist);
+    let mandate = stored_mandate(&store, &session.token());
+    let logins: Vec<&str> = mandate.accounts.iter().map(|a| a.login.as_str()).collect();
+    assert_eq!(logins, [LOGIN, OTHER_LOGIN]);
 }

@@ -9,7 +9,7 @@ mod support;
 
 use std::collections::HashMap;
 
-use agent_mail::create::{GENERIC, TLS_IMPLICIT};
+use agent_mail::create::{CUSTOM_SERVER, TLS_IMPLICIT};
 use agent_mail::seal::{self, AgentToken};
 use agent_mail::store::credential_layout::{TARGET_PREFIX, target_name};
 use agent_mail::store::{CredentialManagerStore, MandateStore};
@@ -47,7 +47,7 @@ fn job024_ac1a_mandate_create_then_list_with_the_printed_token() {
     let store = CredentialManagerStore;
     let terminal = ScriptedTerminal::new(vec![
         Answer::text("credential-manager-test"),
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&server.port.to_string()),
         Answer::choose(TLS_IMPLICIT),

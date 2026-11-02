@@ -424,7 +424,7 @@ fn malformed_connect_reply_is_connection_failed() {
 
 #[test]
 fn mandate_create_login_check_goes_through_the_proxy() {
-    use agent_mail::create::{GENERIC, TLS_IMPLICIT};
+    use agent_mail::create::{CUSTOM_SERVER, TLS_IMPLICIT};
     use agent_mail::terminal::{Answer, ScriptedTerminal};
 
     let server = FakeImap::start(Mode::Implicit);
@@ -433,7 +433,7 @@ fn mandate_create_login_check_goes_through_the_proxy() {
     let env = HashMap::from([("HTTPS_PROXY".to_string(), proxy.url("http"))]);
     let terminal = ScriptedTerminal::new(vec![
         Answer::text("test-mandate"),
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&server.port.to_string()),
         Answer::choose(TLS_IMPLICIT),
@@ -664,7 +664,7 @@ fn ac7_text_output_of_proxy_auth_failed() {
 
 #[test]
 fn ac9_mandate_create_through_a_proxy_rejecting_credentials() {
-    use agent_mail::create::{ABORT, GENERIC, TLS_IMPLICIT};
+    use agent_mail::create::{ABORT, CUSTOM_SERVER, TLS_IMPLICIT};
     use agent_mail::terminal::{Answer, Kind, ScriptedTerminal};
 
     let server = FakeImap::start(Mode::Implicit);
@@ -674,7 +674,7 @@ fn ac9_mandate_create_through_a_proxy_rejecting_credentials() {
     let env = HashMap::from([("HTTPS_PROXY".to_string(), proxy.url("http"))]);
     let terminal = ScriptedTerminal::new(vec![
         Answer::text("test-mandate"),
-        Answer::choose(GENERIC),
+        Answer::choose(CUSTOM_SERVER),
         Answer::text("localhost"),
         Answer::text(&server.port.to_string()),
         Answer::choose(TLS_IMPLICIT),
