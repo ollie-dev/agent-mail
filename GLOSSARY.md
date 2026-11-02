@@ -5,8 +5,12 @@ A command-line tool and MCP server that lets AI agents work with email while the
 ## Language
 
 **Account**:
-A mail account agent-mail connects to: its IMAP/SMTP servers and login name.
+A mail account agent-mail connects to: its IMAP server and login name.
 _Avoid_: Mailbox (that is a folder inside an Account), user, profile
+
+**Provider**:
+A mail service whose known IMAP settings agent-mail offers when an Account is added.
+_Avoid_: Preset, host, mail service
 
 **Credential**:
 The secret that unlocks an Account, such as a password or app password.
