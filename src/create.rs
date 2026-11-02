@@ -72,13 +72,6 @@ pub const EXPORT_PATH: &str = "Export file path:";
 /// Shown whenever the flow ends without storing a Mandate.
 pub const NOTHING_STORED: &str = "Nothing was stored.";
 
-const GMAIL_HOST: &str = "imap.gmail.com";
-#[expect(
-    dead_code,
-    reason = "kept with the Gmail-only host warning until the warning covers every Provider"
-)]
-const GMAIL_PORT: u16 = 993;
-
 /// Runs the guided setup and stores the Mandate. With `from`, the Mandate
 /// file pre-fills the choices; it is read only after the refusal checks and
 /// before any prompt.
@@ -555,11 +548,14 @@ fn add_account(
     };
     let shown = escape_controls(&login);
     let server = format!("{}:{port}", escape_controls(&host));
-    if looks_like_gmail(&login) && !host.eq_ignore_ascii_case(GMAIL_HOST) {
+    if let Some((expected, expected_host)) = provider::expected_for_login(&login)
+        && !host.eq_ignore_ascii_case(expected_host)
+    {
         terminal.message(&format!(
-            "Warning: {shown} looks like a Gmail address, but the server is {server}, not \
-             {GMAIL_HOST}. The credential you type next goes to {server}; check the host \
-             before typing it."
+            "Warning: {shown} looks like a {} address, but the server is {server}, not \
+             {expected_host}. The credential you type next goes to {server}; check the host \
+             before typing it.",
+            expected.name
         ));
     }
     loop {
@@ -626,12 +622,6 @@ fn ask_provider(terminal: &dyn Terminal) -> Result<Option<ChosenProvider>, CoreE
             terminal.message(reason);
         }
     }
-}
-
-/// Whether `login` is a Gmail address (`@gmail.com` or `@googlemail.com`).
-fn looks_like_gmail(login: &str) -> bool {
-    let lower = login.trim().to_ascii_lowercase();
-    lower.ends_with("@gmail.com") || lower.ends_with("@googlemail.com")
 }
 
 fn failure_reason(error: &ImapError) -> String {
@@ -809,14 +799,6 @@ mod tests {
         assert!(text.contains("evil\\u{a}name"));
         assert!(text.contains("Evil\\u{d}\\u{a}\\u{1b}[31mRed"));
         assert!(text.contains("agent@example.test  localhost:993  TLS implicit"));
-    }
-
-    #[test]
-    fn gmail_addresses_are_recognised() {
-        assert!(looks_like_gmail("Someone@GMail.com"));
-        assert!(looks_like_gmail("someone@googlemail.com"));
-        assert!(!looks_like_gmail("agent@example.test"));
-        assert!(!looks_like_gmail("someone@gmail.com.evil.test"));
     }
 
     #[test]
