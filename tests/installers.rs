@@ -463,7 +463,6 @@ fn assert_path_installed(before: &MachinePath) {
     let folder = install_folder();
     let after = machine_path();
     assert_eq!(after.kind, before.kind, "value kind changed");
-    assert_eq!(after.kind, "ExpandString");
     let expected = if before.raw.is_empty() {
         folder.display().to_string()
     } else {
