@@ -31,7 +31,7 @@ flowchart LR
     Human(["Human"])
     subgraph User["User session, medium integrity: the user's programs"]
         Agent["Agent: Claude Code, Codex, Copilot"]
-        Config["Host config file with the Agent Token, plain text"]
+        Config["Agent App config file with the Agent Token, plain text"]
         Client["agent-mail client: CLI or MCP server"]
     end
     subgraph Elevated["User session, high integrity: after a UAC prompt"]
@@ -161,7 +161,7 @@ The elevated terminal keeps the Credential safe while it is typed, and the UAC p
 ## Not protected against
 
 - An administrator: they can run code as the Broker's account, read its memory and stores, or install another binary, so they are out of scope. An Agent that runs elevated is an administrator too.
-- Anyone holding the Agent Token from the owner's account: a token in a host config file is plain text, readable by every program of the same user, other Agents included. Whoever presents it can do what its Mandate grants.
+- Anyone holding the Agent Token from the owner's account: a token in an Agent App's config file is plain text, readable by every program of the same user, other Agents included. Whoever presents it can do what its Mandate grants.
 - Deletion of a Mandate by a program of its owner; [ADR-0003](../adr/0003-immutable-mandates.md) accepts it.
 - A stopped Broker: the clients then fail with `broker_unavailable`, and nothing works until it runs again.
 - Anything the mail provider sees or allows under the granted operations.

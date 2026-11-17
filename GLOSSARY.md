@@ -20,6 +20,10 @@ _Avoid_: Login, secret, key
 A caller of agent-mail, such as a Claude Code, Codex or Copilot session; it is known only by the Agent Tokens it presents.
 _Avoid_: Client, user, bot
 
+**Agent App**:
+The application an Agent runs in, such as Claude Code, Claude Desktop or Codex; it starts agent-mail and presents the Agent Tokens from its configuration.
+_Avoid_: Host, client, harness
+
 **Mandate**:
 A sealed, unchangeable authority over one or more Accounts: their Credentials, a Policy and the hash of one Agent Token. Changing anything means creating a new Mandate; an Agent may hold several.
 _Avoid_: Profile, config, vault, setup

@@ -125,7 +125,7 @@ It asks for a name, then for each account its server, login and Credential (type
 
 At the end it stores the Mandate, in the Keychain on macOS or with the Broker on Windows, and prints its Agent Token.
 
-The token is shown once and never stored in readable form: copy it into the Agent's host now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
+The token is shown once and never stored in readable form: copy it into the Agent App's configuration now (see [Agent Tokens in Claude Code and Claude Desktop](#agent-tokens-in-claude-code-and-claude-desktop)). Lost it? Create a new Mandate.
 
 On Windows, run `mandate create` in an elevated terminal (Run as administrator); otherwise it fails with `elevation_required` and stores nothing. An Agent cannot click the UAC prompt, and your other programs cannot read the elevated window while you type a Credential.
 
@@ -197,7 +197,7 @@ The Keychain prompts once after each agent-mail update; allow it. A Keychain pro
 
 **Administrators.** On both platforms, an administrator is out of scope: someone with administrator or root rights can run code as the Broker's account or as root and read everything.
 
-**Agent Tokens.** A token in a host config file, such as `.claude/settings.local.json` or `claude_desktop_config.json`, is plain text. Any program running as the same user can read it, including other Agents. Whoever holds an Agent Token can do what its Mandate grants, and no more.
+**Agent Tokens.** A token in an Agent App's config file, such as `.claude/settings.local.json` or `claude_desktop_config.json`, is plain text. Any program running as the same user can read it, including other Agents. Whoever holds an Agent Token can do what its Mandate grants, and no more.
 
 So keep Grants narrow, give each project its own Mandate, and delete a Mandate whose token may have leaked. On macOS the audit log can also be read or changed by any program running as you; on Windows only the Broker can write it.
 
@@ -398,7 +398,7 @@ Drafts cannot be edited, replaced or deleted with agent-mail: there is no comman
 
 ## MCP server
 
-`agent-mail mcp` runs agent-mail as an MCP server over stdio, so a host app
+`agent-mail mcp` runs agent-mail as an MCP server over stdio, so an Agent App
 (Claude Desktop, Cowork or Claude Code) can start it and the agent calls its
 commands as MCP tools. The agent token comes from the server's environment.
 
@@ -448,7 +448,7 @@ command, with the same audit log entry. An agent starts with `whoami`, then
 - Without a token, a call with such arguments fails with `missing_token`,
   whose message also names the argument mistake.
 - The token comes only from the server's environment (`AGENT_MAIL_TOKEN`,
-  read once when the host starts the server; restart it for a new token).
+  read once when the Agent App starts the server; restart it for a new token).
   No tool argument or request field can supply or override it.
 - Mandate management is CLI-only: no tool creates, lists or deletes
   Mandates. Run `agent-mail mandate` in your own terminal for that.

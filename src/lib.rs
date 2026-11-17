@@ -189,7 +189,7 @@ pub enum CliCommand {
         #[command(flatten)]
         output: TextOutput,
     },
-    /// Run as an MCP server over stdio for a host app
+    /// Run as an MCP server over stdio for an Agent App
     ///
     /// For Claude Desktop, Cowork, Claude Code or another MCP host. The host
     /// starts `agent-mail mcp` with AGENT_MAIL_TOKEN (one or more

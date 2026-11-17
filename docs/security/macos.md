@@ -1,6 +1,6 @@
 # Security concept: macOS
 
-On macOS there is no background service ([ADR-0002](../adr/0002-no-background-service.md)). Every CLI call and every MCP server runs agent-mail in a process the Agent's host started, and that process enforces the Policy itself.
+On macOS there is no background service ([ADR-0002](../adr/0002-no-background-service.md)). Every CLI call and every MCP server runs agent-mail in a process the Agent App started, and that process enforces the Policy itself.
 
 What keeps a hijacked Agent away from the Credential is the Keychain: its items trust only the agent-mail binary, and the binary refuses to touch them unless it runs with the hardened runtime. See the [overview](README.md) for what macOS and Windows share.
 
@@ -29,7 +29,7 @@ flowchart LR
     Human(["Human, at the terminal"])
     subgraph User["macOS user session: Agent and agent-mail run as the same user"]
         Agent["Agent: Claude Code, Codex, Copilot"]
-        Config["Host config file with the Agent Token, plain text"]
+        Config["Agent App config file with the Agent Token, plain text"]
         Log["audit.log, writable by the user"]
         subgraph Process["agent-mail process: signed, hardened runtime"]
             Core["Core: open token, select Mandate, check Policy"]
@@ -141,7 +141,7 @@ An Agent can run the same binary, but it cannot mint a broader Mandate: it does 
 
 - An administrator or root: they can read process memory and change the system, so they are out of scope.
 - A human who allows an unexpected Keychain prompt: that can hand a Credential to another program.
-- Anyone holding the Agent Token: a token in a host config file is plain text, readable by every program of the same user, other Agents included. Whoever presents it can do what its Mandate grants.
+- Anyone holding the Agent Token: a token in an Agent App's config file is plain text, readable by every program of the same user, other Agents included. Whoever presents it can do what its Mandate grants.
 - Deletion of a Mandate by a program of the same user; ADR-0003 accepts it.
 - Changes to the audit log: it is written by agent-mail but owned by the user, so any program of the same user can read or change it.
 - A replaced binary in `~/.local/bin`: the Keychain then prompts instead of serving it, so the defence is denying that prompt.

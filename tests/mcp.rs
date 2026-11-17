@@ -1030,7 +1030,7 @@ fn ac5_mcp_help_says_mandates_are_not_managed_over_mcp() {
     assert_eq!(out.code, 0, "{out:?}");
     let help = out.stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("Run as an MCP server over stdio for a host app"),
+        help.contains("Run as an MCP server over stdio for an Agent App"),
         "{help}"
     );
     assert!(

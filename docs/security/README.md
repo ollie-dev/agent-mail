@@ -53,7 +53,7 @@ A second HKDF key from the token is the record's lookup key in the store, so the
 ## Not protected against on either platform
 
 - An administrator or root (see above).
-- Anyone holding an Agent Token: they can do what its Mandate grants, and no more. A token in a host config file, such as `.claude/settings.local.json`, is plain text readable by every program of that user, other Agents included.
+- Anyone holding an Agent Token: they can do what its Mandate grants, and no more. A token in an Agent App's config file, such as `.claude/settings.local.json`, is plain text readable by every program of that user, other Agents included.
 - Deletion of a Mandate by a program of the same user.
 - Anything the mail provider sees or allows: a Grant to `read` lets the Agent read those messages, whatever they say.
 
