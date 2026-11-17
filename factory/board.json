@@ -774,6 +774,25 @@
       "reason": "",
       "updated": "2026-11-02T13:00:48Z",
       "builder": "a86f36c8d1b1820a5"
+    },
+    {
+      "id": "034-machine-port",
+      "title": "Machine port on Context",
+      "feature": "Setup wizard ticket 01: `Machine` port on `Context` (.scratch/setup-wizard/issues/01-machine-port.md, spec .scratch/setup-wizard/spec.md)",
+      "branch": "factory/034-machine-port",
+      "stage": "merged",
+      "round": 1,
+      "reviews": {
+        "security": "PASS",
+        "ux": "PASS",
+        "ui": "PASS",
+        "code": "PASS"
+      },
+      "history": [],
+      "nits": [],
+      "reason": "",
+      "updated": "2026-11-17T17:25:33Z",
+      "builder": "ac550cd9a4fc9cd17"
     }
   ],
   "updated": "2026-11-02T11:12:10Z"

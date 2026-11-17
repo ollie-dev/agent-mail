@@ -36,7 +36,7 @@
 - [x] Provider list ticket 01: Provider list and searchable picker in `mandate create` (.scratch/provider-list/issues/01-provider-list-and-picker.md, spec .scratch/provider-list/spec.md) → 031-provider-list-picker
 - [x] Provider list ticket 02: Unsupported Providers in the picker (.scratch/provider-list/issues/02-unsupported-providers.md, spec .scratch/provider-list/spec.md) → 032-unsupported-providers
 - [x] Provider list ticket 03: Host warning for every Provider (.scratch/provider-list/issues/03-host-warning.md, spec .scratch/provider-list/spec.md) → 033-host-warning
-- [ ] Setup wizard ticket 01: `Machine` port on `Context` (.scratch/setup-wizard/issues/01-machine-port.md, spec .scratch/setup-wizard/spec.md)
+- [x] Setup wizard ticket 01: `Machine` port on `Context` (.scratch/setup-wizard/issues/01-machine-port.md, spec .scratch/setup-wizard/spec.md) → 034-machine-port
 - [ ] Setup wizard ticket 02: `agent-mail setup` tracer bullet: Mandate step, "I'll configure it myself", final check (.scratch/setup-wizard/issues/02-setup-tracer.md, spec .scratch/setup-wizard/spec.md)
 - [ ] Setup wizard ticket 03: Claude Code destination: write the token (.scratch/setup-wizard/issues/03-claude-code-token.md, spec .scratch/setup-wizard/spec.md)
 - [ ] Setup wizard ticket 04: Claude Code destination: the plugin (.scratch/setup-wizard/issues/04-claude-code-plugin.md, spec .scratch/setup-wizard/spec.md)

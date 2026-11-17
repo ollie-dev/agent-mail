@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `Context` carries a `Machine`; `Context::new` uses the platform implementation, and a builder method swaps it like `with_terminal`
 - [ ] The platform implementation takes the home folder from the user database, not from `$HOME` (the audit log's rule), and the Windows application-data folder from the known-folder API
