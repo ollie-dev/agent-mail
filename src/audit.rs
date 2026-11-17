@@ -428,14 +428,38 @@ fn program_data() -> Option<PathBuf> {
 /// The known folder `id` from `SHGetKnownFolderPath`, never from an
 /// environment variable, if it exists and is absolute. Shared with
 /// [`crate::machine`].
+///
+/// The call gets this process's own token: Windows stores folders such as
+/// Roaming AppData as `%USERPROFILE%\...`, and without a token expands
+/// that from the process environment, so a changed `USERPROFILE` would
+/// redirect or lose the folder. With a token it expands from the user's
+/// profile.
 #[cfg(windows)]
 pub(crate) fn known_folder_path(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{TOKEN_IMPERSONATE, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
 
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo handle needs no closing; `token` receives a handle,
+    // with the rights SHGetKnownFolderPath requires of a token.
+    let opened = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_IMPERSONATE,
+            &mut token,
+        )
+    };
+    if opened == 0 {
+        return None;
+    }
     let mut raw: *mut u16 = std::ptr::null_mut();
-    // SAFETY: valid pointers; the returned string is freed by
-    // `known_folder`, as the API requires even on failure.
-    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw) };
+    // SAFETY: valid pointers and an open token; the returned string is freed
+    // by `known_folder`, as the API requires even on failure.
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, token, &mut raw) };
+    // SAFETY: `token` was opened above and is closed once.
+    unsafe { CloseHandle(token) };
     // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
     unsafe { known_folder(hr, raw) }
 }
