@@ -12,6 +12,7 @@ pub mod draft;
 pub mod export;
 pub mod flag;
 pub mod imap;
+pub mod machine;
 pub mod mandate;
 pub mod mcp;
 pub mod move_message;

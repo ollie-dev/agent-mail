@@ -377,6 +377,7 @@ fn context_for<'a>(context: &Context<'a>, caller: &Caller) -> Context<'a> {
         store: context.store,
         network: context.network.clone(),
         terminal: &NoTerminal,
+        machine: context.machine,
         audit: context.audit.clone(),
         owner: None,
         broker: None,

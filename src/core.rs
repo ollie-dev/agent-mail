@@ -14,6 +14,7 @@ use crate::audit::{self, AuditLog, Decision};
 use crate::draft::{self, DraftResult};
 use crate::flag::{self, Flag, FlagAction, FlagResult};
 use crate::imap::{self, ImapError, Network};
+use crate::machine::{Machine, PlatformMachine};
 use crate::mandate::{Account, Grant, Mandate, Operation};
 use crate::move_message::MoveResult;
 use crate::read::{self, ReadResult};
@@ -36,11 +37,13 @@ pub const MAX_TOKENS: usize = 8;
 pub const RELEASES_URL: &str = "https://github.com/ollie-dev/agent-mail/releases";
 
 /// What the core runs against: the Mandate store, the network, the
-/// Terminal (used only by `mandate create`) and the audit log.
+/// Terminal (used only by `mandate create`), the Machine and the audit log.
 pub struct Context<'a> {
     pub(crate) store: &'a dyn MandateStore,
     pub(crate) network: Network,
     pub(crate) terminal: &'a dyn Terminal,
+    /// The operating system as the setup wizard sees it.
+    pub(crate) machine: &'a dyn Machine,
     pub(crate) audit: AuditLog,
     /// The Broker's pipe client SID (ADR-0004). When set, only Mandates
     /// whose authenticated listing names this owner open or are listed or
@@ -54,12 +57,14 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     /// A context using `store`, the operating system's certificate verifier,
-    /// no terminal and the audit log at the platform's per-user location.
+    /// no terminal, the platform Machine and the audit log at the platform's
+    /// per-user location.
     pub fn new(store: &'a dyn MandateStore) -> Self {
         Self {
             store,
             network: Network::platform(),
             terminal: &NoTerminal,
+            machine: &PlatformMachine,
             audit: AuditLog::platform(),
             owner: None,
             broker: None,
@@ -85,6 +90,16 @@ impl<'a> Context<'a> {
     /// The same context, talking to the human through `terminal`.
     pub fn with_terminal(self, terminal: &'a dyn Terminal) -> Self {
         Self { terminal, ..self }
+    }
+
+    /// The same context, seeing the operating system through `machine`.
+    pub fn with_machine(self, machine: &'a dyn Machine) -> Self {
+        Self { machine, ..self }
+    }
+
+    /// The Machine this context runs against.
+    pub fn machine(&self) -> &'a dyn Machine {
+        self.machine
     }
 
     /// The same context, sending every command to the Broker through
@@ -1281,6 +1296,7 @@ pub fn execute_reporting(
         store: context.store,
         network: context.network.clone().with_proxy_from_env(env),
         terminal: context.terminal,
+        machine: context.machine,
         audit: context.audit.clone(),
         owner: context.owner.clone(),
         broker: context.broker,
