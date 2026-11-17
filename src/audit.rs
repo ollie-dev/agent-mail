@@ -394,7 +394,9 @@ pub fn platform_path() -> Option<PathBuf> {
     None
 }
 
-/// The Local AppData known folder (`FOLDERID_LocalAppData`).
+/// The Local AppData known folder (`FOLDERID_LocalAppData`). Spelled out
+/// rather than through [`known_folder_path`], so a source check can see the
+/// audit log's rule.
 #[cfg(windows)]
 fn local_app_data() -> Option<PathBuf> {
     use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
@@ -412,12 +414,20 @@ fn local_app_data() -> Option<PathBuf> {
 /// audit log.
 #[cfg(windows)]
 fn program_data() -> Option<PathBuf> {
-    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+    known_folder_path(&windows_sys::Win32::UI::Shell::FOLDERID_ProgramData)
+}
+
+/// The known folder `id` from `SHGetKnownFolderPath`, never from an
+/// environment variable, if it exists and is absolute. Shared with
+/// [`crate::machine`].
+#[cfg(windows)]
+pub(crate) fn known_folder_path(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
 
     let mut raw: *mut u16 = std::ptr::null_mut();
-    // SAFETY: as in `local_app_data`.
-    let hr =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw) };
+    // SAFETY: valid pointers; the returned string is freed by
+    // `known_folder`, as the API requires even on failure.
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw) };
     // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
     unsafe { known_folder(hr, raw) }
 }
@@ -449,9 +459,10 @@ unsafe fn known_folder(hr: i32, raw: *mut u16) -> Option<PathBuf> {
     path.filter(|p| p.is_absolute())
 }
 
-/// The real user's home directory from the user database (`getpwuid_r`).
+/// The real user's home directory from the user database (`getpwuid_r`),
+/// never from `$HOME`. Shared with [`crate::machine`].
 #[cfg(unix)]
-fn home_from_user_database() -> Option<PathBuf> {
+pub(crate) fn home_from_user_database() -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
 

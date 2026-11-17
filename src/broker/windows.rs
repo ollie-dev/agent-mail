@@ -64,6 +64,7 @@ use super::{ADMINISTRATORS_SID, Caller, PIPE_NAME, SERVICE_NAME, SerializedStore
 use crate::audit::{AuditLog, AuditUnavailable};
 use crate::core::{Context, CoreError};
 use crate::imap::Network;
+use crate::machine::PlatformMachine;
 use crate::store::{CredentialManagerStore, MandateStore};
 use crate::terminal::NoTerminal;
 
@@ -989,6 +990,7 @@ fn serve_client(
         store,
         network: network.clone(),
         terminal: &NoTerminal,
+        machine: &PlatformMachine,
         audit: audit.clone(),
         owner: None,
         broker: None,
