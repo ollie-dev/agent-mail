@@ -411,10 +411,18 @@ fn local_app_data() -> Option<PathBuf> {
 }
 
 /// The ProgramData known folder (`FOLDERID_ProgramData`), for the Broker's
-/// audit log.
+/// audit log. Spelled out rather than through [`known_folder_path`], so a
+/// source check can see the Broker log's rule.
 #[cfg(windows)]
 fn program_data() -> Option<PathBuf> {
-    known_folder_path(&windows_sys::Win32::UI::Shell::FOLDERID_ProgramData)
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+
+    let mut raw: *mut u16 = std::ptr::null_mut();
+    // SAFETY: as in `local_app_data`.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw) };
+    // SAFETY: `raw` is null or was allocated by SHGetKnownFolderPath.
+    unsafe { known_folder(hr, raw) }
 }
 
 /// The known folder `id` from `SHGetKnownFolderPath`, never from an
