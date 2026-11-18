@@ -498,14 +498,22 @@ impl GitRisk {
 }
 
 /// Whether git could pick up the settings file in `folder`. Outside any
-/// repository (no `.git` entry in the folder or an ancestor) git is not
-/// run. Inside one, the file must be ignored and untracked; any git
+/// repository (no `.git` entry in the folder or an ancestor, as typed or
+/// with symlinks resolved) git is not run. Inside one, the file must be ignored and untracked; any git
 /// failure counts as a risk.
 fn git_risk(machine: &dyn Machine, folder: &Path) -> Option<GitRisk> {
-    let in_repository = folder
-        .ancestors()
-        .any(|dir| dir.join(".git").symlink_metadata().is_ok());
-    if !in_repository {
+    // `ancestors` is lexical: a typed path through a symlink or junction
+    // can name a folder inside a repository with no `.git` on its own
+    // ancestors, so the resolved folder is walked too. A folder that
+    // cannot be resolved counts as a risk.
+    let has_git = |path: &Path| {
+        path.ancestors()
+            .any(|dir| dir.join(".git").symlink_metadata().is_ok())
+    };
+    let Ok(resolved) = std::fs::canonicalize(folder) else {
+        return Some(GitRisk::GitFailed);
+    };
+    if !has_git(folder) && !has_git(&resolved) {
         return None;
     }
     let git = Path::new("git");

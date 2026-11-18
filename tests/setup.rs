@@ -2014,3 +2014,34 @@ fn cc_ac10_one_next_step_per_written_destination_in_order() {
         assert!(line.chars().count() <= 300, "{line}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn cc_ac2_folder_reached_through_a_symlink_into_a_repository_is_checked() {
+    let server = FakeImap::start(Mode::Implicit);
+    let machine = ScriptedMachine::new(vec![Reply::exit(1, "", "")]);
+    let repo = machine.root().join("repo");
+    let sub = repo.join("sub");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    let link = machine.root().join("link");
+    std::os::unix::fs::symlink(&sub, &link).unwrap();
+    let w = setup_on(
+        machine,
+        claude(vec![Answer::text(&link.to_string_lossy()), no()]),
+        &InMemoryStore::new(),
+        &server,
+    );
+    assert_eq!(w.output.code, 0, "{:?}", w.output);
+    assert_eq!(
+        w.texts()
+            .iter()
+            .filter(|t| t.contains("not ignored by git"))
+            .count(),
+        1
+    );
+    assert_eq!(w.machine.commands(), [git(&CHECK_IGNORE, &link)]);
+    assert!(!sub.join(".claude").exists());
+    assert_token_once(&w);
+    assert_eq!(w.texts().last().unwrap(), NEXT_CONFIGURE_MYSELF);
+}
