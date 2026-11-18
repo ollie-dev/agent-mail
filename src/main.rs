@@ -23,7 +23,16 @@ fn main() {
         Some(connector) => context.with_broker(connector.as_ref()),
         None => context,
     };
-    let output = match agent_mail::parse(std::env::args_os()) {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // A bare call follows `agent_mail::run`: the setup wizard on a human's
+    // terminal before any Mandate exists, help otherwise.
+    if args.len() == 1 {
+        let output = agent_mail::run(args, &env, &context);
+        let _ = std::io::stdout().write_all(output.stdout.as_bytes());
+        let _ = std::io::stderr().write_all(output.stderr.as_bytes());
+        std::process::exit(output.code);
+    }
+    let output = match agent_mail::parse(args) {
         Err(output) => output,
         Ok(Cli {
             command: CliCommand::Mcp,

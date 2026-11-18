@@ -22,6 +22,7 @@ pub mod read;
 pub mod seal;
 pub mod search;
 pub mod selfcheck;
+pub mod setup;
 pub mod store;
 pub mod terminal;
 pub mod utf7;
@@ -208,6 +209,11 @@ pub enum CliCommand {
     /// Run as the Windows Broker service; started only by the service control manager
     #[command(hide = true)]
     Broker,
+    /// Set up agent-mail: create a Mandate and connect it to an Agent App
+    Setup {
+        #[command(flatten)]
+        output: TextOutput,
+    },
     /// Create and manage Mandates (create is run by the human; agents may list and delete)
     Mandate {
         /// Print human-readable text instead of JSON
@@ -528,9 +534,43 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    // A bare call starts the setup wizard for a human with no Mandate yet;
+    // otherwise it prints help, as clap does.
+    if args.len() == 1 && crate::setup::starts_on_bare_call(env, context) {
+        return setup_command(env, context, false);
+    }
     match parse(args) {
         Ok(cli) => run_cli(cli, env, context),
         Err(output) => output,
+    }
+}
+
+/// Runs `agent-mail setup`. On the Broker route it refuses before any
+/// prompt or request: the wizard would use the local store.
+fn setup_command(env: &HashMap<String, String>, context: &Context<'_>, text: bool) -> RunOutput {
+    let result = if context.broker.is_some() {
+        Err(CoreError::BrokerUnsupported)
+    } else {
+        crate::setup::run(env, context)
+    };
+    match result {
+        Ok(()) => RunOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => {
+            let mut body = error.body();
+            if let Some(message) = crate::setup::error_message(&error) {
+                body.message = message.to_string();
+            }
+            RunOutput {
+                stdout: String::new(),
+                stderr: render_body(&body, text),
+                code: 1,
+            }
+        }
     }
 }
 
@@ -651,6 +691,7 @@ pub fn run_cli(cli: Cli, env: &HashMap<String, String>, context: &Context<'_>) -
             };
         }
         CliCommand::Broker => return crate::broker::run_service(text),
+        CliCommand::Setup { output } => return setup_command(env, context, text || output.text),
         CliCommand::Audit { output } => return audit_command(text || output.text, context),
         CliCommand::Mandate {
             text: mandate_text,
@@ -972,7 +1013,7 @@ pub(crate) fn render_outcome(outcome: &Outcome, text: bool) -> String {
     }
 }
 
-fn render_whoami(result: &WhoamiResult) -> String {
+pub(crate) fn render_whoami(result: &WhoamiResult) -> String {
     let mut out = String::new();
     for m in &result.mandates {
         out.push_str(&format!(
@@ -1127,7 +1168,12 @@ fn render_listing(listing: &MandateListing) -> String {
 }
 
 pub(crate) fn render_error(error: &CoreError, text: bool) -> String {
-    let body = error.body();
+    render_body(&error.body(), text)
+}
+
+/// An error body as the one stderr line: JSON, or `error: <code>: ...`
+/// with `text`.
+fn render_body(body: &crate::core::ErrorBody, text: bool) -> String {
     if text {
         // The message may echo untrusted input, such as a Mandate ID.
         return format!("error: {}: {}\n", body.code, escape_controls(&body.message));
