@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] The folder prompt defaults to the current folder and accepts another path; a folder that does not exist is refused with a short message and asked again
 - [ ] Git-risk check before anything is written: risk when the folder is in a git repository and `git check-ignore` does not report `.claude/settings.local.json` as ignored, or the file is tracked, or there is a `.git` but `git` cannot be run. Any risk prints a warning naming the reason and falls back to "configure it myself" for this destination; nothing is written there
