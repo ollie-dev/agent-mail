@@ -72,6 +72,17 @@ pub const EXPORT_PATH: &str = "Export file path:";
 /// Shown whenever the flow ends without storing a Mandate.
 pub const NOTHING_STORED: &str = "Nothing was stored.";
 
+/// A Mandate the guided flow sealed and stored, with its Agent Token not
+/// yet shown to anyone.
+pub(crate) struct Stored {
+    /// The stored Mandate, Credentials included; never shown.
+    pub(crate) mandate: Mandate,
+    /// Its new Agent Token.
+    pub(crate) token: AgentToken,
+    /// The store key its record is filed under, to take it back out.
+    pub(crate) key: Vec<u8>,
+}
+
 /// Runs the guided setup and stores the Mandate. With `from`, the Mandate
 /// file pre-fills the choices; it is read only after the refusal checks and
 /// before any prompt.
@@ -80,6 +91,32 @@ pub(crate) fn run(
     from: Option<&Path>,
     context: &Context<'_>,
 ) -> Result<(), CoreError> {
+    let terminal = context.terminal;
+    let stored = create_and_store(env, from, context)?;
+    let reveal = Zeroizing::new(format!(
+        "{}\n\n\
+         Agent Token, shown only this once (it cannot be shown again):\n\n    {}\n\n\
+         Give it to the Agent in the AGENT_MAIL_TOKEN environment variable.",
+        stored_line(&stored.mandate),
+        stored.token.expose()
+    ));
+    if terminal.reveal(&reveal).is_err() {
+        take_back(context, &stored.key);
+        return Err(CoreError::Aborted);
+    }
+    offer_export(terminal, &stored.mandate);
+    Ok(())
+}
+
+/// The refusal checks, the guided flow, then sealing and storing the new
+/// Mandate under a fresh Agent Token. Shows no token: the caller reveals
+/// it, or calls [`take_back`] if it cannot. On any error nothing is
+/// stored and "Nothing was stored." has been shown.
+pub(crate) fn create_and_store(
+    env: &HashMap<String, String>,
+    from: Option<&Path>,
+    context: &Context<'_>,
+) -> Result<Stored, CoreError> {
     let terminal = context.terminal;
     if !terminal.is_interactive() {
         return Err(CoreError::InteractiveTerminalRequired);
@@ -112,24 +149,29 @@ pub(crate) fn run(
         ));
         return Err(error.into());
     }
-    let reveal = Zeroizing::new(format!(
-        "Mandate \"{}\" (ID {}) is sealed and stored.\n\n\
-         Agent Token, shown only this once (it cannot be shown again):\n\n    {}\n\n\
-         Give it to the Agent in the AGENT_MAIL_TOKEN environment variable.",
+    Ok(Stored {
+        mandate,
+        token,
+        key: record.key,
+    })
+}
+
+/// The first line of the token reveal: which Mandate was stored.
+pub(crate) fn stored_line(mandate: &Mandate) -> String {
+    format!(
+        "Mandate \"{}\" (ID {}) is sealed and stored.",
         escape_controls(&mandate.name),
-        mandate.id,
-        token.expose()
+        mandate.id
+    )
+}
+
+/// Takes a stored Mandate whose token could not be shown back out of the
+/// store: a Mandate whose token nobody saw is unusable.
+pub(crate) fn take_back(context: &Context<'_>, key: &[u8]) {
+    let _ = context.store.delete(key);
+    context.terminal.message(&format!(
+        "The Agent Token could not be shown on the terminal. {NOTHING_STORED}"
     ));
-    if terminal.reveal(&reveal).is_err() {
-        // A Mandate whose token nobody saw is unusable: take it back out.
-        let _ = context.store.delete(&record.key);
-        terminal.message(&format!(
-            "The Agent Token could not be shown on the terminal. {NOTHING_STORED}"
-        ));
-        return Err(CoreError::Aborted);
-    }
-    offer_export(terminal, &mandate);
-    Ok(())
 }
 
 /// Runs the guided setup on the Broker route (Windows): the same refusals,
@@ -257,7 +299,7 @@ struct Created {
 
 /// Offers to save the stored Mandate's Accounts and Grants as TOML. The
 /// Mandate is already stored, so nothing here can fail the run.
-fn offer_export(terminal: &dyn Terminal, mandate: &Mandate) {
+pub(crate) fn offer_export(terminal: &dyn Terminal, mandate: &Mandate) {
     if !terminal.confirm(EXPORT_OFFER, false).unwrap_or(false) {
         return;
     }
