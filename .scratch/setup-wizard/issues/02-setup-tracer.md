@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `agent-mail setup` exists, with a one-line description in `--help`
 - [ ] A bare `agent-mail` starts the wizard only when stdin and stdout are terminals, no Agent-session indicator from the `mandate create` list is set and the store lists no Mandate; otherwise it prints help exactly as today (tests for each condition)
